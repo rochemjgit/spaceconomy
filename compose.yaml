@@ -1,0 +1,44 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: ${SPACECONOMY_POSTGRES_DB:-spaceconomy}
+      POSTGRES_USER: ${SPACECONOMY_POSTGRES_USER:-spaceconomy}
+      POSTGRES_PASSWORD: ${SPACECONOMY_POSTGRES_PASSWORD:-spaceconomy}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:8-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ./server
+    environment:
+      SPACECONOMY_DATABASE_URL: postgresql+asyncpg://${SPACECONOMY_POSTGRES_USER:-spaceconomy}:${SPACECONOMY_POSTGRES_PASSWORD:-spaceconomy}@postgres:5432/${SPACECONOMY_POSTGRES_DB:-spaceconomy}
+      SPACECONOMY_REDIS_URL: redis://redis:6379/0
+      SPACECONOMY_JWT_SECRET: ${SPACECONOMY_JWT_SECRET:-change-this-local-development-secret}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

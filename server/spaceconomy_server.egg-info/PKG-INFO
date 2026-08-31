@@ -1,0 +1,15 @@
+Metadata-Version: 2.4
+Name: spaceconomy-server
+Version: 0.1.0
+Summary: Authoritative realtime server for Spaceconomy
+Requires-Python: >=3.14
+Requires-Dist: fastapi>=0.128.0
+Requires-Dist: uvicorn[standard]>=0.40.0
+Requires-Dist: pydantic-settings>=2.12.0
+Requires-Dist: sqlalchemy[asyncio]>=2.0.45
+Requires-Dist: asyncpg>=0.31.0
+Requires-Dist: alembic>=1.17.0
+Requires-Dist: redis>=7.0.0
+Requires-Dist: argon2-cffi>=25.1.0
+Requires-Dist: pyjwt>=2.10.0
+Requires-Dist: msgpack>=1.1.0
