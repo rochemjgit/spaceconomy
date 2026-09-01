@@ -1,5 +1,5 @@
 import './style.css'
-import { createSystemScene } from './game/scene'
+import { createStationInteriorScene, createSystemScene } from './game/scene'
 
 const app = document.querySelector<HTMLDivElement>('#app')
 
@@ -13,7 +13,7 @@ app.innerHTML = `
     <div class="ship-reticle" aria-hidden="true"></div>
     <header class="topbar">
       <div class="brand"><span class="brand-mark">◈</span> SPACECONOMY</div>
-      <div class="status"><span class="status-dot"></span> LOCAL SYSTEM · PROTOTYPE</div>
+      <div id="system-status" class="status"><span class="status-dot"></span> LOCAL SYSTEM · PROTOTYPE</div>
     </header>
     <section class="hud hud-left" aria-label="Ship status">
       <p class="eyebrow">STARTER CORVETTE</p>
@@ -37,6 +37,14 @@ app.innerHTML = `
       </div>
       <div class="map-legend"><span class="legend-star">STAR</span><span class="legend-planet">WORLD</span><span class="legend-station">STATION</span><span class="legend-player">YOU</span></div>
     </section>
+    <section id="available-actions" class="available-actions" aria-label="Available actions" hidden>
+      <p class="eyebrow">AVAILABLE ACTIONS</p>
+      <button id="dock-action" type="button">DOCK AT KEPLER STATION</button>
+    </section>
+    <section id="docked-status" class="docked-status" aria-label="Station status" hidden>
+      <p class="eyebrow">KEPLER STATION</p>
+      <p>DOCKING BAY 04</p>
+    </section>
     <footer class="controls">WASD <span>thrust</span> · SPACE/C <span>up/down</span> · RIGHT HOLD <span>turn to cursor</span> · F <span>flight assist</span></footer>
   </main>
 `
@@ -52,6 +60,10 @@ const coordinateXDisplay = document.querySelector<HTMLElement>('#coordinate-x')
 const coordinateYDisplay = document.querySelector<HTMLElement>('#coordinate-y')
 const coordinateZDisplay = document.querySelector<HTMLElement>('#coordinate-z')
 const playerMapMarker = document.querySelector<HTMLElement>('#player-map-marker')
+const availableActions = document.querySelector<HTMLElement>('#available-actions')
+const dockAction = document.querySelector<HTMLButtonElement>('#dock-action')
+const dockedStatus = document.querySelector<HTMLElement>('#docked-status')
+const systemStatus = document.querySelector<HTMLElement>('#system-status')
 const systemMapRadius = 140_000
 
 function mapCoordinate(value: number): string {
@@ -59,7 +71,7 @@ function mapCoordinate(value: number): string {
   return `${Math.min(96, Math.max(4, percentage)).toFixed(2)}%`
 }
 
-const scene = createSystemScene(canvas, {
+let scene = createSystemScene(canvas, {
   onFlightUpdate(position, speed, flightAssistEnabled) {
     if (speedDisplay) speedDisplay.textContent = speed.toFixed(1)
     if (flightAssistDisplay) flightAssistDisplay.textContent = flightAssistEnabled ? 'ON' : 'OFF'
@@ -71,6 +83,18 @@ const scene = createSystemScene(canvas, {
       playerMapMarker.style.top = mapCoordinate(-position.z)
     }
   },
+  onDockingAvailabilityChange(isAvailable) {
+    if (availableActions) availableActions.hidden = !isAvailable
+  },
+})
+
+dockAction?.addEventListener('click', () => {
+  scene.dispose()
+  scene = createStationInteriorScene(canvas)
+  availableActions?.setAttribute('hidden', '')
+  dockedStatus?.removeAttribute('hidden')
+  systemStatus?.setAttribute('hidden', '')
+  document.querySelector('.game-shell')?.classList.add('is-docked')
 })
 
 if (import.meta.hot) {

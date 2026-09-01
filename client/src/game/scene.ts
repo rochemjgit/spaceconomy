@@ -19,6 +19,7 @@ export interface SceneController {
 
 export interface SceneOptions {
   onFlightUpdate: (position: Vector3, speed: number, flightAssistEnabled: boolean) => void
+  onDockingAvailabilityChange?: (isAvailable: boolean) => void
 }
 
 export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptions): SceneController {
@@ -81,6 +82,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   station.material = stationMaterial
 
   const stationShield = MeshBuilder.CreateSphere('station-safe-zone', { diameter: 819, segments: 32 }, scene)
+  const stationShieldRadius = 819 / 2
   stationShield.position = stationPosition
   const stationShieldMaterial = new StandardMaterial('station-safe-zone-material', scene)
   stationShieldMaterial.diffuseColor = new Color3(0.12, 0.7, 0.95)
@@ -166,6 +168,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   let steeringTargetYaw = 0
   let steeringTargetPitch = 0
   const turnSpeed = 2.8
+  let dockingAvailable = false
 
   const handleMouseDown = (event: PointerEvent) => {
     if (event.button !== 2) return
@@ -265,6 +268,11 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     strafeThrusterMaterials[1].emissiveColor.copyFromFloats(0, 0.85 * Number(pressedKeys.has('d')), Number(pressedKeys.has('d')))
     camera.target.copyFrom(ship.position)
     options.onFlightUpdate(ship.position, velocity.length(), flightAssistEnabled)
+    const isDockingAvailable = Vector3.Distance(ship.position, stationPosition) <= stationShieldRadius
+    if (isDockingAvailable !== dockingAvailable) {
+      dockingAvailable = isDockingAvailable
+      options.onDockingAvailabilityChange?.(dockingAvailable)
+    }
     scene.render()
   })
 
@@ -281,6 +289,77 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       window.removeEventListener('pointerup', handleMouseUp, true)
       canvas.removeEventListener('contextmenu', handleContextMenu)
       document.removeEventListener('pointerlockchange', handlePointerLockChange)
+      scene.dispose()
+      engine.dispose()
+    },
+  }
+}
+
+export function createStationInteriorScene(canvas: HTMLCanvasElement): SceneController {
+  const engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true })
+  const scene = new Scene(engine)
+  scene.clearColor.set(0.008, 0.012, 0.018, 1)
+
+  const camera = new ArcRotateCamera('station-interior-camera', -Math.PI / 2, Math.PI / 2.65, 29, new Vector3(0, 5, 2), scene)
+  camera.lowerRadiusLimit = 13
+  camera.upperRadiusLimit = 42
+  camera.wheelDeltaPercentage = 0.015
+  camera.attachControl(canvas, true)
+
+  const light = new HemisphericLight('station-ambient-light', new Vector3(0, 1, 0), scene)
+  light.intensity = 0.55
+  const glow = new GlowLayer('station-glow', scene)
+  glow.intensity = 0.65
+
+  const hullMaterial = new StandardMaterial('station-hull-material', scene)
+  hullMaterial.diffuseColor = new Color3(0.045, 0.075, 0.09)
+  hullMaterial.specularColor = new Color3(0.08, 0.16, 0.2)
+  const accentMaterial = new StandardMaterial('station-accent-material', scene)
+  accentMaterial.diffuseColor = new Color3(0.04, 0.35, 0.42)
+  accentMaterial.emissiveColor = new Color3(0, 0.17, 0.25)
+  const dockingLightMaterial = new StandardMaterial('station-docking-light-material', scene)
+  dockingLightMaterial.emissiveColor = new Color3(0.08, 0.95, 0.82)
+
+  const deck = MeshBuilder.CreateBox('station-deck', { width: 30, height: 1, depth: 42 }, scene)
+  deck.position.y = -0.5
+  deck.material = hullMaterial
+  const ceiling = MeshBuilder.CreateBox('station-ceiling', { width: 30, height: 1, depth: 42 }, scene)
+  ceiling.position.y = 13
+  ceiling.material = hullMaterial
+  for (const side of [-1, 1]) {
+    const wall = MeshBuilder.CreateBox('station-wall', { width: 1, height: 14, depth: 42 }, scene)
+    wall.position.set(side * 15, 6.5, 0)
+    wall.material = hullMaterial
+  }
+
+  for (const z of [-15, -5, 5, 15]) {
+    const bayLight = MeshBuilder.CreateBox('station-guide-light', { width: 0.35, height: 0.08, depth: 5 }, scene)
+    bayLight.position.set(-5.5, 0.05, z)
+    bayLight.material = dockingLightMaterial
+    const mirroredBayLight = bayLight.clone('station-guide-light-mirrored')
+    mirroredBayLight.position.x = 5.5
+  }
+  const landingPad = MeshBuilder.CreateCylinder('station-landing-pad', { diameter: 12, height: 0.3, tessellation: 32 }, scene)
+  landingPad.position.y = 0.16
+  landingPad.material = accentMaterial
+  const padCore = MeshBuilder.CreateCylinder('station-landing-pad-core', { diameter: 7, height: 0.34, tessellation: 32 }, scene)
+  padCore.position.y = 0.33
+  padCore.material = hullMaterial
+
+  const airlock = MeshBuilder.CreateBox('station-airlock', { width: 10, height: 10, depth: 1 }, scene)
+  airlock.position.set(0, 5, 20)
+  airlock.material = accentMaterial
+  const airlockFrame = MeshBuilder.CreateTorus('station-airlock-frame', { diameter: 11, thickness: 0.45, tessellation: 32 }, scene)
+  airlockFrame.position.set(0, 5, 19.4)
+  airlockFrame.rotation.x = Math.PI / 2
+  airlockFrame.material = dockingLightMaterial
+
+  engine.runRenderLoop(() => scene.render())
+  const resizeObserver = new ResizeObserver(() => engine.resize())
+  resizeObserver.observe(canvas)
+  return {
+    dispose() {
+      resizeObserver.disconnect()
       scene.dispose()
       engine.dispose()
     },
