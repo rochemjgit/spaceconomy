@@ -37,7 +37,7 @@ app.innerHTML = `
       </div>
       <div class="map-legend"><span class="legend-star">STAR</span><span class="legend-planet">WORLD</span><span class="legend-station">STATION</span><span class="legend-player">YOU</span></div>
     </section>
-    <footer class="controls">WASD <span>thrust</span> · SPACE/C <span>up/down</span> · RIGHT DRAG <span>steer ship</span> · F <span>flight assist</span></footer>
+    <footer class="controls">WASD <span>thrust</span> · SPACE/C <span>up/down</span> · RIGHT HOLD <span>turn to cursor</span> · F <span>flight assist</span></footer>
   </main>
 `
 

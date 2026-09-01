@@ -26,8 +26,12 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   const scene = new Scene(engine)
   scene.clearColor.set(0.008, 0.016, 0.043, 1)
   const planetPosition = new Vector3(119_678, 0, 0)
-  const stationPosition = planetPosition.add(new Vector3(250, 50, -250))
-  const launchPosition = stationPosition.add(new Vector3(0, 0, 165))
+  const stationPosition = planetPosition.add(new Vector3(3_400, 480, -3_400))
+  const launchPosition = stationPosition.add(new Vector3(0, 0, 709.5))
+  const renderUnitsPerMeter = 3 / 10
+  const astronomicalVisualCompression = 300_000
+  const physicalStarDiameterUnits = 1_393_000_000 * renderUnitsPerMeter
+  const starVisualDiameter = physicalStarDiameterUnits / astronomicalVisualCompression
 
   const camera = new ArcRotateCamera(
     'isometric-camera',
@@ -40,6 +44,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   camera.lowerRadiusLimit = 12
   camera.upperRadiusLimit = 5_000
   camera.wheelDeltaPercentage = 0.015
+  camera.maxZ = 1_000_000
   camera.attachControl(canvas, true)
   const pointerInput = camera.inputs.attached.pointers as ArcRotateCameraPointersInput
   pointerInput.buttons = [0]
@@ -52,25 +57,48 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   const glow = new GlowLayer('star-glow', scene)
   glow.intensity = 0.75
 
-  const star = MeshBuilder.CreateSphere('primary-star', { diameter: 1_393, segments: 24 }, scene)
+  const star = MeshBuilder.CreateSphere('primary-star', { diameter: starVisualDiameter, segments: 24 }, scene)
   star.position = Vector3.Zero()
   const starMaterial = new StandardMaterial('primary-star-material', scene)
   starMaterial.emissiveColor = new Color3(1, 0.45, 0.08)
   starMaterial.diffuseColor = new Color3(0.7, 0.16, 0.02)
   star.material = starMaterial
+  const starVisualScaleDistance = 60_000
+  const minimumStarVisualScale = 0.18
 
-  const planet = MeshBuilder.CreateSphere('starter-world', { diameter: 55, segments: 20 }, scene)
+  const planet = MeshBuilder.CreateSphere('starter-world', { diameter: 6_000, segments: 32 }, scene)
   planet.position = planetPosition
   const planetMaterial = new StandardMaterial('starter-world-material', scene)
   planetMaterial.diffuseColor = new Color3(0.12, 0.34, 0.58)
   planetMaterial.specularColor = new Color3(0.08, 0.12, 0.2)
   planet.material = planetMaterial
 
-  const station = MeshBuilder.CreateBox('station-marker', { width: 130, height: 50, depth: 260 }, scene)
-  station.position = stationPosition
   const stationMaterial = new StandardMaterial('station-marker-material', scene)
-  stationMaterial.emissiveColor = new Color3(0.08, 0.75, 0.92)
+  stationMaterial.diffuseColor = new Color3(0.16, 0.4, 0.5)
+  stationMaterial.emissiveColor = new Color3(0.02, 0.16, 0.22)
+  const station = MeshBuilder.CreateTorus('station-marker', { diameter: 337.5, thickness: 24, tessellation: 32 }, scene)
+  station.position = stationPosition
   station.material = stationMaterial
+
+  const stationShield = MeshBuilder.CreateSphere('station-safe-zone', { diameter: 819, segments: 32 }, scene)
+  stationShield.position = stationPosition
+  const stationShieldMaterial = new StandardMaterial('station-safe-zone-material', scene)
+  stationShieldMaterial.diffuseColor = new Color3(0.12, 0.7, 0.95)
+  stationShieldMaterial.emissiveColor = new Color3(0.01, 0.08, 0.14)
+  stationShieldMaterial.alpha = 0.16
+  stationShieldMaterial.backFaceCulling = false
+  stationShield.material = stationShieldMaterial
+
+  const stationHub = MeshBuilder.CreateCylinder('station-hub', { height: 36, diameter: 24, tessellation: 16 }, scene)
+  stationHub.position = stationPosition
+  stationHub.material = stationMaterial
+
+  for (const angle of [0, Math.PI / 2, Math.PI, Math.PI * 1.5]) {
+    const spoke = MeshBuilder.CreateBox('station-spoke', { width: 10, height: 10, depth: 138.75 }, scene)
+    spoke.position = stationPosition.add(new Vector3(Math.sin(angle) * 81.375, 0, Math.cos(angle) * 81.375))
+    spoke.rotation.y = angle
+    spoke.material = stationMaterial
+  }
 
   const ship = new TransformNode('starter-ship', scene)
   ship.position = launchPosition.clone()
@@ -127,22 +155,26 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   const pressedKeys = new Set<string>()
   let flightAssistEnabled = true
   const velocity = Vector3.Zero()
-  const thrustAcceleration = 22
-  const brakingAcceleration = 8
-  const maximumSpeed = 72
+  const shipMassKg = 25_000
+  const engineThrustNewtons = 550_000
+  const brakingThrustNewtons = 200_000
+  const maximumSpeed = 2_500
   let shipYaw = 0
   let shipPitch = 0
   let isSteering = false
   let pointerLockWasActive = false
-  let lastPointerX: number | undefined
-  let lastPointerY: number | undefined
-  const mouseSensitivity = 0.003
+  let steeringTargetYaw = 0
+  let steeringTargetPitch = 0
+  const turnSpeed = 2.8
 
   const handleMouseDown = (event: PointerEvent) => {
     if (event.button !== 2) return
     event.preventDefault()
-    lastPointerX = event.clientX
-    lastPointerY = event.clientY
+    const rect = canvas.getBoundingClientRect()
+    const ray = scene.createPickingRay(event.clientX - rect.left, event.clientY - rect.top, null, camera)
+    const targetDirection = ray.direction.normalize()
+    steeringTargetYaw = Math.atan2(targetDirection.x, targetDirection.z)
+    steeringTargetPitch = Math.asin(targetDirection.y)
     canvas.setPointerCapture(event.pointerId)
     isSteering = true
     canvas.classList.add('is-steering')
@@ -152,22 +184,11 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     if (event.button !== 2) return
     isSteering = false
     canvas.classList.remove('is-steering')
-    lastPointerX = undefined
-    lastPointerY = undefined
     if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId)
     if (document.pointerLockElement === canvas) {
       pointerLockWasActive = false
       document.exitPointerLock()
     }
-  }
-  const handleMouseMove = (event: PointerEvent) => {
-    if (!isSteering) return
-    const horizontalDelta = event.movementX || event.clientX - (lastPointerX ?? event.clientX)
-    const verticalDelta = event.movementY || event.clientY - (lastPointerY ?? event.clientY)
-    lastPointerX = event.clientX
-    lastPointerY = event.clientY
-    shipYaw += horizontalDelta * mouseSensitivity
-    shipPitch = Math.max(-Math.PI / 3, Math.min(Math.PI / 3, shipPitch - verticalDelta * mouseSensitivity))
   }
   const handlePointerLockChange = () => {
     if (document.pointerLockElement === canvas) {
@@ -182,7 +203,6 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   const handleContextMenu = (event: MouseEvent) => event.preventDefault()
   canvas.addEventListener('pointerdown', handleMouseDown, true)
   window.addEventListener('pointerup', handleMouseUp, true)
-  document.addEventListener('pointermove', handleMouseMove)
   canvas.addEventListener('contextmenu', handleContextMenu)
   document.addEventListener('pointerlockchange', handlePointerLockChange)
 
@@ -217,21 +237,29 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       Math.cos(shipYaw) * Math.cos(shipPitch),
     )
     const shipRight = new Vector3(Math.cos(shipYaw), 0, -Math.sin(shipYaw))
+    if (isSteering) {
+      const maxTurn = turnSpeed * deltaSeconds
+      const yawDifference = Math.atan2(Math.sin(steeringTargetYaw - shipYaw), Math.cos(steeringTargetYaw - shipYaw))
+      shipYaw += Math.max(-maxTurn, Math.min(maxTurn, yawDifference))
+      const pitchDifference = steeringTargetPitch - shipPitch
+      shipPitch += Math.max(-maxTurn, Math.min(maxTurn, pitchDifference))
+    }
     if (movementIntent.lengthSquared() > 0) {
       movementIntent.normalize()
       const acceleration = shipRight.scale(movementIntent.x)
         .addInPlace(Vector3.Up().scale(movementIntent.y))
         .addInPlace(shipForward.scale(movementIntent.z))
-        .scaleInPlace(thrustAcceleration * deltaSeconds)
+        .scaleInPlace((engineThrustNewtons / shipMassKg) * deltaSeconds)
       velocity.addInPlace(acceleration)
     } else if (flightAssistEnabled && velocity.lengthSquared() > 0) {
       const speed = velocity.length()
-      velocity.scaleInPlace(Math.max(0, 1 - (brakingAcceleration * deltaSeconds) / speed))
+      velocity.scaleInPlace(Math.max(0, 1 - ((brakingThrustNewtons / shipMassKg) * deltaSeconds) / speed))
     }
     if (velocity.length() > maximumSpeed) {
       velocity.normalize().scaleInPlace(maximumSpeed)
     }
     ship.position.addInPlace(velocity.scale(deltaSeconds))
+    star.scaling.setAll(Math.max(minimumStarVisualScale, Math.min(1, starVisualScaleDistance / Vector3.Distance(ship.position, star.position))))
     ship.rotation.set(-shipPitch, shipYaw, 0)
     strafeThrusterMaterials[0].emissiveColor.copyFromFloats(0, 0.85 * Number(pressedKeys.has('a')), Number(pressedKeys.has('a')))
     strafeThrusterMaterials[1].emissiveColor.copyFromFloats(0, 0.85 * Number(pressedKeys.has('d')), Number(pressedKeys.has('d')))
@@ -251,7 +279,6 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       window.removeEventListener('keydown', handleKeyDown)
       window.removeEventListener('keyup', handleKeyUp)
       window.removeEventListener('pointerup', handleMouseUp, true)
-      document.removeEventListener('pointermove', handleMouseMove)
       canvas.removeEventListener('contextmenu', handleContextMenu)
       document.removeEventListener('pointerlockchange', handlePointerLockChange)
       scene.dispose()
