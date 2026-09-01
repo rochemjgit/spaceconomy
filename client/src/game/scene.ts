@@ -107,8 +107,8 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   const hull = MeshBuilder.CreateBox('starter-ship-hull', { width: 1.7, height: 0.6, depth: 3.2 }, scene)
   hull.parent = ship
   const shipMaterial = new StandardMaterial('starter-ship-material', scene)
-  shipMaterial.emissiveColor = new Color3(0.04, 0.22, 0.32)
-  shipMaterial.diffuseColor = new Color3(0.06, 0.2, 0.35)
+  shipMaterial.emissiveColor = new Color3(0.32, 0.04, 0.04)
+  shipMaterial.diffuseColor = new Color3(0.45, 0.03, 0.03)
   hull.material = shipMaterial
 
   const nose = MeshBuilder.CreateCylinder('starter-ship-nose', {
@@ -168,20 +168,37 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   let steeringTargetYaw = 0
   let steeringTargetPitch = 0
   const turnSpeed = 2.8
+  const pointerSteeringSensitivity = 0.003
+  const maximumSteeringPitch = Math.PI / 2 - 0.01
   let dockingAvailable = false
 
-  const handleMouseDown = (event: PointerEvent) => {
-    if (event.button !== 2) return
-    event.preventDefault()
+  const setSteeringTargetFromPointer = (clientX: number, clientY: number) => {
     const rect = canvas.getBoundingClientRect()
-    const ray = scene.createPickingRay(event.clientX - rect.left, event.clientY - rect.top, null, camera)
+    const ray = scene.createPickingRay(clientX - rect.left, clientY - rect.top, null, camera)
     const targetDirection = ray.direction.normalize()
     steeringTargetYaw = Math.atan2(targetDirection.x, targetDirection.z)
     steeringTargetPitch = Math.asin(targetDirection.y)
+  }
+  const handleMouseDown = (event: PointerEvent) => {
+    if (event.button !== 2) return
+    event.preventDefault()
+    setSteeringTargetFromPointer(event.clientX, event.clientY)
     canvas.setPointerCapture(event.pointerId)
     isSteering = true
     canvas.classList.add('is-steering')
     void Promise.resolve(canvas.requestPointerLock()).catch(() => undefined)
+  }
+  const handlePointerMove = (event: PointerEvent) => {
+    if (!isSteering || !(event.buttons & 2)) return
+    if (document.pointerLockElement === canvas) {
+      steeringTargetYaw += event.movementX * pointerSteeringSensitivity
+      steeringTargetPitch = Math.max(
+        -maximumSteeringPitch,
+        Math.min(maximumSteeringPitch, steeringTargetPitch - event.movementY * pointerSteeringSensitivity),
+      )
+      return
+    }
+    setSteeringTargetFromPointer(event.clientX, event.clientY)
   }
   const handleMouseUp = (event: PointerEvent) => {
     if (event.button !== 2) return
@@ -205,6 +222,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   }
   const handleContextMenu = (event: MouseEvent) => event.preventDefault()
   canvas.addEventListener('pointerdown', handleMouseDown, true)
+  canvas.addEventListener('pointermove', handlePointerMove, true)
   window.addEventListener('pointerup', handleMouseUp, true)
   canvas.addEventListener('contextmenu', handleContextMenu)
   document.addEventListener('pointerlockchange', handlePointerLockChange)
@@ -284,6 +302,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       resizeObserver.disconnect()
       if (document.pointerLockElement === canvas) document.exitPointerLock()
       canvas.removeEventListener('pointerdown', handleMouseDown, true)
+      canvas.removeEventListener('pointermove', handlePointerMove, true)
       window.removeEventListener('keydown', handleKeyDown)
       window.removeEventListener('keyup', handleKeyUp)
       window.removeEventListener('pointerup', handleMouseUp, true)

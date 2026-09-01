@@ -4,7 +4,7 @@
 
 ## Phase Boundary
 
-Phase II builds on Phase I authentication, WebSocket envelopes, authoritative flight, destinations, warp/cruise, the three orbital stations, and the transaction-ledger foundation. It adds functional docking because station-local storage, fitting, and refining require a validated station state.
+Phase II builds on Phase I authentication, WebSocket envelopes, authoritative flight, destinations, warp/cruise, the three orbital stations, and the transaction-ledger foundation. It adds functional docking and a docked station scene because station-local storage, fitting, and refining require a validated station state and a clear place to perform those actions.
 
 Phase II deliberately delivers only the mining equipment needed for the loop: fitting and removing mining lasers at a station. The broader hull-fitting budgets, module families, charges, combat, and general active-skill framework remain Phase III work. Environmental field hazards can affect navigation and visibility, but hostile NPCs and combat sites remain Phase IV work.
 
@@ -15,7 +15,7 @@ Phase II deliberately delivers only the mining equipment needed for the loop: fi
 3. The pilot scans the asteroid. A baseline scan takes 8-12 seconds and produces an approximate private reading of its composition, quality, remaining yield, and relevant hazard information.
 4. The pilot may mine before scanning, accepting uncertain content and quality. A target-lock-and-cycle mining laser extracts ore into cargo while sufficient volume and energy are available.
 5. When cargo capacity, asteroid depletion, danger, or travel choice ends the run, the pilot returns to a station. Cargo may also be jettisoned into a temporary space container when a tactical decision requires it.
-6. The pilot docks, transfers ore to that station's local storage, creates a refinery job, and may log out. The server completes the job based on elapsed time and delivers refined material to the same station storage.
+6. The pilot docks into a station hangar, reviews the active station and ship state, transfers ore to that station's local storage, fits or removes mining lasers, creates refinery jobs, and may log out. The server completes each job based on elapsed time and delivers refined material to the same station storage.
 
 ## Design Principles
 
@@ -90,7 +90,25 @@ At a completed cycle, the server resolves yield from the module, valid ship stat
 
 ## Docking, Storage, And Refining
 
-Docking is a server-validated state transition. The ship must be at a valid orbital-station docking point and satisfy Phase I movement/state rules. While docked, local station storage, mining-laser fitting, ore transfer, and refinery job operations become available. Undocking restores the normal space action set.
+Docking is a server-validated state transition. The ship must be at a valid orbital-station docking point, satisfy Phase I movement/state rules, and not be in an incompatible action or travel state. The client may show docking availability from replicated nearby-world data, but selecting dock never changes the scene or enables services until an accepted docking event provides the station ID, assigned bay, and authoritative docked state.
+
+While docked, movement input and space-only actions are disabled. Local station storage, mining-laser fitting, cargo transfer, and refinery job operations become available only for the exact docked station. Undocking is a server-validated transition that rejects active incompatible operations, restores the normal space action set, and places the ship at a server-defined safe launch transform outside the station. Reconnect restores the persisted docked state at the same station when valid; it never recreates a docked state from client UI state.
+
+### Docked Scene And Station Experience
+
+Docking transitions the client from the flight scene to a station-specific hangar scene. Phase II may use shared modular hangar geometry with station-specific identity, lighting, signage, exterior viewport treatment, and assigned-bay metadata; it must not imply that all three stations share one inventory or service state. The current Kepler hangar prototype is presentation-only and becomes the scene-lifecycle baseline rather than an authority boundary.
+
+The docked scene presents the active ship on its bay, the station name and bay, an unambiguous docked state, and a compact station-service navigation surface. Required services are Ship Cargo, Station Storage, Mining Fitting, and Refinery Jobs. Services may be panels over the hangar scene or a dedicated station UI layer, but all operations remain available only while the server-confirmed docked state is current. The scene is a place for management, not avatar movement, combat, or a separate social-space feature.
+
+Station panels make the local context legible: the station name, cargo slots and volume, station-storage slots and volume, fitted mining-laser slots, reservation state, and refinery job state. Inventory views show item display data, quantity, grade where applicable, unit volume, total stack volume, and capacity remaining. Controls for split, merge, move, fit, remove, jettison, create job, cancel job, and undock are enabled only when replicated state supports them; commands include an idempotency key and show accepted, pending, and rejected outcomes without locally finalizing an inventory change.
+
+The fitting service limits Phase II interaction to mining-compatible slots. It identifies an empty, fitted, unavailable, or incompatible slot; supports fitting from this station's storage and removing back to this station's storage; and reports capacity, ownership, compatibility, or docking failures in place. It does not expose Phase III hull-budget, combat-module, charge, or general-equipment controls.
+
+The refinery service lets a pilot select eligible ore in this station's storage, choose valid quantities, inspect duration and expected output range, submit multiple jobs, and view running, complete, cancelled, and failed job states. Reserved ore is visibly unavailable to other station actions. Completed output remains assigned to this station's storage and is not silently moved to ship cargo. A pilot may leave the station or log out while jobs run; the next valid docked/reconnect snapshot shows authoritative status.
+
+The docked UI preserves access to session, connection, notification, and error feedback. It hides flight-only controls, minimap/flight telemetry, targeting reticle, and space HUD while docked. It provides a keyboard-operable service navigation path, focus handling for modal confirmations where used, readable capacity warnings, reduced-motion behavior for scene transitions, and responsive layouts that keep capacity and primary actions visible on common desktop resolutions.
+
+The client owns only the visual transition, panel state, and optimistic pending indicators. Docking, undocking, bay assignment, inventory contents, capacity, module fit state, job state, and all operation outcomes are server-authoritative. On a rejected command, stale docked-state event, disconnect, station change, or undock confirmation, the client discards invalid local panel state and reconciles from the latest snapshot.
 
 Refining is a timed server-side job, not an immediate conversion. A pilot creates a job only while docked at the station holding the input ore. Phase II supports unlimited concurrent refinery jobs; timing is the intended production commitment, not shared queue contention. A job records its station, owner, input stacks and quantities, recipe/version, applied efficiency and quality-yield values, start time, completion time, state, and output destination.
 
@@ -98,13 +116,13 @@ Job input is reserved immediately. The background worker completes due jobs even
 
 ## Client Experience
 
-The extraction HUD presents the selected asteroid, scan state and confidence, estimated composition/quality/yield after a scan, local hazard warnings, mining-cycle progress, accepted yield, cargo slots and volume, and current speed/vector state. It reports failures as clear action feedback instead of silently ending a cycle.
+The extraction HUD presents the selected asteroid, scan state and confidence, estimated composition/quality/yield after a scan, local hazard warnings, mining-cycle progress, accepted yield, cargo slots and volume, and current speed/vector state. It reports failures as clear action feedback instead of silently ending a cycle. Within valid station docking range, the space HUD presents dock availability and a pending docking state, but retains flight control until server confirmation.
 
-The station UI presents only the active station's storage, mining-laser fit state, cargo transfer controls, refinery input selection, job duration, expected yield range, running/completed jobs, and output destination. The client distinguishes private containers, public containers, and expired/invalid targets. Scene rendering gives asteroids distance-aware visual variants and shows shared depletion, mining effects, collision geometry, and field-hazard effects without granting hidden resource information.
+The docked station experience presents only the active station's storage, mining-laser fit state, cargo transfer controls, refinery input selection, job duration, expected yield range, running/completed jobs, output destination, ship bay, and server-confirmed docked state. The client distinguishes private containers, public containers, and expired/invalid targets. Scene rendering gives asteroids distance-aware visual variants and shows shared depletion, mining effects, collision geometry, and field-hazard effects without granting hidden resource information.
 
 ## Server Contracts And Persistence
 
-Use typed HTTP/WebSocket contracts for at least: inventory move/split/merge/jettison, asteroid scan start/cancel, mining start/stop, docking state changes, refinery job create/cancel/query, container access, and state snapshots. Every mutable command carries an idempotency key and returns either an accepted event sequence or a stable validation error code.
+Use typed HTTP/WebSocket contracts for at least: inventory move/split/merge/jettison, asteroid scan start/cancel, mining start/stop, docking request/accepted/rejected, undocking request/accepted/rejected, docked station snapshots including station and bay identity, refinery job create/cancel/query, container access, and state snapshots. Every mutable command carries an idempotency key and returns either an accepted event sequence or a stable validation error code.
 
 Persist inventory stacks, station storage locations, asteroid instances and lifecycle state, private scan results, wrecks, jettisoned containers, refinery jobs/reservations, and item/extraction/refining/skill ledger events in PostgreSQL. Redis may cache nearby field state and fan out proximity events, but it is not the source of truth for yields, ownership, jobs, or inventory. Use background workers for asteroid respawn and refinery completion.
 
@@ -124,15 +142,18 @@ Authoritative event envelopes must cover inventory changes, scan lifecycle and r
 1. Create item, quality, container, inventory-stack, ledger, field, asteroid, scan, temporary-container, and refinery-job persistence models and migrations.
 2. Implement transactional inventory operations, capacity validation, station-local storage, temporary-container ownership/expiry, and ledger events.
 3. Seed data-driven inner- and outer-belt fields, asteroid profiles, hazards, and respawn rules; implement shared authoritative depletion and respawn.
-4. Add docking state transitions and the station storage/fitting surface for mining lasers.
+4. Add docking state transitions, the docked scene lifecycle, and the station storage/fitting surface for mining lasers.
 5. Implement scan lifecycle, private approximate results, use-based skill events, and client-visible scan feedback.
 6. Implement mining-cycle validation, energy use, yield resolution, cargo delivery, proximity broadcasts, and visual/audio event consumption.
 7. Implement timed refinery jobs, reservations, offline completion, output delivery, and job UI.
-8. Complete HUD, scene-state, reconnect, and failure-state coverage; then run multiplayer and persistence verification.
+8. Complete the extraction HUD, docked station experience, scene-state, reconnect, and failure-state coverage; then run multiplayer and persistence verification.
 
 ## Acceptance Tests
 
 - A player can dock at one orbital station, fit a mining laser from that station's storage, and cannot fit it remotely or from another station's storage.
+- A pilot who receives a docked-state confirmation enters that station's hangar and can access only its storage, mining-fitting, and refinery services; a client-side scene change, stale docked event, or disconnect cannot grant station access.
+- A pilot can undock only through a server-accepted transition, returns to a valid server-defined launch transform, and sees flight controls return only after the undock event; reconnecting while docked restores the same station context and active jobs.
+- Station panels show pending, accepted, and rejected inventory, fitting, and refinery actions without duplicating items or treating a local UI update as a completed transaction.
 - Two nearby players observe the same asteroid yield decrease and receive one consistent depletion event; concurrent final cycles cannot over-extract it.
 - A player can mine an unscanned asteroid, while a completed scan returns only that player an approximate result that becomes invalid on depletion or respawn.
 - Repeated valid scans award bounded, server-recorded scanning progress; interrupted or spoofed scan completions do not.
