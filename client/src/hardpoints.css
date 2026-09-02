@@ -1,0 +1,40 @@
+.module-rack {
+  width: min(680px, calc(100vw - 24px));
+}
+
+.module-slots {
+  grid-template-columns: repeat(var(--hardpoint-count), 42px);
+  justify-content: center;
+  gap: 5px;
+}
+
+.module-slot {
+  grid-template-columns: 1fr;
+  justify-items: center;
+  min-height: 42px;
+  padding: 6px 3px;
+}
+
+.module-slot .module-icon {
+  grid-area: auto;
+}
+
+.module-slot .module-name {
+  display: none;
+}
+
+.module-slot-empty .module-name {
+  color: #718d9e;
+}
+
+@media (max-width: 640px) {
+  .module-slots {
+    grid-template-columns: repeat(var(--hardpoint-count), 30px);
+    gap: 3px;
+  }
+
+  .module-slot {
+    min-height: 38px;
+    padding: 5px 1px;
+  }
+}

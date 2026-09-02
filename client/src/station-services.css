@@ -1,0 +1,23 @@
+.station-services {
+  position: absolute;
+  z-index: 7;
+  inset: 0;
+  overflow: auto;
+  padding: 104px max(28px, calc((100vw - 1060px) / 2)) 42px;
+  background: rgb(1 8 17 / 84%);
+  backdrop-filter: blur(10px);
+}
+
+.station-services[hidden] { display: none; }
+.station-services-heading { display: flex; justify-content: space-between; align-items: start; gap: 16px; max-width: 1060px; margin: 0 auto 28px; }
+.station-services-heading .eyebrow { margin: 0 0 7px; }
+.station-services h1, .station-services h2 { margin: 0; color: #eefbff; letter-spacing: .1em; }
+.station-services h1 { font-size: 24px; }
+.station-services h2 { font-size: 20px; }
+.station-services-heading button, .station-service-back, .docked-status button { min-height: 38px; padding: 0 14px; border: 1px solid rgb(255 189 74 / 70%); color: #ffcf78; background: rgb(67 42 10 / 48%); font: 700 10px Inter, ui-sans-serif, system-ui, sans-serif; letter-spacing: .1em; cursor: pointer; }
+.station-services-heading button:hover, .station-services-heading button:focus-visible, .station-service-back:hover, .station-service-back:focus-visible, .docked-status button:hover, .docked-status button:focus-visible { color: #101719; background: #ffbd4a; outline: 1px solid #ffe2a8; outline-offset: 2px; }
+.station-service-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; max-width: 1060px; margin: 0 auto; }
+.station-service-button { display: grid; justify-items: start; align-content: end; min-height: 176px; padding: 19px; border: 1px solid rgb(94 205 244 / 32%); color: #e8fbff; background: linear-gradient(135deg, rgb(9 52 72 / 84%), rgb(2 15 31 / 88%)); box-shadow: inset 0 -42px 48px rgb(0 0 0 / 26%); cursor: pointer; text-align: left; }
+.station-service-button strong { font-size: 18px; letter-spacing: .09em; }.station-service-button span { margin-top: 8px; color: #8ab8c8; font-size: 10px; font-weight: 700; letter-spacing: .1em; }.station-service-button:hover, .station-service-button:focus-visible { border-color: #53ffc6; background: linear-gradient(135deg, rgb(9 76 78 / 92%), rgb(2 20 33 / 94%)); outline: none; }.station-service-button:hover strong, .station-service-button:focus-visible strong { color: #53ffc6; }
+.station-service-panel { max-width: 880px; min-height: 360px; margin: 0 auto; padding: 23px; border: 1px solid rgb(94 205 244 / 32%); background: rgb(2 14 29 / 94%); }.station-service-panel > section { margin-top: 24px; }.station-service-panel .eyebrow { margin: 0 0 8px; }.station-service-empty { max-width: 560px; margin: 18px 0 0; color: #95adba; font-size: 13px; line-height: 1.6; }.docked-terminal-hint { max-width: 210px; margin: 12px 0; color: #8db6c2; font-size: 9px; font-weight: 700; letter-spacing: .08em; line-height: 1.5; }.docked-status button { width: 100%; }
+@media (max-width: 640px) { .station-services { padding: 88px 12px 24px; }.station-services-heading { margin-bottom: 18px; }.station-services h1 { font-size: 18px; }.station-service-grid { grid-template-columns: 1fr 1fr; gap: 8px; }.station-service-button { min-height: 122px; padding: 13px; }.station-service-button strong { font-size: 13px; }.station-service-button span { font-size: 8px; }.station-service-panel { min-height: 300px; padding: 16px; } }

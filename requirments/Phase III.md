@@ -6,6 +6,10 @@
 
 Phase III extends Phase II's authoritative inventory, station-local storage, docking, capacitor-backed mining cycles, scanning progression events, temporary wrecks, and item ledger. It replaces the Phase II mining-only fit contract with a full data-driven ship fitting model and makes the existing wreck process resolve every ship-contained item through loss RNG.
 
+### Repository Readiness
+
+Implementation must not present presentation-only client state or development fixtures as Phase III authority. Before a player-facing Phase III endpoint is enabled, Phase II must provide authenticated pilot identity, persisted active-ship ownership, authoritative docked-station state, station-local inventory transactions, item-ledger writes, and wreck ownership/access rules. Until those prerequisites exist, Phase III work is limited to isolated domain definitions and deterministic tests; fit, activation, consumption, progression, and loss commands must not mutate client-provided state.
+
 This phase provides the hull, module, charge, consumable, capacitor, skill, and event contracts that Phase IV combat consumes. It does not implement NPCs, player damage, targeting, projectile resolution, combat sites, salvage gameplay, manufacturing, market trading, or a player-versus-player damage path. Phase V consumes the progression event history and applies refining/manufacturing modifiers at their respective calculation boundaries.
 
 ## Player Loops

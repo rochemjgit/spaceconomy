@@ -1,0 +1,99 @@
+.durability-readout {
+  position: absolute;
+  z-index: 2;
+  right: 28px;
+  bottom: 28px;
+  width: 210px;
+  padding: 12px 14px;
+  border-left: 2px solid rgb(105 223 255 / 60%);
+  background: rgb(4 13 24 / 76%);
+  backdrop-filter: blur(8px);
+}
+
+.durability-layer + .durability-layer {
+  margin-top: 10px;
+}
+
+.durability-label {
+  display: flex;
+  justify-content: space-between;
+  color: #b9cbd6;
+  font-size: 10px;
+  letter-spacing: .08em;
+}
+
+.durability-label strong {
+  color: #f4fbff;
+  font-weight: 700;
+}
+
+.durability-bar {
+  display: block;
+  height: 5px;
+  margin-top: 5px;
+  background: rgb(171 200 216 / 18%);
+}
+
+.durability-fill {
+  display: block;
+  width: 100%;
+  height: 100%;
+  transition: width 160ms ease;
+}
+
+.shield-fill { background: #58d5ff; }
+.power-fill { background: #f4dc68; }
+.hull-fill { background: #f4a24e; }
+.fuel-fill { background: #8eea64; }
+.cargo-fill { width: 0; background: #d6a4ff; }
+
+.collision-alert {
+  min-height: 14px;
+  margin: 10px 0 0;
+  color: #ffbb63;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .06em;
+}
+
+.ship-destroyed-overlay {
+  position: absolute;
+  z-index: 8;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  text-align: center;
+  background: rgb(36 4 2 / 68%);
+  color: #fff3df;
+}
+
+.ship-destroyed-overlay[hidden] { display: none; }
+
+.ship-destroyed-overlay .eyebrow {
+  margin: 0;
+  color: #ffac52;
+}
+
+.ship-destroyed-overlay h1 {
+  margin: 10px 0;
+  color: #fff7ea;
+  font-size: 32px;
+  letter-spacing: .12em;
+}
+
+.ship-destroyed-overlay p:last-child {
+  margin: 0;
+  color: #ffd1a1;
+  font-size: 13px;
+  letter-spacing: .04em;
+}
+
+@media (max-width: 640px) {
+  .durability-readout {
+    right: 12px;
+    bottom: 12px;
+    width: 164px;
+  }
+
+  .ship-destroyed-overlay h1 { font-size: 24px; }
+}

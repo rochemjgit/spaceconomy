@@ -1,0 +1,6 @@
+.fitting-slot-hardpoint {
+  left: 50%;
+  top: 7px;
+  width: 72px;
+  transform: translateX(-50%);
+}
