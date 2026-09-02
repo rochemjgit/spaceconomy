@@ -88,9 +88,9 @@ app.innerHTML = `
       <div class="map-legend"><span class="legend-star">STAR</span><span class="legend-planet">WORLD</span><span class="legend-station">STATION</span><span class="legend-belt">BELT</span><span class="legend-player">YOU</span></div>
     </section>
     <section id="target-window" class="target-window" aria-label="Selected target" hidden>
-      <div class="target-window-heading"><p class="eyebrow">TARGET LOCK</p><button id="clear-target" type="button" aria-label="Clear target">×</button></div>
-      <p id="target-name" class="target-name"></p>
-      <p id="target-range" class="target-range">0 m</p>
+      <div class="target-window-heading"><p id="target-lock-label" class="eyebrow">TARGET LOCK</p><button id="clear-target" type="button" aria-label="Unlock target">×</button></div>
+      <div class="target-summary"><div class="target-thumbnail" aria-hidden="true"><span></span></div><div><p id="target-name" class="target-name"></p><p id="target-range" class="target-range"></p></div></div>
+      <span id="target-lock-progress" class="target-lock-progress"><span></span></span>
     </section>
     <section id="available-actions" class="available-actions" aria-label="Available actions" hidden>
       <p class="eyebrow">AVAILABLE ACTIONS</p>
@@ -240,6 +240,8 @@ const warpStars = document.querySelector<HTMLElement>('#warp-stars')
 const targetWindow = document.querySelector<HTMLElement>('#target-window')
 const targetName = document.querySelector<HTMLElement>('#target-name')
 const targetRange = document.querySelector<HTMLElement>('#target-range')
+const targetLockLabel = document.querySelector<HTMLElement>('#target-lock-label')
+const targetLockProgress = document.querySelector<HTMLElement>('#target-lock-progress')
 const clearTarget = document.querySelector<HTMLButtonElement>('#clear-target')
 const powerDisplay = document.querySelector<HTMLElement>('#ship-power')
 const powerBar = document.querySelector<HTMLElement>('#ship-power-bar')
@@ -258,7 +260,7 @@ const minimumMinimapRadius = 20_000
 const maximumMinimapRadius = 400_000
 let minimapRadius = 140_000
 let playerMapPosition = { x: 123_078, y: 480, z: -2_691 }
-let selectedTarget: { name: string; position: Vector3; oreRemainingCubicMeters: number; initialOreCubicMeters: number } | undefined
+let selectedTarget: { name: string; position: Vector3; oreRemainingCubicMeters: number; initialOreCubicMeters: number; locked: boolean; locking: boolean; lockProgress: number } | undefined
 let cargoCubicMeters = 0
 let maximumCargoCubicMeters = 24
 let systemMapPanX = 0
@@ -486,23 +488,22 @@ function positionMapMarker(marker: HTMLElement | null, x: number, z: number) {
 }
 
 function updateTargetWindow() {
-  if (!targetWindow || !targetName || !targetRange) return
+  if (!targetWindow || !targetName || !targetRange || !targetLockLabel || !targetLockProgress) return
   if (!selectedTarget) {
     targetWindow.setAttribute('hidden', '')
     return
   }
-  const distance = Vector3.Distance(new Vector3(playerMapPosition.x, playerMapPosition.y, playerMapPosition.z), selectedTarget.position)
+  targetLockLabel.textContent = selectedTarget.locking ? 'ACQUIRING LOCK' : 'TARGET LOCK'
   targetName.textContent = selectedTarget.name
+  const distance = Vector3.Distance(new Vector3(playerMapPosition.x, playerMapPosition.y, playerMapPosition.z), selectedTarget.position)
   targetRange.textContent = distance >= 1_000 ? `${(distance / 1_000).toFixed(1)} km` : `${distance.toFixed(0)} m`
-    const formattedDistance = distance >= 1_000 ? `${(distance / 1_000).toFixed(1)} km` : `${distance.toFixed(0)} m`
-    targetRange.textContent = `${formattedDistance} · ${selectedTarget.oreRemainingCubicMeters.toFixed(1)} / ${selectedTarget.initialOreCubicMeters.toFixed(1)} m3`
+  targetLockProgress.toggleAttribute('hidden', !selectedTarget.locking)
+  targetLockProgress.firstElementChild?.setAttribute('style', `width: ${(selectedTarget.lockProgress * 100).toFixed(1)}%`)
   targetWindow.removeAttribute('hidden')
 }
 
 clearTarget?.addEventListener('click', () => {
-  selectedTarget = undefined
-  updateTargetWindow()
-  updateHardpointAvailability()
+  scene.toggleTargetLock()
 })
 
 function updateMinimapMarkers() {

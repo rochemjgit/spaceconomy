@@ -20,13 +20,14 @@ export interface SceneController {
   dispose(): void
   warpTo(destination: Vector3): boolean
   setModuleActive(moduleName: string, isActive: boolean): void
+  toggleTargetLock(): void
 }
 
 export interface SceneOptions {
   onFlightUpdate: (position: Vector3, speed: number, flightAssistEnabled: boolean) => void
   onDockingAvailabilityChange?: (isAvailable: boolean) => void
   onWarpUpdate?: (isWarping: boolean, phase: WarpPhase, progress: number) => void
-  onTargetSelectionChange?: (target?: { name: string; position: Vector3; oreRemainingCubicMeters: number; initialOreCubicMeters: number }) => void
+  onTargetSelectionChange?: (target?: { name: string; position: Vector3; oreRemainingCubicMeters: number; initialOreCubicMeters: number; locked: boolean; locking: boolean; lockProgress: number }) => void
   onShipStatusChange?: (status: ShipStatus) => void
   onModuleActiveChange?: (moduleName: string, isActive: boolean) => void
   hasShieldGenerator?: boolean
@@ -229,6 +230,12 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   starterTestAsteroidMaterial.emissiveColor = new Color3(0.25, 0.08, 0.005)
   starterTestAsteroid.material = starterTestAsteroidMaterial
   registerAsteroid(starterTestAsteroid, 'STARTER TEST ASTEROID', 12, 8)
+
+  const secondStarterTestAsteroid = MeshBuilder.CreateIcoSphere('starter-test-asteroid-2', { radius: 10, subdivisions: 2 }, scene)
+  secondStarterTestAsteroid.position = launchPosition.add(new Vector3(-34, -8, 58))
+  secondStarterTestAsteroid.rotation.set(0.9, 0.2, 0.6)
+  secondStarterTestAsteroid.material = starterTestAsteroidMaterial
+  registerAsteroid(secondStarterTestAsteroid, 'STARTER TEST ASTEROID 02', 10, 6)
 
   const stationMaterial = new StandardMaterial('station-marker-material', scene)
   stationMaterial.diffuseColor = new Color3(0.16, 0.4, 0.5)
@@ -574,7 +581,10 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   }
   const handleContextMenu = (event: MouseEvent) => event.preventDefault()
   let targetedAsteroid: AbstractMesh | undefined
+  let lockedAsteroid: AbstractMesh | undefined
+  let lockingTarget: { asteroid: AbstractMesh; elapsedSeconds: number } | undefined
   let targetBrackets: TransformNode | undefined
+  let lockedTargetBrackets: TransformNode | undefined
   const miningLaserRange = 2_500
   const miningLaserMaterial = new StandardMaterial('mining-laser-beam-material', scene)
   miningLaserMaterial.diffuseColor = new Color3(0.1, 0.8, 0.45)
@@ -602,18 +612,60 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   miningImpactMaterial.disableLighting = true
   let nextMiningImpactSeconds = 0
   let nextOreChunkSeconds = 2 + Math.random() * 3
+  const targetLockDurationSeconds = 1.5
   const clearTarget = () => {
     targetBrackets?.dispose()
     targetBrackets = undefined
     targetedAsteroid = undefined
-    options.onTargetSelectionChange?.()
   }
-  const showTargetBrackets = (asteroid: AbstractMesh) => {
-    targetBrackets?.dispose()
-    targetedAsteroid = asteroid
-    const brackets = new TransformNode('asteroid-target-brackets', scene)
-    targetBrackets = brackets
-    const bracketColor = new Color3(1, 0.72, 0.2)
+  const reportTargetLock = () => {
+    const targetMesh = lockedAsteroid ?? lockingTarget?.asteroid
+    if (!targetMesh) {
+      options.onTargetSelectionChange?.()
+      return
+    }
+    const target = asteroidTargets.get(targetMesh.uniqueId)
+    if (!target) return
+    options.onTargetSelectionChange?.({
+      name: target.name,
+      position: targetMesh.getAbsolutePosition().clone(),
+      oreRemainingCubicMeters: target.oreRemainingCubicMeters,
+      initialOreCubicMeters: target.initialOreCubicMeters,
+      locked: lockedAsteroid !== undefined,
+      locking: lockingTarget !== undefined,
+      lockProgress: lockingTarget ? Math.min(1, lockingTarget.elapsedSeconds / targetLockDurationSeconds) : 1,
+    })
+  }
+  const unlockTarget = () => {
+    lockedTargetBrackets?.dispose()
+    lockedTargetBrackets = undefined
+    lockedAsteroid = undefined
+    lockingTarget = undefined
+    reportTargetLock()
+  }
+  const toggleTargetLock = () => {
+    if (lockedAsteroid) {
+      unlockTarget()
+      return
+    }
+    if (!targetedAsteroid) {
+      if (lockingTarget) {
+        lockingTarget = undefined
+        reportTargetLock()
+      }
+      return
+    }
+    if (lockedAsteroid) return
+    if (lockingTarget?.asteroid === targetedAsteroid) {
+      lockingTarget = undefined
+      reportTargetLock()
+      return
+    }
+    lockingTarget = { asteroid: targetedAsteroid, elapsedSeconds: 0 }
+    reportTargetLock()
+  }
+  const createTargetBrackets = (bracketColor: Color3, kind: string) => {
+    const brackets = new TransformNode(`${kind}-asteroid-target-brackets`, scene)
     const corners = [
       [new Vector3(-1, 0.7, 0), new Vector3(-1, 1, 0), new Vector3(-0.7, 1, 0)],
       [new Vector3(0.7, 1, 0), new Vector3(1, 1, 0), new Vector3(1, 0.7, 0)],
@@ -625,6 +677,16 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       corner.color = bracketColor
       corner.parent = brackets
     })
+    return brackets
+  }
+  const showTargetBrackets = (asteroid: AbstractMesh) => {
+    if (lockingTarget && lockingTarget.asteroid !== asteroid) {
+      lockingTarget = undefined
+      reportTargetLock()
+    }
+    targetBrackets?.dispose()
+    targetedAsteroid = asteroid
+    targetBrackets = createTargetBrackets(new Color3(1, 0.72, 0.2), 'active')
   }
   const handleClick = (event: MouseEvent) => {
     if (event.button !== 0 || warp) return
@@ -636,12 +698,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       return
     }
     showTargetBrackets(picked.pickedMesh)
-    options.onTargetSelectionChange?.({
-      name: asteroid.name,
-      position: picked.pickedMesh.position.clone(),
-      oreRemainingCubicMeters: asteroid.oreRemainingCubicMeters,
-      initialOreCubicMeters: asteroid.initialOreCubicMeters,
-    })
+    if (event.detail === 2 && !lockedAsteroid) toggleTargetLock()
   }
   canvas.addEventListener('pointerdown', handleMouseDown, true)
   canvas.addEventListener('pointermove', handlePointerMove, true)
@@ -652,6 +709,11 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
 
   const handleKeyDown = (event: KeyboardEvent) => {
     const key = event.key.toLowerCase()
+    if (key === 't' && !event.repeat) {
+      event.preventDefault()
+      toggleTargetLock()
+      return
+    }
     if (key === 'f' && !event.repeat) {
       flightAssistEnabled = !flightAssistEnabled
     }
@@ -670,6 +732,15 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     const deltaSeconds = Math.min((now - lastFrameTime) / 1000, 0.05)
     lastFrameTime = now
     postWarpCollisionImmunitySeconds = Math.max(0, postWarpCollisionImmunitySeconds - deltaSeconds)
+    if (lockingTarget) {
+      lockingTarget.elapsedSeconds += deltaSeconds
+      if (lockingTarget.elapsedSeconds >= targetLockDurationSeconds) {
+        lockedAsteroid = lockingTarget.asteroid
+        lockingTarget = undefined
+        lockedTargetBrackets = createTargetBrackets(new Color3(0.72, 0.78, 0.82), 'locked')
+      }
+      reportTargetLock()
+    }
 
     const movementIntent = new Vector3(
       Number(pressedKeys.has('d')) - Number(pressedKeys.has('a')),
@@ -774,7 +845,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       ship.position.addInPlace(velocity.scale(deltaSeconds))
     }
     resolveWorldCollisions()
-    const miningTarget = targetedAsteroid
+    const miningTarget = lockedAsteroid
     const miningTargetDetails = miningTarget ? asteroidTargets.get(miningTarget.uniqueId) : undefined
     const miningLaserActive = Boolean(
       miningTarget
@@ -854,7 +925,8 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
           const collisionIndex = collisionTargets.findIndex((target) => target.mesh === miningTarget)
           if (collisionIndex >= 0) collisionTargets.splice(collisionIndex, 1)
           miningTarget.dispose()
-          clearTarget()
+          if (targetedAsteroid === miningTarget) clearTarget()
+          unlockTarget()
         }
       }
     }
@@ -901,9 +973,15 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     strafeThrusterMaterials[1].emissiveColor.copyFromFloats(0, 0.85 * Number(pressedKeys.has('d')), Number(pressedKeys.has('d')))
     camera.target.copyFrom(ship.position)
     if (targetedAsteroid && targetBrackets) {
+      targetBrackets.setEnabled(!lockingTarget || Math.floor(now / 130) % 2 === 0)
       targetBrackets.position.copyFrom(targetedAsteroid.getAbsolutePosition())
       targetBrackets.rotationQuaternion = camera.absoluteRotation.clone()
       targetBrackets.scaling.setAll(targetedAsteroid.getBoundingInfo().boundingSphere.radiusWorld + 30)
+    }
+    if (lockedAsteroid && lockedTargetBrackets) {
+      lockedTargetBrackets.position.copyFrom(lockedAsteroid.getAbsolutePosition())
+      lockedTargetBrackets.rotationQuaternion = camera.absoluteRotation.clone()
+      lockedTargetBrackets.scaling.setAll(lockedAsteroid.getBoundingInfo().boundingSphere.radiusWorld + 30)
     }
     const actualSpeed = Vector3.Distance(ship.position, frameStartPosition) / deltaSeconds
     options.onFlightUpdate(ship.position, actualSpeed, flightAssistEnabled)
@@ -921,6 +999,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   return {
     warpTo,
     setModuleActive,
+    toggleTargetLock,
     dispose() {
       resizeObserver.disconnect()
       if (document.pointerLockElement === canvas) document.exitPointerLock()
@@ -1057,6 +1136,7 @@ export function createStationInteriorScene(canvas: HTMLCanvasElement, options: S
       return false
     },
     setModuleActive() {},
+    toggleTargetLock() {},
     dispose() {
       resizeObserver.disconnect()
       canvas.removeEventListener('click', handleTerminalClick)

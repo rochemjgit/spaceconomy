@@ -3,8 +3,8 @@
   z-index: 2;
   top: 96px;
   left: 28px;
-  width: 216px;
-  padding: 13px;
+  width: 154px;
+  padding: 9px;
   border: 1px solid rgb(255 189 74 / 55%);
   background: rgb(19 15 8 / 82%);
   box-shadow: 0 0 22px rgb(255 156 62 / 14%);
@@ -44,24 +44,25 @@
 }
 
 .target-name {
-  margin: 14px 0 5px;
+  margin: 0;
   color: #fff4d9;
-  font-size: 13px;
+  font-size: 10px;
   font-weight: 700;
   letter-spacing: .1em;
 }
 
-.target-range {
-  margin: 0;
-  color: #ffcf78;
-  font-size: 12px;
-  letter-spacing: .06em;
-}
+.target-range { margin: 4px 0 0; color: #ffcf78; font-size: 10px; letter-spacing: .06em; }
+.target-summary { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.target-thumbnail { display: grid; width: 32px; height: 32px; place-items: center; border: 1px solid rgb(201 214 221 / 65%); background: rgb(132 145 155 / 16%); }
+.target-thumbnail span { width: 17px; height: 17px; background: #9aa4aa; clip-path: polygon(50% 0, 92% 26%, 100% 68%, 60% 100%, 12% 82%, 0 34%); }
+.target-lock-progress { display: block; height: 3px; margin-top: 8px; background: rgb(255 189 74 / 18%); overflow: hidden; }
+.target-lock-progress[hidden] { display: none; }
+.target-lock-progress span { display: block; height: 100%; background: #ffbd4a; transition: width 80ms linear; }
 
 @media (max-width: 640px) {
   .target-window {
     top: 86px;
     left: 12px;
-    width: 184px;
+    width: 154px;
   }
 }
