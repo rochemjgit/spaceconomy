@@ -55,6 +55,8 @@
 .target-summary { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 .target-thumbnail { display: grid; width: 32px; height: 32px; place-items: center; border: 1px solid rgb(201 214 221 / 65%); background: rgb(132 145 155 / 16%); }
 .target-thumbnail span { width: 17px; height: 17px; background: #9aa4aa; clip-path: polygon(50% 0, 92% 26%, 100% 68%, 60% 100%, 12% 82%, 0 34%); }
+.target-thumbnail.is-ship { border-color: rgb(109 210 255 / 82%); background: rgb(18 92 130 / 28%); }
+.target-thumbnail.is-ship span { width: 23px; height: 18px; background: #9ce6ff; clip-path: polygon(50% 0, 63% 32%, 100% 72%, 67% 67%, 58% 100%, 42% 100%, 33% 67%, 0 72%, 37% 32%); }
 .target-lock-progress { display: block; height: 3px; margin-top: 8px; background: rgb(255 189 74 / 18%); overflow: hidden; }
 .target-lock-progress[hidden] { display: none; }
 .target-lock-progress span { display: block; height: 100%; background: #ffbd4a; transition: width 80ms linear; }

@@ -25,6 +25,16 @@ services:
       timeout: 5s
       retries: 10
 
+  migrate:
+    build:
+      context: ./server
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      SPACECONOMY_DATABASE_URL: postgresql+asyncpg://${SPACECONOMY_POSTGRES_USER:-spaceconomy}:${SPACECONOMY_POSTGRES_PASSWORD:-spaceconomy}@postgres:5432/${SPACECONOMY_POSTGRES_DB:-spaceconomy}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   api:
     build:
       context: ./server
@@ -32,9 +42,18 @@ services:
       SPACECONOMY_DATABASE_URL: postgresql+asyncpg://${SPACECONOMY_POSTGRES_USER:-spaceconomy}:${SPACECONOMY_POSTGRES_PASSWORD:-spaceconomy}@postgres:5432/${SPACECONOMY_POSTGRES_DB:-spaceconomy}
       SPACECONOMY_REDIS_URL: redis://redis:6379/0
       SPACECONOMY_JWT_SECRET: ${SPACECONOMY_JWT_SECRET:-change-this-local-development-secret}
+      SPACECONOMY_PUBLIC_API_URL: ${SPACECONOMY_PUBLIC_API_URL:-http://127.0.0.1:8000}
+      SPACECONOMY_SMTP_HOST: ${SPACECONOMY_SMTP_HOST:-}
+      SPACECONOMY_SMTP_PORT: ${SPACECONOMY_SMTP_PORT:-587}
+      SPACECONOMY_SMTP_USERNAME: ${SPACECONOMY_SMTP_USERNAME:-}
+      SPACECONOMY_SMTP_PASSWORD: ${SPACECONOMY_SMTP_PASSWORD:-}
+      SPACECONOMY_SMTP_FROM_EMAIL: ${SPACECONOMY_SMTP_FROM_EMAIL:-no-reply@spaceconomy.local}
+      SPACECONOMY_SMTP_USE_TLS: ${SPACECONOMY_SMTP_USE_TLS:-true}
     ports:
       - "8000:8000"
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:

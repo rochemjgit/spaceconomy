@@ -2,6 +2,7 @@ import {
   AbstractMesh,
   ArcRotateCamera,
   Color3,
+  DynamicTexture,
   Engine,
   GlowLayer,
   HemisphericLight,
@@ -21,16 +22,38 @@ export interface SceneController {
   warpTo(destination: Vector3): boolean
   setModuleActive(moduleName: string, isActive: boolean): void
   toggleTargetLock(): void
+  updateRemotePilot?(pilot: RemotePilot): void
+  removeRemotePilot?(pilotId: string): void
+  setRemotePilotMining?(pilotId: string, active: boolean, target: Vector3): void
+  setHostileTargeting?(pilotId: string, active: boolean): void
+}
+
+export interface RemotePilot {
+  pilotId: string
+  displayName: string
+  shipType: string
+  position: Vector3
+  yaw: number
+  pitch: number
+  roll: number
 }
 
 export interface SceneOptions {
-  onFlightUpdate: (position: Vector3, speed: number, flightAssistEnabled: boolean) => void
+  onFlightUpdate: (position: Vector3, speed: number, flightAssistEnabled: boolean, yaw: number, pitch: number, roll: number) => void
   onDockingAvailabilityChange?: (isAvailable: boolean) => void
   onWarpUpdate?: (isWarping: boolean, phase: WarpPhase, progress: number) => void
-  onTargetSelectionChange?: (target?: { name: string; position: Vector3; oreRemainingCubicMeters: number; initialOreCubicMeters: number; locked: boolean; locking: boolean; lockProgress: number }) => void
+  onTargetSelectionChange?: (target?: { name: string; kind: 'asteroid' | 'pilot'; shipType?: string; position: Vector3; oreRemainingCubicMeters: number; initialOreCubicMeters: number; locked: boolean; locking: boolean; lockProgress: number }) => void
   onShipStatusChange?: (status: ShipStatus) => void
   onModuleActiveChange?: (moduleName: string, isActive: boolean) => void
+  onMiningLaserUpdate?: (active: boolean, target?: Vector3) => void
+  onPilotTargetLockChange?: (pilotId: string, active: boolean) => void
   hasShieldGenerator?: boolean
+  initialPosition?: Vector3
+  initialShields?: number
+  initialHull?: number
+  initialFuelLiters?: number
+  initialPowerMegajoules?: number
+  initialCargoCubicMeters?: number
   initialLaunchSpeed?: number
   initialFlightAssistEnabled?: boolean
 }
@@ -69,6 +92,13 @@ interface AsteroidInteractionTarget {
   baseScaling: Vector3
 }
 
+interface TargetDescriptor {
+  name: string
+  kind: 'asteroid' | 'pilot'
+  pilotId?: string
+  shipType?: string
+}
+
 interface OreChunk {
   mesh: AbstractMesh
   origin: Vector3
@@ -93,6 +123,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   scene.clearColor.set(0.008, 0.016, 0.043, 1)
   const collisionTargets: CollisionTarget[] = []
   const asteroidTargets = new Map<number, AsteroidInteractionTarget>()
+  const targetDescriptors = new Map<number, TargetDescriptor>()
   const registerCollisionTarget = (mesh: AbstractMesh, name: string, massKg: number, radius: number, fatal = false) => {
     collisionTargets.push({ mesh, name, massKg, radius, fatal })
   }
@@ -104,6 +135,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       oreRemainingCubicMeters: oreVolume,
       baseScaling: mesh.scaling.clone(),
     })
+    targetDescriptors.set(mesh.uniqueId, { name, kind: 'asteroid' })
     registerCollisionTarget(mesh, name, 4_000_000_000, radius * 1.3)
   }
   const planetPosition = new Vector3(119_678, 0, 0)
@@ -269,13 +301,114 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   }
 
   const ship = new TransformNode('starter-ship', scene)
-  ship.position = launchPosition.clone()
+  ship.position = options.initialPosition?.clone() ?? launchPosition.clone()
   const hull = MeshBuilder.CreateBox('starter-ship-hull', { width: 1.7, height: 0.6, depth: 3.2 }, scene)
   hull.parent = ship
   const shipMaterial = new StandardMaterial('starter-ship-material', scene)
   shipMaterial.emissiveColor = new Color3(0.32, 0.04, 0.04)
   shipMaterial.diffuseColor = new Color3(0.45, 0.03, 0.03)
   hull.material = shipMaterial
+  const remotePilots = new Map<string, { ship: TransformNode; targetMesh: Mesh; destination: Vector3; yaw: number; pitch: number; roll: number; miningBeam?: Mesh; miningTarget?: Vector3 }>()
+  const updateRemotePilot = (pilot: RemotePilot) => {
+    let remote = remotePilots.get(pilot.pilotId)
+    if (!remote) {
+      const remoteShip = new TransformNode(`remote-pilot-${pilot.pilotId}`, scene)
+      remoteShip.position.copyFrom(pilot.position)
+      const remoteMaterial = new StandardMaterial(`remote-pilot-material-${pilot.pilotId}`, scene)
+      remoteMaterial.diffuseColor = new Color3(0.04, 0.35, 0.55)
+      remoteMaterial.emissiveColor = new Color3(0.02, 0.15, 0.32)
+      const remoteHull = MeshBuilder.CreateBox(`remote-pilot-hull-${pilot.pilotId}`, { width: 1.7, height: 0.6, depth: 3.2 }, scene)
+      remoteHull.material = remoteMaterial
+      remoteHull.parent = remoteShip
+      remoteHull.isPickable = true
+      targetDescriptors.set(remoteHull.uniqueId, { name: pilot.displayName, kind: 'pilot', pilotId: pilot.pilotId, shipType: pilot.shipType })
+      const remoteNose = MeshBuilder.CreateCylinder(`remote-pilot-nose-${pilot.pilotId}`, {
+        height: 1.9,
+        diameterTop: 0.08,
+        diameterBottom: 1.45,
+        tessellation: 4,
+      }, scene)
+      remoteNose.parent = remoteShip
+      remoteNose.position.z = 2.35
+      remoteNose.rotation.x = Math.PI / 2
+      remoteNose.material = remoteMaterial
+      const remoteEngineMaterial = new StandardMaterial(`remote-pilot-engine-material-${pilot.pilotId}`, scene)
+      remoteEngineMaterial.emissiveColor = new Color3(0.1, 0.9, 1)
+      remoteEngineMaterial.diffuseColor = new Color3(0.02, 0.1, 0.16)
+      for (const engineX of [-0.52, 0.52]) {
+        const remoteEngine = MeshBuilder.CreateCylinder(`remote-pilot-engine-${pilot.pilotId}-${engineX}`, {
+          height: 0.85,
+          diameterTop: 0.42,
+          diameterBottom: 0.55,
+          tessellation: 8,
+        }, scene)
+        remoteEngine.parent = remoteShip
+        remoteEngine.position.set(engineX, 0, -1.8)
+        remoteEngine.rotation.x = -Math.PI / 2
+        remoteEngine.material = remoteEngineMaterial
+      }
+      for (const side of [-1, 1]) {
+        const remoteThruster = MeshBuilder.CreateCylinder(`remote-pilot-strafe-${pilot.pilotId}-${side}`, {
+          height: 0.7,
+          diameterTop: 0.2,
+          diameterBottom: 0.46,
+          tessellation: 8,
+        }, scene)
+        remoteThruster.parent = remoteShip
+        remoteThruster.position.set(side * 1.15, 0, -0.65)
+        remoteThruster.rotation.z = side * Math.PI / 2
+        remoteThruster.material = remoteEngineMaterial
+      }
+      const nameplate = MeshBuilder.CreatePlane(`remote-pilot-nameplate-${pilot.pilotId}`, { width: 5, height: 0.75 }, scene)
+      const nameplateTexture = new DynamicTexture(`remote-pilot-nameplate-texture-${pilot.pilotId}`, { width: 512, height: 80 }, scene, true)
+      nameplateTexture.hasAlpha = true
+      nameplateTexture.drawText(pilot.displayName, null, 54, 'bold 44px sans-serif', '#d9f4ff', 'transparent', true)
+      const nameplateMaterial = new StandardMaterial(`remote-pilot-nameplate-material-${pilot.pilotId}`, scene)
+      nameplateMaterial.diffuseTexture = nameplateTexture
+      nameplateMaterial.emissiveTexture = nameplateTexture
+      nameplateMaterial.opacityTexture = nameplateTexture
+      nameplateMaterial.disableLighting = true
+      nameplate.material = nameplateMaterial
+      nameplate.parent = remoteShip
+      nameplate.position.y = 3
+      nameplate.billboardMode = Mesh.BILLBOARDMODE_ALL
+      nameplate.isPickable = false
+      remoteShip.rotation.set(-pilot.pitch, pilot.yaw, pilot.roll)
+      remote = { ship: remoteShip, targetMesh: remoteHull, destination: pilot.position.clone(), yaw: pilot.yaw, pitch: pilot.pitch, roll: pilot.roll }
+      remotePilots.set(pilot.pilotId, remote)
+    }
+    remote.destination.copyFrom(pilot.position)
+    remote.yaw = pilot.yaw
+    remote.pitch = pilot.pitch
+    remote.roll = pilot.roll
+  }
+  const removeRemotePilot = (pilotId: string) => {
+    const remote = remotePilots.get(pilotId)
+    remote?.miningBeam?.dispose()
+    if (remote) targetDescriptors.delete(remote.targetMesh.uniqueId)
+    remote?.ship.dispose(false, true)
+    remotePilots.delete(pilotId)
+  }
+  const remoteMiningMaterial = new StandardMaterial('remote-mining-laser-material', scene)
+  remoteMiningMaterial.emissiveColor = new Color3(0.05, 0.8, 1)
+  remoteMiningMaterial.diffuseColor = new Color3(0.02, 0.3, 0.5)
+  const setRemotePilotMining = (pilotId: string, active: boolean, target: Vector3) => {
+    const remote = remotePilots.get(pilotId)
+    if (!remote) return
+    if (!active) {
+      remote.miningBeam?.setEnabled(false)
+      remote.miningTarget = undefined
+      return
+    }
+    if (!remote.miningBeam) {
+      remote.miningBeam = MeshBuilder.CreateTube(`remote-mining-laser-${pilotId}`, { path: [remote.ship.position, target], radius: 0.2, tessellation: 8 }, scene)
+      remote.miningBeam.material = remoteMiningMaterial
+      remote.miningBeam.isPickable = false
+      glow.addIncludedOnlyMesh(remote.miningBeam)
+    }
+    remote.miningBeam.setEnabled(true)
+    remote.miningTarget = target.clone()
+  }
   const shipMassKg = 25_000
   const shipCollisionRadius = 3
   const hasShieldGenerator = options.hasShieldGenerator ?? true
@@ -286,11 +419,12 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   const powerRegenerationMegawatts = 8
   const miningLaserPowerDrawMegawatts = 12
   const maximumCargoCubicMeters = 24
-  let shields = maximumShields
-  let hullIntegrity = maximumHull
-  let fuelLiters = maximumFuelLiters
-  let powerMegajoules = maximumPowerMegajoules
-  let cargoCubicMeters = 0
+  let shields = options.initialShields ?? maximumShields
+  let hullIntegrity = options.initialHull ?? maximumHull
+  let fuelLiters = options.initialFuelLiters ?? maximumFuelLiters
+  let powerMegajoules = options.initialPowerMegajoules ?? maximumPowerMegajoules
+  let cargoCubicMeters = options.initialCargoCubicMeters ?? 0
+  let miningLaserReportedActive = false
   const activeModules = new Set<string>()
   const shieldBubbleMaterial = new StandardMaterial('starter-ship-shield-bubble-material', scene)
   shieldBubbleMaterial.diffuseColor = new Color3(0.08, 0.58, 1)
@@ -301,7 +435,8 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   shieldBubble.parent = ship
   shieldBubble.isPickable = false
   shieldBubble.material = shieldBubbleMaterial
-  shieldBubble.setEnabled(hasShieldGenerator)
+  shieldBubble.setEnabled(false)
+  let shieldImpactSeconds = 0
   let isDestroyed = false
   let explosionAge = 0
   const explosionMaterial = new StandardMaterial('ship-explosion-material', scene)
@@ -377,6 +512,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       const impactDamage = Math.min(200, (0.5 * reducedMass * velocity.lengthSquared()) / 500_000_000)
       const shieldDamage = Math.min(shields, impactDamage)
       shields -= shieldDamage
+      if (shieldDamage > 0) shieldImpactSeconds = 0.35
       hullIntegrity = Math.max(0, hullIntegrity - (impactDamage - shieldDamage))
       const normal = separation > 0 ? offset.scale(1 / separation) : Vector3.Up()
       ship.position.copyFrom(target.mesh.getAbsolutePosition().add(normal.scale(collisionDistance + 0.1)))
@@ -585,6 +721,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   let lockingTarget: { asteroid: AbstractMesh; elapsedSeconds: number } | undefined
   let targetBrackets: TransformNode | undefined
   let lockedTargetBrackets: TransformNode | undefined
+  const hostileTargetBrackets = new Map<string, TransformNode>()
   const miningLaserRange = 2_500
   const miningLaserMaterial = new StandardMaterial('mining-laser-beam-material', scene)
   miningLaserMaterial.diffuseColor = new Color3(0.1, 0.8, 0.45)
@@ -611,7 +748,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   miningImpactMaterial.emissiveColor = new Color3(1, 0.5, 0.08)
   miningImpactMaterial.disableLighting = true
   let nextMiningImpactSeconds = 0
-  let nextOreChunkSeconds = 2 + Math.random() * 3
+  let nextOreChunkSeconds = 0.3
   const targetLockDurationSeconds = 1.5
   const clearTarget = () => {
     targetBrackets?.dispose()
@@ -619,24 +756,29 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     targetedAsteroid = undefined
   }
   const reportTargetLock = () => {
-    const targetMesh = lockedAsteroid ?? lockingTarget?.asteroid
+    const targetMesh = lockedAsteroid ?? lockingTarget?.asteroid ?? targetedAsteroid
     if (!targetMesh) {
       options.onTargetSelectionChange?.()
       return
     }
-    const target = asteroidTargets.get(targetMesh.uniqueId)
-    if (!target) return
+    const descriptor = targetDescriptors.get(targetMesh.uniqueId)
+    if (!descriptor) return
+    const asteroid = asteroidTargets.get(targetMesh.uniqueId)
     options.onTargetSelectionChange?.({
-      name: target.name,
+      name: descriptor.name,
+      kind: descriptor.kind,
+      shipType: descriptor.shipType,
       position: targetMesh.getAbsolutePosition().clone(),
-      oreRemainingCubicMeters: target.oreRemainingCubicMeters,
-      initialOreCubicMeters: target.initialOreCubicMeters,
+      oreRemainingCubicMeters: asteroid?.oreRemainingCubicMeters ?? 0,
+      initialOreCubicMeters: asteroid?.initialOreCubicMeters ?? 0,
       locked: lockedAsteroid !== undefined,
       locking: lockingTarget !== undefined,
       lockProgress: lockingTarget ? Math.min(1, lockingTarget.elapsedSeconds / targetLockDurationSeconds) : 1,
     })
   }
   const unlockTarget = () => {
+    const targetPilotId = targetDescriptors.get((lockedAsteroid ?? lockingTarget?.asteroid)?.uniqueId ?? -1)?.pilotId
+    if (targetPilotId) options.onPilotTargetLockChange?.(targetPilotId, false)
     lockedTargetBrackets?.dispose()
     lockedTargetBrackets = undefined
     lockedAsteroid = undefined
@@ -657,11 +799,12 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     }
     if (lockedAsteroid) return
     if (lockingTarget?.asteroid === targetedAsteroid) {
-      lockingTarget = undefined
-      reportTargetLock()
+      unlockTarget()
       return
     }
     lockingTarget = { asteroid: targetedAsteroid, elapsedSeconds: 0 }
+    const targetPilotId = targetDescriptors.get(targetedAsteroid.uniqueId)?.pilotId
+    if (targetPilotId) options.onPilotTargetLockChange?.(targetPilotId, true)
     reportTargetLock()
   }
   const createTargetBrackets = (bracketColor: Color3, kind: string) => {
@@ -679,10 +822,18 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     })
     return brackets
   }
+  const setHostileTargeting = (pilotId: string, active: boolean) => {
+    if (active && !hostileTargetBrackets.has(pilotId)) {
+      hostileTargetBrackets.set(pilotId, createTargetBrackets(new Color3(1, 0.08, 0.08), 'hostile'))
+    }
+    if (!active) {
+      hostileTargetBrackets.get(pilotId)?.dispose()
+      hostileTargetBrackets.delete(pilotId)
+    }
+  }
   const showTargetBrackets = (asteroid: AbstractMesh) => {
     if (lockingTarget && lockingTarget.asteroid !== asteroid) {
-      lockingTarget = undefined
-      reportTargetLock()
+      unlockTarget()
     }
     targetBrackets?.dispose()
     targetedAsteroid = asteroid
@@ -691,13 +842,17 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   const handleClick = (event: MouseEvent) => {
     if (event.button !== 0 || warp) return
     const rect = canvas.getBoundingClientRect()
-    const picked = scene.pick(event.clientX - rect.left, event.clientY - rect.top)
-    const asteroid = picked?.hit && picked.pickedMesh ? asteroidTargets.get(picked.pickedMesh.uniqueId) : undefined
-    if (!asteroid || !picked?.pickedMesh) {
+    const picked = scene.pick(
+      event.clientX - rect.left,
+      event.clientY - rect.top,
+      (mesh) => targetDescriptors.has(mesh.uniqueId),
+    )
+    if (!picked?.hit || !picked.pickedMesh) {
       clearTarget()
       return
     }
     showTargetBrackets(picked.pickedMesh)
+    reportTargetLock()
     if (event.detail === 2 && !lockedAsteroid) toggleTargetLock()
   }
   canvas.addEventListener('pointerdown', handleMouseDown, true)
@@ -845,7 +1000,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       ship.position.addInPlace(velocity.scale(deltaSeconds))
     }
     resolveWorldCollisions()
-    const miningTarget = lockedAsteroid
+    const miningTarget = lockedAsteroid ?? lockingTarget?.asteroid
     const miningTargetDetails = miningTarget ? asteroidTargets.get(miningTarget.uniqueId) : undefined
     const miningLaserActive = Boolean(
       miningTarget
@@ -857,6 +1012,10 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       && Vector3.Distance(ship.position, miningTarget.getAbsolutePosition()) <= miningLaserRange,
     )
     miningLaserBeam.setEnabled(miningLaserActive)
+    if (miningLaserActive !== miningLaserReportedActive) {
+      miningLaserReportedActive = miningLaserActive
+      options.onMiningLaserUpdate?.(miningLaserActive, miningTarget?.getAbsolutePosition())
+    }
     if (miningLaserActive && miningTarget && miningTargetDetails) {
       const targetPosition = miningTarget.getAbsolutePosition()
       const beamSource = ship.position.add(shipForward.scale(2.5)).add(Vector3.Up().scale(0.35))
@@ -959,13 +1118,13 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       explosionMaterial.alpha = Math.max(0, 1 - explosionAge / 1.2)
       if (explosionAge >= 2.5) respawnShip()
     }
-    shieldBubble.setEnabled(hasShieldGenerator && shields > 0 && !isDestroyed)
+    shieldImpactSeconds = Math.max(0, shieldImpactSeconds - deltaSeconds)
+    shieldBubble.setEnabled(hasShieldGenerator && shieldImpactSeconds > 0 && !isDestroyed)
     if (shieldBubble.isEnabled()) {
-      const shieldFraction = shields / maximumShields
-      const shieldVisibility = shieldFraction * shieldFraction
-      shieldBubbleMaterial.alpha = 0.3 * shieldVisibility
-      shieldBubbleMaterial.emissiveColor.copyFromFloats(0.02 * shieldVisibility, 0.25 * shieldVisibility, 0.62 * shieldVisibility)
-      shieldBubble.scaling.setAll(1 + Math.sin(now / 260) * 0.025)
+      const impactVisibility = shieldImpactSeconds / 0.35
+      shieldBubbleMaterial.alpha = 0.55 * impactVisibility
+      shieldBubbleMaterial.emissiveColor.copyFromFloats(0.08 * impactVisibility, 0.65 * impactVisibility, impactVisibility)
+      shieldBubble.scaling.setAll(1 + (1 - impactVisibility) * 0.18)
     }
     star.scaling.setAll(Math.max(minimumStarVisualScale, Math.min(1, starVisualScaleDistance / Vector3.Distance(ship.position, star.position))))
     ship.rotation.set(-shipPitch, shipYaw, shipRoll)
@@ -976,15 +1135,32 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       targetBrackets.setEnabled(!lockingTarget || Math.floor(now / 130) % 2 === 0)
       targetBrackets.position.copyFrom(targetedAsteroid.getAbsolutePosition())
       targetBrackets.rotationQuaternion = camera.absoluteRotation.clone()
-      targetBrackets.scaling.setAll(targetedAsteroid.getBoundingInfo().boundingSphere.radiusWorld + 30)
+      targetBrackets.scaling.setAll(targetedAsteroid.getBoundingInfo().boundingSphere.radiusWorld * 1.35)
     }
     if (lockedAsteroid && lockedTargetBrackets) {
       lockedTargetBrackets.position.copyFrom(lockedAsteroid.getAbsolutePosition())
       lockedTargetBrackets.rotationQuaternion = camera.absoluteRotation.clone()
-      lockedTargetBrackets.scaling.setAll(lockedAsteroid.getBoundingInfo().boundingSphere.radiusWorld + 30)
+      lockedTargetBrackets.scaling.setAll(lockedAsteroid.getBoundingInfo().boundingSphere.radiusWorld * 1.35)
     }
     const actualSpeed = Vector3.Distance(ship.position, frameStartPosition) / deltaSeconds
-    options.onFlightUpdate(ship.position, actualSpeed, flightAssistEnabled)
+    for (const [pilotId, remote] of remotePilots) {
+      remote.ship.position = Vector3.Lerp(remote.ship.position, remote.destination, Math.min(1, deltaSeconds * 8))
+      remote.ship.rotation.x += (-remote.pitch - remote.ship.rotation.x) * Math.min(1, deltaSeconds * 8)
+      remote.ship.rotation.y += Math.atan2(Math.sin(remote.yaw - remote.ship.rotation.y), Math.cos(remote.yaw - remote.ship.rotation.y)) * Math.min(1, deltaSeconds * 8)
+      remote.ship.rotation.z += (remote.roll - remote.ship.rotation.z) * Math.min(1, deltaSeconds * 8)
+      const hostileBrackets = hostileTargetBrackets.get(pilotId)
+      if (hostileBrackets) {
+        hostileBrackets.position.copyFrom(remote.targetMesh.getAbsolutePosition())
+        hostileBrackets.rotationQuaternion = camera.absoluteRotation.clone()
+        hostileBrackets.scaling.setAll(remote.targetMesh.getBoundingInfo().boundingSphere.radiusWorld * 1.35)
+        hostileBrackets.setEnabled(Math.floor(now / 260) % 2 === 0)
+      }
+      if (remote.miningBeam?.isEnabled() && remote.miningTarget) {
+        const beamSource = remote.ship.position.add(remote.ship.getDirection(Vector3.Forward()).scale(2.5)).add(Vector3.Up().scale(0.35))
+        MeshBuilder.CreateTube(remote.miningBeam.name, { path: [beamSource, remote.miningTarget], radius: 0.2, tessellation: 8, instance: remote.miningBeam }, scene)
+      }
+    }
+    options.onFlightUpdate(ship.position, actualSpeed, flightAssistEnabled, shipYaw, shipPitch, shipRoll)
     const isDockingAvailable = Vector3.Distance(ship.position, stationPosition) <= stationShieldRadius
     if (isDockingAvailable !== dockingAvailable) {
       dockingAvailable = isDockingAvailable
@@ -1000,6 +1176,10 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     warpTo,
     setModuleActive,
     toggleTargetLock,
+    updateRemotePilot,
+    removeRemotePilot,
+    setRemotePilotMining,
+    setHostileTargeting,
     dispose() {
       resizeObserver.disconnect()
       if (document.pointerLockElement === canvas) document.exitPointerLock()

@@ -15,7 +15,365 @@ const app = document.querySelector<HTMLDivElement>('#app')
 if (!app) {
   throw new Error('Application root was not found.')
 }
+const appRoot = app
 
+const apiBaseUrl = 'http://127.0.0.1:8000/api/v1'
+const refreshTokenStorageKey = 'spaceconomy.refresh-token'
+const rememberedEmailStorageKey = 'spaceconomy.remembered-email'
+// Remove this local sign-in shortcut before any non-development distribution.
+const enableDevelopmentCredentialFallback = import.meta.env.DEV
+const developmentCredentials = { email: 'rochemj@gmail.com', password: 'spaceconomy' }
+
+type SavedShipState = {
+  position_x: number
+  position_y: number
+  position_z: number
+  docked_station_name: string | null
+  power_megajoules: number
+  shields: number
+  hull: number
+  fuel_liters: number
+  cargo_cubic_meters: number
+}
+
+function renderAuthentication() {
+  appRoot.innerHTML = `
+    <main class="auth-launch" aria-labelledby="auth-title">
+      <form id="auth-form" class="auth-panel">
+        <p class="eyebrow">PILOT ACCESS</p>
+        <h1 id="auth-title">ENTER SPACECONOMY</h1>
+        <p class="auth-copy">Sign in to select a pilot.</p>
+        <label>EMAIL<input id="auth-email" type="email" autocomplete="email" required maxlength="320"></label>
+        <label>PASSWORD<input id="auth-password" type="password" autocomplete="current-password" required minlength="8" maxlength="256"></label>
+        <label class="remember-me"><input id="remember-me" type="checkbox"> REMEMBER EMAIL AND SESSION</label>
+        <p id="auth-error" class="auth-error" role="alert" hidden></p>
+        <button id="auth-submit" class="auth-submit" type="submit">SIGN IN</button>
+        <button id="create-account" class="auth-mode-toggle" type="button">CREATE ACCOUNT</button>
+      </form>
+    </main>
+  `
+
+  const form = document.querySelector<HTMLFormElement>('#auth-form')
+  const email = document.querySelector<HTMLInputElement>('#auth-email')
+  const password = document.querySelector<HTMLInputElement>('#auth-password')
+  const rememberMe = document.querySelector<HTMLInputElement>('#remember-me')
+  const error = document.querySelector<HTMLElement>('#auth-error')
+  const submit = document.querySelector<HTMLButtonElement>('#auth-submit')
+  const createAccount = document.querySelector<HTMLButtonElement>('#create-account')
+
+  if (enableDevelopmentCredentialFallback) {
+    email?.removeAttribute('required')
+    password?.removeAttribute('required')
+  }
+
+  form?.addEventListener('submit', (event) => {
+    event.preventDefault()
+    if (!email || !password || !submit) return
+    void (async () => {
+      const useDevelopmentCredentials = enableDevelopmentCredentialFallback && !email.value.trim() && !password.value
+      const submittedEmail = useDevelopmentCredentials ? developmentCredentials.email : email.value
+      const submittedPassword = useDevelopmentCredentials ? developmentCredentials.password : password.value
+      submit.disabled = true
+      error?.setAttribute('hidden', '')
+      try {
+        const response = await fetch(`${apiBaseUrl}/auth/login`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            email: submittedEmail,
+            password: submittedPassword,
+          }),
+        })
+        const payload = await response.json() as {
+          access_token?: string
+          detail?: string
+          pilots?: { id: string; display_name: string }[]
+          refresh_token?: string
+        }
+        if (!response.ok || !payload.access_token || !payload.refresh_token || !payload.pilots) {
+          if (error) {
+            error.textContent = payload.detail ?? 'Unable to authenticate this pilot.'
+            error.removeAttribute('hidden')
+          }
+          return
+        }
+        if (rememberMe?.checked) {
+          localStorage.setItem(refreshTokenStorageKey, payload.refresh_token)
+          localStorage.setItem(rememberedEmailStorageKey, submittedEmail)
+        } else {
+          sessionStorage.setItem(refreshTokenStorageKey, payload.refresh_token)
+          localStorage.removeItem(refreshTokenStorageKey)
+          localStorage.removeItem(rememberedEmailStorageKey)
+        }
+        renderPilotSelection(payload.access_token, payload.pilots)
+      } catch {
+        if (error) {
+          error.textContent = 'The authentication service is unavailable.'
+          error.removeAttribute('hidden')
+        }
+      } finally {
+        submit.disabled = false
+      }
+    })()
+  })
+  createAccount?.addEventListener('click', renderAccountCreation)
+  if (email) {
+    email.value = localStorage.getItem(rememberedEmailStorageKey) ?? ''
+    email.focus()
+  }
+}
+
+function renderAccountCreation() {
+  appRoot.innerHTML = `
+    <main class="auth-launch" aria-labelledby="account-create-title">
+      <form id="account-create-form" class="auth-panel">
+        <p class="eyebrow">ACCOUNT REGISTRATION</p>
+        <h1 id="account-create-title">CREATE ACCOUNT</h1>
+        <p class="auth-copy">Confirm your email address to activate the account.</p>
+        <label>FIRST NAME<input id="account-first-name" type="text" autocomplete="given-name" required maxlength="128"></label>
+        <label>LAST NAME<input id="account-last-name" type="text" autocomplete="family-name" required maxlength="128"></label>
+        <label>EMAIL<input id="account-email" type="email" autocomplete="email" required maxlength="320"></label>
+        <label>PASSWORD<input id="account-password" type="password" autocomplete="new-password" required minlength="8" maxlength="256"></label>
+        <label>CONFIRM PASSWORD<input id="account-confirm-password" type="password" autocomplete="new-password" required minlength="8" maxlength="256"></label>
+        <p id="account-create-error" class="auth-error" role="alert" hidden></p>
+        <button id="account-create-submit" class="auth-submit" type="submit">CREATE ACCOUNT</button>
+        <button id="account-create-back" class="auth-mode-toggle" type="button">BACK TO SIGN IN</button>
+      </form>
+    </main>
+  `
+  const form = document.querySelector<HTMLFormElement>('#account-create-form')
+  const firstName = document.querySelector<HTMLInputElement>('#account-first-name')
+  const lastName = document.querySelector<HTMLInputElement>('#account-last-name')
+  const email = document.querySelector<HTMLInputElement>('#account-email')
+  const password = document.querySelector<HTMLInputElement>('#account-password')
+  const confirmPassword = document.querySelector<HTMLInputElement>('#account-confirm-password')
+  const error = document.querySelector<HTMLElement>('#account-create-error')
+  const submit = document.querySelector<HTMLButtonElement>('#account-create-submit')
+
+  form?.addEventListener('submit', (event) => {
+    event.preventDefault()
+    if (!firstName || !lastName || !email || !password || !confirmPassword || !submit) return
+    if (password.value !== confirmPassword.value) {
+      if (error) {
+        error.textContent = 'Passwords do not match.'
+        error.removeAttribute('hidden')
+      }
+      return
+    }
+    void (async () => {
+      submit.disabled = true
+      error?.setAttribute('hidden', '')
+      try {
+        const response = await fetch(`${apiBaseUrl}/auth/register`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            first_name: firstName.value,
+            last_name: lastName.value,
+            email: email.value,
+            password: password.value,
+            confirm_password: confirmPassword.value,
+          }),
+        })
+        const payload = await response.json() as {
+          detail?: string
+          message?: string
+        }
+        if (!response.ok) {
+          if (error) {
+            error.textContent = payload.detail ?? 'Unable to create this account.'
+            error.removeAttribute('hidden')
+          }
+          return
+        }
+        renderAccountConfirmation(email.value, payload.message)
+      } catch {
+        if (error) {
+          error.textContent = 'The authentication service is unavailable.'
+          error.removeAttribute('hidden')
+        }
+      } finally {
+        submit.disabled = false
+      }
+    })()
+  })
+  document.querySelector<HTMLButtonElement>('#account-create-back')?.addEventListener(
+    'click', renderAuthentication,
+  )
+  email?.focus()
+}
+
+function renderAccountConfirmation(email: string, message?: string) {
+  appRoot.innerHTML = `
+    <main class="auth-launch" aria-labelledby="account-confirmation-title">
+      <section class="auth-panel">
+        <p class="eyebrow">CONFIRMATION REQUIRED</p>
+        <h1 id="account-confirmation-title">CHECK YOUR EMAIL</h1>
+        <p class="auth-copy">${message ?? `An activation link was sent to ${email}.`}</p>
+        <button id="account-confirmation-back" class="auth-submit" type="button">BACK TO SIGN IN</button>
+      </section>
+    </main>
+  `
+  document.querySelector<HTMLButtonElement>('#account-confirmation-back')?.addEventListener(
+    'click', renderAuthentication,
+  )
+}
+
+function renderPilotCreation(accountAccessToken: string) {
+  appRoot.innerHTML = `
+    <main class="auth-launch" aria-labelledby="pilot-create-title">
+      <form id="pilot-create-form" class="auth-panel">
+        <p class="eyebrow">PILOT REGISTRY</p>
+        <h1 id="pilot-create-title">CREATE YOUR PILOT</h1>
+        <p class="auth-copy">Choose a name for your first pilot.</p>
+        <label>PILOT NAME<input id="pilot-name" type="text" autocomplete="nickname" required minlength="1" maxlength="32"></label>
+        <p id="pilot-create-error" class="auth-error" role="alert" hidden></p>
+        <button id="pilot-create-submit" class="auth-submit" type="submit">CREATE PILOT</button>
+      </form>
+    </main>
+  `
+  const form = document.querySelector<HTMLFormElement>('#pilot-create-form')
+  const name = document.querySelector<HTMLInputElement>('#pilot-name')
+  const error = document.querySelector<HTMLElement>('#pilot-create-error')
+  const submit = document.querySelector<HTMLButtonElement>('#pilot-create-submit')
+  form?.addEventListener('submit', (event) => {
+    event.preventDefault()
+    if (!name || !submit) return
+    void (async () => {
+      submit.disabled = true
+      error?.setAttribute('hidden', '')
+      try {
+        const response = await fetch(`${apiBaseUrl}/auth/create-pilot`, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${accountAccessToken}`,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ display_name: name.value }),
+        })
+        const payload = await response.json() as { id?: string; display_name?: string; detail?: string }
+        if (!response.ok || !payload.id || !payload.display_name) {
+          throw new Error(payload.detail ?? 'Unable to create this pilot.')
+        }
+        renderPilotSelection(accountAccessToken, [{ id: payload.id, display_name: payload.display_name }])
+      } catch (reason) {
+        submit.disabled = false
+        if (error) {
+          error.textContent = reason instanceof Error ? reason.message : 'Unable to create this pilot.'
+          error.removeAttribute('hidden')
+        }
+      }
+    })()
+  })
+  name?.focus()
+}
+
+function renderPilotSelection(
+  accountAccessToken: string,
+  pilots: { id: string; display_name: string }[],
+) {
+  let selectedPilot = pilots[0]
+  if (!selectedPilot) {
+    renderPilotCreation(accountAccessToken)
+    return
+  }
+  appRoot.innerHTML = `
+    <main class="auth-launch loading-room" aria-labelledby="loading-room-title">
+      <section class="loading-room-panel">
+        <div class="loading-room-heading">
+          <div><p class="eyebrow">KEPLER STATION // LAUNCH BAY 04</p><h1 id="loading-room-title">PILOT READY</h1></div>
+          <span class="loading-room-status"><i></i> LINK ESTABLISHED</span>
+        </div>
+        <div class="loading-room-content">
+          <nav class="pilot-roster" aria-label="Pilot roster">
+            <p class="eyebrow">PILOT ROSTER</p>
+            ${pilots.map((pilot, index) => `<button class="pilot-select${index === 0 ? ' is-selected' : ''}" type="button" data-pilot-id="${pilot.id}">${pilot.display_name}</button>`).join('')}
+          </nav>
+          <section class="pilot-briefing" aria-live="polite">
+            <p class="eyebrow">FLIGHT BRIEFING</p>
+            <h2 id="loading-pilot-name">${selectedPilot.display_name}</h2>
+            <p class="pilot-clearance">LICENSE: LOCAL SYSTEM EXPLORER</p>
+            <dl class="pilot-statistics">
+              <div><dt>ASSIGNED SHIP</dt><dd>STARTER CORVETTE</dd></div>
+              <div><dt>HULL INTEGRITY</dt><dd>100%</dd></div>
+              <div><dt>SHIELD CAPACITY</dt><dd>100 / 100</dd></div>
+              <div><dt>FUEL RESERVE</dt><dd>80.00 L</dd></div>
+              <div><dt>CARGO CAPACITY</dt><dd>0.00 / 24.00 M3</dd></div>
+              <div><dt>LOCATION</dt><dd>KEPLER STATION</dd></div>
+            </dl>
+          </section>
+        </div>
+        <p id="pilot-select-error" class="auth-error" role="alert" hidden></p>
+        <div class="loading-room-actions">
+          <button id="pilot-select-launch" class="launch-button" type="button">LAUNCH</button>
+          <button id="pilot-select-sign-out" class="exit-button" type="button">EXIT</button>
+        </div>
+      </section>
+    </main>
+  `
+  const error = document.querySelector<HTMLElement>('#pilot-select-error')
+  const launch = document.querySelector<HTMLButtonElement>('#pilot-select-launch')
+  const name = document.querySelector<HTMLElement>('#loading-pilot-name')
+  document.querySelectorAll<HTMLButtonElement>('[data-pilot-id]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const pilot = pilots.find((candidate) => candidate.id === button.dataset.pilotId)
+      if (!pilot) return
+      selectedPilot = pilot
+      if (name) name.textContent = selectedPilot.display_name
+      document.querySelectorAll<HTMLButtonElement>('[data-pilot-id]').forEach((candidate) => {
+        candidate.classList.toggle('is-selected', candidate === button)
+      })
+      error?.setAttribute('hidden', '')
+    })
+  })
+  launch?.addEventListener('click', () => {
+    void (async () => {
+      launch.disabled = true
+      error?.setAttribute('hidden', '')
+      try {
+        const response = await fetch(`${apiBaseUrl}/auth/select-pilot`, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${accountAccessToken}`,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ pilot_id: selectedPilot.id }),
+        })
+        const payload = await response.json() as { access_token?: string; ship_state?: SavedShipState }
+        if (!response.ok || !payload.access_token || !payload.ship_state) {
+          throw new Error('Pilot activation failed')
+        }
+        launchGame(payload.access_token, payload.ship_state, accountAccessToken, pilots, selectedPilot.id)
+      } catch {
+        launch.disabled = false
+        if (error) {
+          error.textContent = 'Unable to activate this pilot.'
+          error.removeAttribute('hidden')
+        }
+      }
+    })()
+  })
+  document.querySelector<HTMLButtonElement>('#pilot-select-sign-out')?.addEventListener('click', () => {
+    clearStoredSession()
+    renderAuthentication()
+  })
+}
+
+function clearStoredSession() {
+  sessionStorage.removeItem(refreshTokenStorageKey)
+}
+
+renderAuthentication()
+
+function launchGame(
+  pilotAccessToken: string,
+  savedShipState: SavedShipState,
+  accountAccessToken: string,
+  pilots: { id: string; display_name: string }[],
+  selectedPilotId: string,
+) {
+let realtimeSocket: WebSocket | undefined
+let lastRealtimeUpdateAt = 0
 const starterHardpoints = [
   { moduleName: 'Mining Laser', icon: 'ML', name: 'MINING LASER' },
 ]
@@ -24,7 +382,7 @@ const hardpointSlotsMarkup = starterHardpoints.map((hardpoint, index) => `
   <button class="module-slot" type="button" disabled aria-pressed="false" aria-label="Hardpoint ${index + 1}: ${hardpoint.name}" data-hardpoint-index="${index + 1}" data-module="${hardpoint.moduleName}"><span class="module-key">${index + 1}</span><span class="module-icon">${hardpoint.icon}</span><span class="module-name">${hardpoint.name}</span></button>
 `).join('')
 
-app.innerHTML = `
+appRoot.innerHTML = `
   <main class="game-shell">
     <canvas id="game-canvas" aria-label="Spaceconomy game world"></canvas>
     <div class="ship-reticle" aria-hidden="true"></div>
@@ -89,7 +447,7 @@ app.innerHTML = `
     </section>
     <section id="target-window" class="target-window" aria-label="Selected target" hidden>
       <div class="target-window-heading"><p id="target-lock-label" class="eyebrow">TARGET LOCK</p><button id="clear-target" type="button" aria-label="Unlock target">×</button></div>
-      <div class="target-summary"><div class="target-thumbnail" aria-hidden="true"><span></span></div><div><p id="target-name" class="target-name"></p><p id="target-range" class="target-range"></p></div></div>
+      <div id="target-thumbnail" class="target-thumbnail" aria-hidden="true"><span></span></div><div><p id="target-name" class="target-name"></p><p id="target-range" class="target-range"></p></div></div>
       <span id="target-lock-progress" class="target-lock-progress"><span></span></span>
     </section>
     <section id="available-actions" class="available-actions" aria-label="Available actions" hidden>
@@ -238,6 +596,7 @@ const warpAction = document.querySelector<HTMLButtonElement>('#warp-action')
 const warpOverlay = document.querySelector<HTMLElement>('#warp-overlay')
 const warpStars = document.querySelector<HTMLElement>('#warp-stars')
 const targetWindow = document.querySelector<HTMLElement>('#target-window')
+const targetThumbnail = document.querySelector<HTMLElement>('#target-thumbnail')
 const targetName = document.querySelector<HTMLElement>('#target-name')
 const targetRange = document.querySelector<HTMLElement>('#target-range')
 const targetLockLabel = document.querySelector<HTMLElement>('#target-lock-label')
@@ -260,9 +619,27 @@ const minimumMinimapRadius = 20_000
 const maximumMinimapRadius = 400_000
 let minimapRadius = 140_000
 let playerMapPosition = { x: 123_078, y: 480, z: -2_691 }
-let selectedTarget: { name: string; position: Vector3; oreRemainingCubicMeters: number; initialOreCubicMeters: number; locked: boolean; locking: boolean; lockProgress: number } | undefined
+let selectedTarget: { name: string; kind: 'asteroid' | 'pilot'; shipType?: string; position: Vector3; oreRemainingCubicMeters: number; initialOreCubicMeters: number; locked: boolean; locking: boolean; lockProgress: number } | undefined
 let cargoCubicMeters = 0
 let maximumCargoCubicMeters = 24
+let shipPowerMegajoules = savedShipState.power_megajoules
+let shipShields = savedShipState.shields
+let shipHull = savedShipState.hull
+let shipFuelLiters = savedShipState.fuel_liters
+
+function renderSavedShipState() {
+  cargoCubicMeters = savedShipState.cargo_cubic_meters
+  if (powerDisplay) powerDisplay.textContent = `${shipPowerMegajoules.toFixed(2)} / 100.00 MJ`
+  if (powerBar) powerBar.style.width = `${shipPowerMegajoules}%`
+  if (shieldsDisplay) shieldsDisplay.textContent = `${Math.ceil(shipShields)}%`
+  if (hullDisplay) hullDisplay.textContent = `${Math.ceil(shipHull)}%`
+  if (shieldsBar) shieldsBar.style.width = `${shipShields}%`
+  if (hullBar) hullBar.style.width = `${shipHull}%`
+  if (fuelDisplay) fuelDisplay.textContent = `${shipFuelLiters.toFixed(2)} / 80.00 L`
+  if (fuelBar) fuelBar.style.width = `${(shipFuelLiters / 80) * 100}%`
+  if (cargoDisplay) cargoDisplay.textContent = `${cargoCubicMeters.toFixed(2)} / 24.00 M3`
+  if (cargoBar) cargoBar.style.width = `${(cargoCubicMeters / 24) * 100}%`
+}
 let systemMapPanX = 0
 let systemMapPanY = 0
 let systemMapRotation = -18
@@ -288,7 +665,7 @@ const modalContent: Record<ModalName, { eyebrow: string; title: string; content:
   codex: { eyebrow: 'REFERENCE ARCHIVE', title: 'CODEX', content: '<dl class="codex-list"><div><dt>Flight Assist</dt><dd>Automatic braking engages when no thrust input is active.</dd></div><div><dt>Kepler Station</dt><dd>A protected orbital outpost with docking access inside its shield boundary.</dd></div><div><dt>System Map</dt><dd>Your position is shown in green. Stellar bodies and stations appear at their known coordinates.</dd></div></dl>' },
   help: { eyebrow: 'PILOT SUPPORT', title: 'HELP', content: '<p class="modal-copy">Help and mission guidance will be available here as the prototype expands.</p>' },
   controls: { eyebrow: 'FLIGHT CONFIGURATION', title: 'CONTROLS', content: '<dl class="controls-list"><div><dt>W A S D</dt><dd>Strafe and thrust</dd></div><div><dt>SPACE / C</dt><dd>Ascend / descend</dd></div><div><dt>Q / E</dt><dd>Roll ship</dd></div><div><dt>RIGHT MOUSE</dt><dd>Hold and drag to steer</dd></div><div><dt>F</dt><dd>Toggle flight assist</dd></div></dl>' },
-  logout: { eyebrow: 'SESSION', title: 'LOG OUT', content: '<p class="modal-copy">End this local session and return to the launch screen?</p>', actions: '<button id="logout-cancel" class="modal-button" type="button">CANCEL</button><button id="logout-confirm" class="modal-button modal-button-primary" type="button">LOG OUT</button>' },
+  logout: { eyebrow: 'SESSION', title: 'LOG OUT', content: '<p class="modal-copy">End this flight session and return to the pilot screen?</p>', actions: '<button id="logout-cancel" class="modal-button" type="button">CANCEL</button><button id="logout-confirm" class="modal-button modal-button-primary" type="button">LOG OUT</button>' },
 }
 
 function closeGameModal() {
@@ -357,7 +734,39 @@ function openGameModal(name: ModalName) {
   gameModal.removeAttribute('hidden')
   gameModalClose?.focus()
   document.querySelector<HTMLButtonElement>('#logout-cancel')?.addEventListener('click', closeGameModal)
-  document.querySelector<HTMLButtonElement>('#logout-confirm')?.addEventListener('click', () => window.location.reload())
+  document.querySelector<HTMLButtonElement>('#logout-confirm')?.addEventListener('click', () => void logout())
+}
+
+async function logout() {
+  try {
+    await fetch(`${apiBaseUrl}/auth/ship-state`, {
+      method: 'PUT',
+      headers: {
+        authorization: `Bearer ${pilotAccessToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        position_x: playerMapPosition.x,
+        position_y: playerMapPosition.y,
+        position_z: playerMapPosition.z,
+        docked_station_name: document.querySelector('.game-shell')?.classList.contains('is-docked')
+          ? 'KEPLER STATION'
+          : null,
+        power_megajoules: shipPowerMegajoules,
+        shields: shipShields,
+        hull: shipHull,
+        fuel_liters: shipFuelLiters,
+        cargo_cubic_meters: cargoCubicMeters,
+      }),
+    })
+  } finally {
+    closeGameModal()
+    realtimeSocket?.close()
+    window.removeEventListener('keydown', handleGameNavigationKeyDown)
+    window.removeEventListener('keydown', handleHardpointKeyDown)
+    scene.dispose()
+    renderPilotSelection(accountAccessToken, pilots)
+  }
 }
 
 function openShipInventory() {
@@ -386,7 +795,7 @@ document.querySelectorAll<HTMLButtonElement>('[data-modal]').forEach((button) =>
 })
 gameModalClose?.addEventListener('click', closeGameModal)
 document.querySelector<HTMLElement>('[data-modal-close]')?.addEventListener('click', closeGameModal)
-window.addEventListener('keydown', (event) => {
+const handleGameNavigationKeyDown = (event: KeyboardEvent) => {
   if (event.key === 'Escape') {
     closeGameModal()
     closeSystemMap()
@@ -401,7 +810,8 @@ window.addEventListener('keydown', (event) => {
     if (gameModal?.hasAttribute('hidden') === false) closeGameModal()
     else openShipInventory()
   }
-})
+}
+window.addEventListener('keydown', handleGameNavigationKeyDown)
 systemMapClose?.addEventListener('click', closeSystemMap)
 document.querySelector<HTMLElement>('[data-system-map-close]')?.addEventListener('click', closeSystemMap)
 systemPois.forEach((poi) => poi.addEventListener('click', () => selectPoi(poi.dataset.poi as PoiName)))
@@ -446,26 +856,37 @@ systemMapDisplay?.addEventListener('wheel', (event) => {
 updateSystemMapView()
 
 function toggleHardpoint(slot: HTMLButtonElement) {
-  if (!selectedTarget || slot.disabled) return
+  if (!selectedTarget || slot.disabled) {
+    if (collisionAlert) collisionAlert.textContent = 'MINING LASER: SELECT AN ASTEROID FIRST'
+    return
+  }
+  if (!selectedTarget.locked) {
+    scene.toggleTargetLock()
+    if (collisionAlert) collisionAlert.textContent = 'MINING LASER: ACQUIRING TARGET LOCK'
+  }
   const isActive = slot.getAttribute('aria-pressed') === 'true'
   const nextIsActive = !isActive
   slot.setAttribute('aria-pressed', String(nextIsActive))
   slot.classList.toggle('is-active', nextIsActive)
   scene.setModuleActive(slot.dataset.module ?? '', nextIsActive)
+  if (collisionAlert) {
+    collisionAlert.textContent = nextIsActive ? 'MINING LASER: ACTIVE' : 'MINING LASER: STANDBY'
+  }
 }
 
 moduleSlots.forEach((slot) => slot.addEventListener('click', () => toggleHardpoint(slot)))
 
-window.addEventListener('keydown', (event) => {
+const handleHardpointKeyDown = (event: KeyboardEvent) => {
   if (event.repeat || !/^[1-9]$/.test(event.key)) return
   const slot = Array.from(moduleSlots).find((hardpoint) => hardpoint.dataset.hardpointIndex === event.key)
   if (!slot || slot.disabled) return
   event.preventDefault()
   toggleHardpoint(slot)
-})
+}
+window.addEventListener('keydown', handleHardpointKeyDown)
 
 function updateHardpointAvailability() {
-  const hasTarget = selectedTarget !== undefined
+  const hasTarget = selectedTarget?.kind === 'asteroid'
   moduleSlots.forEach((slot) => {
     slot.disabled = !hasTarget
     if (!hasTarget && slot.getAttribute('aria-pressed') === 'true') {
@@ -489,12 +910,14 @@ function positionMapMarker(marker: HTMLElement | null, x: number, z: number) {
 
 function updateTargetWindow() {
   if (!targetWindow || !targetName || !targetRange || !targetLockLabel || !targetLockProgress) return
-  if (!selectedTarget) {
+  if (!selectedTarget?.locked) {
     targetWindow.setAttribute('hidden', '')
     return
   }
   targetLockLabel.textContent = selectedTarget.locking ? 'ACQUIRING LOCK' : 'TARGET LOCK'
   targetName.textContent = selectedTarget.name
+  targetThumbnail?.classList.toggle('is-ship', selectedTarget.kind === 'pilot')
+  targetThumbnail?.setAttribute('data-ship-type', selectedTarget.kind === 'pilot' ? selectedTarget.shipType ?? 'starter-corvette' : '')
   const distance = Vector3.Distance(new Vector3(playerMapPosition.x, playerMapPosition.y, playerMapPosition.z), selectedTarget.position)
   targetRange.textContent = distance >= 1_000 ? `${(distance / 1_000).toFixed(1)} km` : `${distance.toFixed(0)} m`
   targetLockProgress.toggleAttribute('hidden', !selectedTarget.locking)
@@ -524,8 +947,22 @@ minimapField?.addEventListener('wheel', (event) => {
 }, { passive: false })
 updateMinimapMarkers()
 
-function createFlightScene(initialLaunchSpeed = 0, initialFlightAssistEnabled = true) {
+function createFlightScene(
+  initialLaunchSpeed = 0,
+  initialFlightAssistEnabled = true,
+  initialPosition = new Vector3(
+    savedShipState.position_x,
+    savedShipState.position_y,
+    savedShipState.position_z,
+  ),
+) {
   return createSystemScene(gameCanvas, {
+    initialPosition,
+    initialPowerMegajoules: shipPowerMegajoules,
+    initialShields: shipShields,
+    initialHull: shipHull,
+    initialFuelLiters: shipFuelLiters,
+    initialCargoCubicMeters: savedShipState.cargo_cubic_meters,
     initialLaunchSpeed,
     initialFlightAssistEnabled,
     onWarpUpdate(isWarping, phase) {
@@ -544,9 +981,23 @@ function createFlightScene(initialLaunchSpeed = 0, initialFlightAssistEnabled = 
       moduleSlot.setAttribute('aria-pressed', String(isActive))
       moduleSlot.classList.toggle('is-active', isActive)
     },
+    onMiningLaserUpdate(active, target) {
+      if (realtimeSocket?.readyState === WebSocket.OPEN && (target || !active)) {
+        realtimeSocket.send(JSON.stringify({ type: 'mining', payload: { active, target_x: target?.x ?? 0, target_y: target?.y ?? 0, target_z: target?.z ?? 0 } }))
+      }
+    },
+    onPilotTargetLockChange(targetPilotId, active) {
+      if (realtimeSocket?.readyState === WebSocket.OPEN) {
+        realtimeSocket.send(JSON.stringify({ type: 'targeting', payload: { target_pilot_id: targetPilotId, active } }))
+      }
+    },
     onShipStatusChange(status) {
       cargoCubicMeters = status.cargoCubicMeters
       maximumCargoCubicMeters = status.maximumCargoCubicMeters
+      shipPowerMegajoules = status.powerMegajoules
+      shipShields = status.shields
+      shipHull = status.hull
+      shipFuelLiters = status.fuelLiters
       if (powerDisplay) powerDisplay.textContent = `${status.powerMegajoules.toFixed(2)} / ${status.maximumPowerMegajoules.toFixed(2)} MJ`
       if (powerBar) powerBar.style.width = `${(status.powerMegajoules / status.maximumPowerMegajoules) * 100}%`
       if (shieldsDisplay) shieldsDisplay.textContent = `${Math.ceil(status.shields)}%`
@@ -561,7 +1012,7 @@ function createFlightScene(initialLaunchSpeed = 0, initialFlightAssistEnabled = 
       shipDestroyedOverlay?.toggleAttribute('hidden', !status.destroyed)
       if (destructionCause) destructionCause.textContent = status.destroyed && status.collisionName ? `Collision with ${status.collisionName}` : ''
     },
-    onFlightUpdate(position, speed, flightAssistEnabled) {
+    onFlightUpdate(position, speed, flightAssistEnabled, yaw, pitch, roll) {
       if (speedDisplay) speedDisplay.textContent = speed.toFixed(1)
       if (flightAssistDisplay) flightAssistDisplay.textContent = flightAssistEnabled ? 'ON' : 'OFF'
       if (coordinateXDisplay) coordinateXDisplay.textContent = position.x.toFixed(0)
@@ -571,6 +1022,10 @@ function createFlightScene(initialLaunchSpeed = 0, initialFlightAssistEnabled = 
       positionMapMarker(playerMapMarker, position.x, position.z)
       updateTargetWindow()
       updateSelectedPoiDetails()
+      if (realtimeSocket?.readyState === WebSocket.OPEN && performance.now() - lastRealtimeUpdateAt >= 100) {
+        lastRealtimeUpdateAt = performance.now()
+        realtimeSocket.send(JSON.stringify({ type: 'movement', payload: { x: position.x, y: position.y, z: position.z, yaw, pitch, roll } }))
+      }
     },
     onDockingAvailabilityChange(isAvailable) {
       if (availableActions) availableActions.hidden = !isAvailable
@@ -578,8 +1033,47 @@ function createFlightScene(initialLaunchSpeed = 0, initialFlightAssistEnabled = 
   })
 }
 
+playerMapPosition = {
+  x: savedShipState.position_x,
+  y: savedShipState.position_y,
+  z: savedShipState.position_z,
+}
+renderSavedShipState()
 let scene = createFlightScene()
 let isSceneTransitioning = false
+
+const realtimeUrl = `${apiBaseUrl.replace(/^http/, 'ws').replace('/api/v1', '')}/api/v1/realtime?token=${encodeURIComponent(pilotAccessToken)}`
+realtimeSocket = new WebSocket(realtimeUrl)
+realtimeSocket.addEventListener('message', (event) => {
+  const message = JSON.parse(event.data) as { type: string; payload: { pilots?: { pilot_id: string; display_name: string; ship_type: string; x: number; y: number; z: number; yaw: number; pitch: number; roll: number }[]; pilot_id?: string; target_pilot_id?: string; display_name?: string; ship_type?: string; x?: number; y?: number; z?: number; yaw?: number; pitch?: number; roll?: number; active?: boolean; target_x?: number; target_y?: number; target_z?: number } }
+  if (message.type === 'snapshot') {
+    message.payload.pilots?.forEach((pilot) => scene.updateRemotePilot?.({ pilotId: pilot.pilot_id, displayName: pilot.display_name, shipType: pilot.ship_type, position: new Vector3(pilot.x, pilot.y, pilot.z), yaw: pilot.yaw, pitch: pilot.pitch, roll: pilot.roll }))
+    return
+  }
+  if (message.type === 'pilot_left' && message.payload.pilot_id) {
+    scene.removeRemotePilot?.(message.payload.pilot_id)
+    return
+  }
+  if (message.type === 'pilot_mining' && message.payload.pilot_id && message.payload.active !== undefined && message.payload.target_x !== undefined && message.payload.target_y !== undefined && message.payload.target_z !== undefined) {
+    scene.setRemotePilotMining?.(message.payload.pilot_id, message.payload.active, new Vector3(message.payload.target_x, message.payload.target_y, message.payload.target_z))
+    return
+  }
+  if (message.type === 'pilot_targeting' && message.payload.target_pilot_id === selectedPilotId) {
+    scene.setHostileTargeting?.(message.payload.pilot_id ?? '', message.payload.active === true)
+    return
+  }
+  if ((message.type === 'pilot_joined' || message.type === 'pilot_moved') && message.payload.pilot_id && message.payload.display_name && message.payload.ship_type && message.payload.x !== undefined && message.payload.y !== undefined && message.payload.z !== undefined && message.payload.yaw !== undefined && message.payload.pitch !== undefined && message.payload.roll !== undefined) {
+    scene.updateRemotePilot?.({ pilotId: message.payload.pilot_id, displayName: message.payload.display_name, shipType: message.payload.ship_type, position: new Vector3(message.payload.x, message.payload.y, message.payload.z), yaw: message.payload.yaw, pitch: message.payload.pitch, roll: message.payload.roll })
+  }
+})
+
+if (savedShipState.docked_station_name) {
+  scene.dispose()
+  scene = createStationInteriorScene(gameCanvas, { onTerminalInteract: openStationServices })
+  dockedStatus?.removeAttribute('hidden')
+  systemStatus?.setAttribute('hidden', '')
+  document.querySelector('.game-shell')?.classList.add('is-docked')
+}
 
 function closeStationServices() {
   stationServices?.setAttribute('hidden', '')
@@ -619,7 +1113,7 @@ dockAction?.addEventListener('click', () => {
 undockAction?.addEventListener('click', () => {
   void transitionScene(() => {
     scene.dispose()
-    scene = createFlightScene(25, false)
+    scene = createFlightScene(25, false, new Vector3(123_078, 480, -2_690.5))
     dockedStatus?.setAttribute('hidden', '')
     closeStationServices()
     systemStatus?.removeAttribute('hidden')
@@ -677,3 +1171,4 @@ if (import.meta.hot) {
 }
 
 window.addEventListener('beforeunload', () => scene.dispose(), { once: true })
+}
