@@ -981,9 +981,9 @@ function createFlightScene(
       moduleSlot.setAttribute('aria-pressed', String(isActive))
       moduleSlot.classList.toggle('is-active', isActive)
     },
-    onMiningLaserUpdate(active, target) {
-      if (realtimeSocket?.readyState === WebSocket.OPEN && (target || !active)) {
-        realtimeSocket.send(JSON.stringify({ type: 'mining', payload: { active, target_x: target?.x ?? 0, target_y: target?.y ?? 0, target_z: target?.z ?? 0 } }))
+    onMiningLaserUpdate(active, source, target) {
+      if (realtimeSocket?.readyState === WebSocket.OPEN && ((source && target) || !active)) {
+        realtimeSocket.send(JSON.stringify({ type: 'mining', payload: { active, source_x: source?.x ?? 0, source_y: source?.y ?? 0, source_z: source?.z ?? 0, target_x: target?.x ?? 0, target_y: target?.y ?? 0, target_z: target?.z ?? 0 } }))
       }
     },
     onPilotTargetLockChange(targetPilotId, active) {
@@ -1012,7 +1012,7 @@ function createFlightScene(
       shipDestroyedOverlay?.toggleAttribute('hidden', !status.destroyed)
       if (destructionCause) destructionCause.textContent = status.destroyed && status.collisionName ? `Collision with ${status.collisionName}` : ''
     },
-    onFlightUpdate(position, speed, flightAssistEnabled, yaw, pitch, roll) {
+    onFlightUpdate(position, speed, flightAssistEnabled, yaw, pitch, roll, miningSource, miningTarget) {
       if (speedDisplay) speedDisplay.textContent = speed.toFixed(1)
       if (flightAssistDisplay) flightAssistDisplay.textContent = flightAssistEnabled ? 'ON' : 'OFF'
       if (coordinateXDisplay) coordinateXDisplay.textContent = position.x.toFixed(0)
@@ -1025,6 +1025,9 @@ function createFlightScene(
       if (realtimeSocket?.readyState === WebSocket.OPEN && performance.now() - lastRealtimeUpdateAt >= 100) {
         lastRealtimeUpdateAt = performance.now()
         realtimeSocket.send(JSON.stringify({ type: 'movement', payload: { x: position.x, y: position.y, z: position.z, yaw, pitch, roll } }))
+        if (miningSource && miningTarget) {
+          realtimeSocket.send(JSON.stringify({ type: 'mining', payload: { active: true, source_x: miningSource.x, source_y: miningSource.y, source_z: miningSource.z, target_x: miningTarget.x, target_y: miningTarget.y, target_z: miningTarget.z } }))
+        }
       }
     },
     onDockingAvailabilityChange(isAvailable) {
@@ -1045,7 +1048,7 @@ let isSceneTransitioning = false
 const realtimeUrl = `${apiBaseUrl.replace(/^http/, 'ws').replace('/api/v1', '')}/api/v1/realtime?token=${encodeURIComponent(pilotAccessToken)}`
 realtimeSocket = new WebSocket(realtimeUrl)
 realtimeSocket.addEventListener('message', (event) => {
-  const message = JSON.parse(event.data) as { type: string; payload: { pilots?: { pilot_id: string; display_name: string; ship_type: string; x: number; y: number; z: number; yaw: number; pitch: number; roll: number }[]; pilot_id?: string; target_pilot_id?: string; display_name?: string; ship_type?: string; x?: number; y?: number; z?: number; yaw?: number; pitch?: number; roll?: number; active?: boolean; target_x?: number; target_y?: number; target_z?: number } }
+  const message = JSON.parse(event.data) as { type: string; payload: { pilots?: { pilot_id: string; display_name: string; ship_type: string; x: number; y: number; z: number; yaw: number; pitch: number; roll: number }[]; pilot_id?: string; target_pilot_id?: string; display_name?: string; ship_type?: string; x?: number; y?: number; z?: number; yaw?: number; pitch?: number; roll?: number; active?: boolean; source_x?: number; source_y?: number; source_z?: number; target_x?: number; target_y?: number; target_z?: number } }
   if (message.type === 'snapshot') {
     message.payload.pilots?.forEach((pilot) => scene.updateRemotePilot?.({ pilotId: pilot.pilot_id, displayName: pilot.display_name, shipType: pilot.ship_type, position: new Vector3(pilot.x, pilot.y, pilot.z), yaw: pilot.yaw, pitch: pilot.pitch, roll: pilot.roll }))
     return
@@ -1054,8 +1057,8 @@ realtimeSocket.addEventListener('message', (event) => {
     scene.removeRemotePilot?.(message.payload.pilot_id)
     return
   }
-  if (message.type === 'pilot_mining' && message.payload.pilot_id && message.payload.active !== undefined && message.payload.target_x !== undefined && message.payload.target_y !== undefined && message.payload.target_z !== undefined) {
-    scene.setRemotePilotMining?.(message.payload.pilot_id, message.payload.active, new Vector3(message.payload.target_x, message.payload.target_y, message.payload.target_z))
+  if (message.type === 'pilot_mining' && message.payload.pilot_id && message.payload.active !== undefined && message.payload.source_x !== undefined && message.payload.source_y !== undefined && message.payload.source_z !== undefined && message.payload.target_x !== undefined && message.payload.target_y !== undefined && message.payload.target_z !== undefined) {
+    scene.setRemotePilotMining?.(message.payload.pilot_id, message.payload.active, new Vector3(message.payload.source_x, message.payload.source_y, message.payload.source_z), new Vector3(message.payload.target_x, message.payload.target_y, message.payload.target_z))
     return
   }
   if (message.type === 'pilot_targeting' && message.payload.target_pilot_id === selectedPilotId) {

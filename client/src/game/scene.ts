@@ -24,7 +24,7 @@ export interface SceneController {
   toggleTargetLock(): void
   updateRemotePilot?(pilot: RemotePilot): void
   removeRemotePilot?(pilotId: string): void
-  setRemotePilotMining?(pilotId: string, active: boolean, target: Vector3): void
+  setRemotePilotMining?(pilotId: string, active: boolean, source: Vector3, target: Vector3): void
   setHostileTargeting?(pilotId: string, active: boolean): void
 }
 
@@ -39,13 +39,13 @@ export interface RemotePilot {
 }
 
 export interface SceneOptions {
-  onFlightUpdate: (position: Vector3, speed: number, flightAssistEnabled: boolean, yaw: number, pitch: number, roll: number) => void
+  onFlightUpdate: (position: Vector3, speed: number, flightAssistEnabled: boolean, yaw: number, pitch: number, roll: number, miningSource?: Vector3, miningTarget?: Vector3) => void
   onDockingAvailabilityChange?: (isAvailable: boolean) => void
   onWarpUpdate?: (isWarping: boolean, phase: WarpPhase, progress: number) => void
   onTargetSelectionChange?: (target?: { name: string; kind: 'asteroid' | 'pilot'; shipType?: string; position: Vector3; oreRemainingCubicMeters: number; initialOreCubicMeters: number; locked: boolean; locking: boolean; lockProgress: number }) => void
   onShipStatusChange?: (status: ShipStatus) => void
   onModuleActiveChange?: (moduleName: string, isActive: boolean) => void
-  onMiningLaserUpdate?: (active: boolean, target?: Vector3) => void
+  onMiningLaserUpdate?: (active: boolean, source?: Vector3, target?: Vector3) => void
   onPilotTargetLockChange?: (pilotId: string, active: boolean) => void
   hasShieldGenerator?: boolean
   initialPosition?: Vector3
@@ -308,7 +308,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   shipMaterial.emissiveColor = new Color3(0.32, 0.04, 0.04)
   shipMaterial.diffuseColor = new Color3(0.45, 0.03, 0.03)
   hull.material = shipMaterial
-  const remotePilots = new Map<string, { ship: TransformNode; targetMesh: Mesh; destination: Vector3; yaw: number; pitch: number; roll: number; miningBeam?: Mesh; miningTarget?: Vector3 }>()
+  const remotePilots = new Map<string, { ship: TransformNode; targetMesh: Mesh; destination: Vector3; yaw: number; pitch: number; roll: number; miningBeam?: Mesh; miningSource?: Vector3; miningTarget?: Vector3 }>()
   const updateRemotePilot = (pilot: RemotePilot) => {
     let remote = remotePilots.get(pilot.pilotId)
     if (!remote) {
@@ -392,22 +392,25 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   const remoteMiningMaterial = new StandardMaterial('remote-mining-laser-material', scene)
   remoteMiningMaterial.emissiveColor = new Color3(0.05, 0.8, 1)
   remoteMiningMaterial.diffuseColor = new Color3(0.02, 0.3, 0.5)
-  const setRemotePilotMining = (pilotId: string, active: boolean, target: Vector3) => {
+  const setRemotePilotMining = (pilotId: string, active: boolean, source: Vector3, target: Vector3) => {
     const remote = remotePilots.get(pilotId)
     if (!remote) return
     if (!active) {
       remote.miningBeam?.setEnabled(false)
+      remote.miningSource = undefined
       remote.miningTarget = undefined
       return
     }
     if (!remote.miningBeam) {
-      remote.miningBeam = MeshBuilder.CreateTube(`remote-mining-laser-${pilotId}`, { path: [remote.ship.position, target], radius: 0.2, tessellation: 8 }, scene)
+      remote.miningBeam = MeshBuilder.CreateTube(`remote-mining-laser-${pilotId}`, { path: [source, target], radius: 0.2, tessellation: 8, updatable: true }, scene)
       remote.miningBeam.material = remoteMiningMaterial
       remote.miningBeam.isPickable = false
       glow.addIncludedOnlyMesh(remote.miningBeam)
     }
     remote.miningBeam.setEnabled(true)
+    remote.miningSource = source.clone()
     remote.miningTarget = target.clone()
+    remote.miningBeam = MeshBuilder.CreateTube(remote.miningBeam.name, { path: [source, target], radius: 0.2, tessellation: 8, instance: remote.miningBeam }, scene)
   }
   const shipMassKg = 25_000
   const shipCollisionRadius = 3
@@ -425,6 +428,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   let powerMegajoules = options.initialPowerMegajoules ?? maximumPowerMegajoules
   let cargoCubicMeters = options.initialCargoCubicMeters ?? 0
   let miningLaserReportedActive = false
+  let miningLaserReportedTarget: AbstractMesh | undefined
   const activeModules = new Set<string>()
   const shieldBubbleMaterial = new StandardMaterial('starter-ship-shield-bubble-material', scene)
   shieldBubbleMaterial.diffuseColor = new Color3(0.08, 0.58, 1)
@@ -787,6 +791,14 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   }
   const toggleTargetLock = () => {
     if (lockedAsteroid) {
+      if (targetedAsteroid && targetedAsteroid !== lockedAsteroid) {
+        unlockTarget()
+        lockingTarget = { asteroid: targetedAsteroid, elapsedSeconds: 0 }
+        const targetPilotId = targetDescriptors.get(targetedAsteroid.uniqueId)?.pilotId
+        if (targetPilotId) options.onPilotTargetLockChange?.(targetPilotId, true)
+        reportTargetLock()
+        return
+      }
       unlockTarget()
       return
     }
@@ -1012,9 +1024,13 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       && Vector3.Distance(ship.position, miningTarget.getAbsolutePosition()) <= miningLaserRange,
     )
     miningLaserBeam.setEnabled(miningLaserActive)
-    if (miningLaserActive !== miningLaserReportedActive) {
+    if (miningLaserActive !== miningLaserReportedActive || (miningLaserActive && miningTarget !== miningLaserReportedTarget)) {
       miningLaserReportedActive = miningLaserActive
-      options.onMiningLaserUpdate?.(miningLaserActive, miningTarget?.getAbsolutePosition())
+      miningLaserReportedTarget = miningLaserActive ? miningTarget : undefined
+      const miningBeamSource = miningLaserActive
+        ? ship.position.add(shipForward.scale(2.5)).add(Vector3.Up().scale(0.35))
+        : undefined
+      options.onMiningLaserUpdate?.(miningLaserActive, miningBeamSource, miningTarget?.getAbsolutePosition())
     }
     if (miningLaserActive && miningTarget && miningTargetDetails) {
       const targetPosition = miningTarget.getAbsolutePosition()
@@ -1148,6 +1164,8 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       remote.ship.rotation.x += (-remote.pitch - remote.ship.rotation.x) * Math.min(1, deltaSeconds * 8)
       remote.ship.rotation.y += Math.atan2(Math.sin(remote.yaw - remote.ship.rotation.y), Math.cos(remote.yaw - remote.ship.rotation.y)) * Math.min(1, deltaSeconds * 8)
       remote.ship.rotation.z += (remote.roll - remote.ship.rotation.z) * Math.min(1, deltaSeconds * 8)
+      remote.ship.computeWorldMatrix(true)
+      remote.targetMesh.computeWorldMatrix(true)
       const hostileBrackets = hostileTargetBrackets.get(pilotId)
       if (hostileBrackets) {
         hostileBrackets.position.copyFrom(remote.targetMesh.getAbsolutePosition())
@@ -1156,11 +1174,15 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
         hostileBrackets.setEnabled(Math.floor(now / 260) % 2 === 0)
       }
       if (remote.miningBeam?.isEnabled() && remote.miningTarget) {
-        const beamSource = remote.ship.position.add(remote.ship.getDirection(Vector3.Forward()).scale(2.5)).add(Vector3.Up().scale(0.35))
-        MeshBuilder.CreateTube(remote.miningBeam.name, { path: [beamSource, remote.miningTarget], radius: 0.2, tessellation: 8, instance: remote.miningBeam }, scene)
+        const beamSource = remote.targetMesh
+          .getAbsolutePosition()
+          .add(remote.targetMesh.getDirection(Vector3.Forward()).scale(2.5))
+          .add(Vector3.Up().scale(0.35))
+        remote.miningBeam = MeshBuilder.CreateTube(remote.miningBeam.name, { path: [beamSource, remote.miningTarget], radius: 0.2, tessellation: 8, instance: remote.miningBeam }, scene)
       }
     }
-    options.onFlightUpdate(ship.position, actualSpeed, flightAssistEnabled, shipYaw, shipPitch, shipRoll)
+    const miningBeamSource = miningLaserActive ? ship.position.add(shipForward.scale(2.5)).add(Vector3.Up().scale(0.35)) : undefined
+    options.onFlightUpdate(ship.position, actualSpeed, flightAssistEnabled, shipYaw, shipPitch, shipRoll, miningBeamSource, miningLaserActive ? miningTarget?.getAbsolutePosition() : undefined)
     const isDockingAvailable = Vector3.Distance(ship.position, stationPosition) <= stationShieldRadius
     if (isDockingAvailable !== dockingAvailable) {
       dockingAvailable = isDockingAvailable

@@ -87,10 +87,11 @@ async def realtime(websocket: WebSocket) -> None:
                         await publish_event("system", SYSTEM_ID, "pilot_targeting", {"pilot_id": pilot_key, "target_pilot_id": target_pilot_id, "active": payload["active"]})
                     continue
                 if message_type == "mining":
+                    source = [payload.get(axis) for axis in ("source_x", "source_y", "source_z")]
                     target = [payload.get(axis) for axis in ("target_x", "target_y", "target_z")]
-                    if not isinstance(payload.get("active"), bool) or not all(isinstance(value, (int, float)) and math.isfinite(value) and abs(value) <= 1_000_000 for value in target):
+                    if not isinstance(payload.get("active"), bool) or not all(isinstance(value, (int, float)) and math.isfinite(value) and abs(value) <= 1_000_000 for value in source + target):
                         continue
-                    await publish_event("system", SYSTEM_ID, "pilot_mining", {"pilot_id": pilot_key, "active": payload["active"], "target_x": target[0], "target_y": target[1], "target_z": target[2]})
+                    await publish_event("system", SYSTEM_ID, "pilot_mining", {"pilot_id": pilot_key, "active": payload["active"], "source_x": source[0], "source_y": source[1], "source_z": source[2], "target_x": target[0], "target_y": target[1], "target_z": target[2]})
                     continue
                 if message_type != "movement":
                     continue
