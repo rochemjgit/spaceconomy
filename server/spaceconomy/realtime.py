@@ -19,6 +19,8 @@ from .redis import client, event_channel, publish_event
 
 router = APIRouter(tags=["realtime"])
 SYSTEM_ID = "kepler"
+SYSTEM_SERVER_ID = "system:kepler"
+STATION_SERVER_ID = "station:kepler"
 
 
 def _presence_key() -> str:
@@ -65,6 +67,8 @@ async def realtime(websocket: WebSocket) -> None:
     pilot_key = str(pilot_id)
     pilot_name = pilot_record.display_name
     presence_key = _presence_key()
+    active_target_ids: set[str] = set()
+    is_in_space = True
     try:
         raw_pilots = await client.hgetall(presence_key)
         pilots = [json.loads(value) for key, value in raw_pilots.items() if key.decode() != pilot_key]
@@ -78,6 +82,23 @@ async def realtime(websocket: WebSocket) -> None:
                 message = json.loads(await websocket.receive_text())
                 message_type = message.get("type")
                 payload = message.get("payload", {})
+                if message_type == "docked":
+                    for target_pilot_id in active_target_ids:
+                        await publish_event("system", SYSTEM_ID, "pilot_targeting", {"pilot_id": pilot_key, "target_pilot_id": target_pilot_id, "active": False})
+                    active_target_ids.clear()
+                    if is_in_space:
+                        await client.hdel(presence_key, pilot_key)
+                        await publish_event("system", SYSTEM_ID, "pilot_left", {"pilot_id": pilot_key, "destination_server": STATION_SERVER_ID})
+                        is_in_space = False
+                    await websocket.send_json({"type": "server_handoff", "payload": {"destination_server": STATION_SERVER_ID}})
+                    continue
+                if message_type == "undocked":
+                    if not is_in_space:
+                        pilot = {"pilot_id": pilot_key, "display_name": pilot_name, "ship_type": "starter-corvette", "x": 123_078, "y": 480, "z": -2_691, "yaw": 0, "pitch": 0, "roll": 0}
+                        await client.hset(presence_key, pilot_key, json.dumps(pilot, separators=(",", ":")))
+                        await publish_event("system", SYSTEM_ID, "pilot_joined", pilot)
+                        is_in_space = True
+                    continue
                 if message_type == "targeting":
                     try:
                         target_pilot_id = str(UUID(payload["target_pilot_id"]))
@@ -85,6 +106,12 @@ async def realtime(websocket: WebSocket) -> None:
                         continue
                     if target_pilot_id != pilot_key and isinstance(payload.get("active"), bool):
                         await publish_event("system", SYSTEM_ID, "pilot_targeting", {"pilot_id": pilot_key, "target_pilot_id": target_pilot_id, "active": payload["active"]})
+                        if payload["active"]:
+                            active_target_ids.add(target_pilot_id)
+                        else:
+                            active_target_ids.discard(target_pilot_id)
+                    continue
+                if not is_in_space:
                     continue
                 if message_type == "mining":
                     source = [payload.get(axis) for axis in ("source_x", "source_y", "source_z")]
@@ -111,7 +138,8 @@ async def realtime(websocket: WebSocket) -> None:
         pass
     finally:
         try:
-            await client.hdel(presence_key, pilot_key)
-            await publish_event("system", SYSTEM_ID, "pilot_left", {"pilot_id": pilot_key})
+            if is_in_space:
+                await client.hdel(presence_key, pilot_key)
+                await publish_event("system", SYSTEM_ID, "pilot_left", {"pilot_id": pilot_key})
         except RedisError:
             pass

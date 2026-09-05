@@ -1,13 +1,31 @@
-# Phase 1 implementation status
+# Implementation status
 
 ## Completed foundation
 
 - Vite/TypeScript browser-client scaffold.
 - Babylon.js stylized system-shell scene and isometric camera baseline.
 - Versioned MessagePack envelope helpers and a client contract test.
-- FastAPI service scaffold with a versioned health endpoint and test.
+- FastAPI service with versioned health, auth, ship state, realtime, and mining endpoints.
 - PostgreSQL, Redis, and API development Compose configuration.
-- Python and TypeScript quality-tool configuration baselines.
+- PostgreSQL migrations and idempotent seed data for identity, ships, inventory, Kepler, asteroid fields, and asteroids.
+- Account activation, multiple pilots, saved ship state, loading-room flow, and docked/in-space handoff scaffolding.
+- Redis-backed realtime pilot presence, movement, targeting, and mining beam events.
+- Private sensor discovery with capacitor cost/cooldown, server-owned asteroid replenishment, and discovery-scoped local asteroid snapshots.
+- Transactional asteroid extraction that locks ship/asteroid state, durably updates ore depletion plus ship cargo, and stores composition-preserving raw ore lots separately by source asteroid.
+- Versioned mineral catalog plus deterministic multi-mineral asteroid assays. Assays are immutable snapshots copied into raw ore lots; common fields stay scientific while rare anomaly variants can contain constrained fictional endgame minerals. Refining is not implemented.
+- Public in-space jettison and pickup for item stacks, individual modules, and assay-preserving raw ore: cargo renders for nearby pilots, expires after five configurable minutes, and can be collected by any in-range ship with sufficient capacity.
+
+## Inventory management (2026-09-05)
+
+- Container-owned raw ore supports station storage, partial transfers, splitting, compatible merging, jettison and recovery without losing its source or assay.
+- Cargo capacity includes both items and ore; saved cargo totals are derived from inventory rather than trusted client checkpoints.
+- Single transfers are exact and atomic. Bulk loading moves what fits, skips oversized entries and reports leftovers; station storage remains unlimited.
+- Starter modules are granted only on first storage creation. Modules remain individual objects, including after public pickup; migration 12 safely separates legacy module stacks.
+- Station operations require docking. Ship splitting/merging remains available in space without exposing station contents.
+- Both inventory views provide combined search/sort, selection details, quantity dialogs, explicit transfers and drag/drop, public-jettison confirmation, refresh, pending/error feedback and synchronized cargo HUD values.
+- Dock/undock transitions wait for a successful server checkpoint; stale inventory reads cannot overwrite a newer view or mutation.
+- Validation: 47 server tests passed with PostgreSQL scratch schemas, including five concurrent-command cases; 42 client tests, client lint and production build passed. Live docked bulk transfers and empty-storage refresh were verified and the moved items returned to their original station.
+- See [inventory review](INVENTORY_REVIEW.md) for migration and remaining limitations.
 
 ## Phase III fitting foundation
 
@@ -17,15 +35,15 @@
 - Docked station fit/unfit operations with ownership, locality, durability, slot, CPU, powergrid, and accepted-command idempotency validation.
 - Focused fitting-service tests covering accepted fits, resource rejection without mutation, and accepted-command retries.
 
-## Phase III readiness
+## Mining authority boundary
 
-Phase III cannot yet extend an authoritative Phase II implementation: persistence, identity, docking authority, inventory/ledger, mining, scans, wrecks, and realtime events remain unimplemented scaffolding. The fitting domain currently uses deterministic development data and must be connected to those services before it is exposed as a player API.
+Asteroids, discoveries, cargo, scans, and extraction outcomes are durable PostgreSQL state. Babylon renders only server snapshot records and applies ore/cargo changes only after extraction succeeds. Current ship movement remains client-predicted, so prototype local-interest and extraction range checks accept a bounded client position. Replacing this with server-owned transforms and area-of-interest routing is the next authority milestone.
 
 ## Next implementation slice
 
-1. Implement Phase I and II persistence, identity, docking, station-local inventory, ledger, and mining/scan authority.
-2. Persist the Phase III fitting definitions, ships, fit records, and derived-stat snapshots; replace development data with authenticated pilot state.
-3. Add typed fit/unfit/load/unload and snapshot contracts, then integrate the fitting UI with server-confirmed state.
-4. Implement capacitor/module lifecycle, charges, consumables, progression, and loss resolution in the Phase III order.
+1. Move flight transforms, area-of-interest, and extraction range checks to the system server; add client prediction/reconciliation.
+2. Add refinery recipes and commands that consume raw ore lots to produce mineral stacks, plus immutable ledger/idempotency records for inventory and extraction/refining.
+3. Persist the Phase III fitting definitions, ships, fit records, and derived-stat snapshots; replace development data with authenticated pilot state.
+4. Add typed fit/unfit/load/unload contracts, then integrate fitting UI with server-confirmed state.
 
 Celery is intentionally excluded until Phase 5.

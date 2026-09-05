@@ -114,6 +114,8 @@ class ModuleDefinition(TimestampedModel, Base):
     cpu_demand: Mapped[float] = mapped_column(Float, nullable=False)
     powergrid_demand: Mapped[float] = mapped_column(Float, nullable=False)
     durability_maximum: Mapped[float] = mapped_column(Float, nullable=False)
+    mass_kg: Mapped[float] = mapped_column(Float, nullable=False)
+    volume_cubic_meters: Mapped[float] = mapped_column(Float, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
@@ -185,6 +187,145 @@ class ShipState(TimestampedModel, Base):
     hull: Mapped[float] = mapped_column(Float, nullable=False, default=100)
     fuel_liters: Mapped[float] = mapped_column(Float, nullable=False, default=80)
     cargo_cubic_meters: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    sensor_last_scan_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class SolarSystem(TimestampedModel, Base):
+    """A navigable system with an authoritative spatial boundary."""
+
+    __tablename__ = "solar_systems"
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    system_key: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    display_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    radius_meters: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class AsteroidField(TimestampedModel, Base):
+    """A discoverable asteroid-field site that replenishes through configured batches."""
+
+    __tablename__ = "asteroid_fields"
+    __table_args__ = (UniqueConstraint("system_id", "field_key"),)
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    system_id: Mapped[UUID] = mapped_column(ForeignKey("solar_systems.id"), index=True, nullable=False)
+    field_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    position_x: Mapped[float] = mapped_column(Float, nullable=False)
+    position_y: Mapped[float] = mapped_column(Float, nullable=False)
+    position_z: Mapped[float] = mapped_column(Float, nullable=False)
+    discovery_signature: Mapped[float] = mapped_column(Float, nullable=False)
+    spawn_profile: Mapped[str] = mapped_column(Text, nullable=False)
+    next_spawn_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class MineralDefinition(TimestampedModel, Base):
+    """A versioned raw mineral definition used by asteroid assays."""
+
+    __tablename__ = "mineral_definitions"
+    __table_args__ = (UniqueConstraint("definition_id", "version"),)
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    definition_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    display_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    classification: Mapped[str] = mapped_column(String(16), nullable=False)
+    rarity_tier: Mapped[str] = mapped_column(String(16), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class Asteroid(TimestampedModel, Base):
+    """A finite, server-owned asteroid spawned within a discoverable field."""
+
+    __tablename__ = "asteroids"
+    __table_args__ = (
+        CheckConstraint("initial_volume_cubic_meters > 0", name="asteroid_initial_volume_valid"),
+        CheckConstraint("remaining_volume_cubic_meters >= 0", name="asteroid_remaining_volume_valid"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    field_id: Mapped[UUID] = mapped_column(ForeignKey("asteroid_fields.id"), index=True, nullable=False)
+    spawn_seed: Mapped[int] = mapped_column(Integer, nullable=False)
+    position_x: Mapped[float] = mapped_column(Float, nullable=False)
+    position_y: Mapped[float] = mapped_column(Float, nullable=False)
+    position_z: Mapped[float] = mapped_column(Float, nullable=False)
+    radius_meters: Mapped[float] = mapped_column(Float, nullable=False)
+    composition: Mapped[str] = mapped_column(String(64), nullable=False)
+    mineral_assay: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    initial_volume_cubic_meters: Mapped[float] = mapped_column(Float, nullable=False)
+    remaining_volume_cubic_meters: Mapped[float] = mapped_column(Float, nullable=False)
+    depleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PilotDiscovery(TimestampedModel, Base):
+    """A pilot-private sensor result for an extensible discoverable world object."""
+
+    __tablename__ = "pilot_discoveries"
+    __table_args__ = (UniqueConstraint("pilot_id", "discoverable_kind", "discoverable_id"),)
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    pilot_id: Mapped[UUID] = mapped_column(ForeignKey("pilots.id"), index=True, nullable=False)
+    discoverable_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    discoverable_id: Mapped[UUID] = mapped_column(Uuid, nullable=False)
+    scan_quality: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class MinedOreLot(TimestampedModel, Base):
+    """A pilot cargo lot retaining the source asteroid and raw composition."""
+
+    __tablename__ = "mined_ore_lots"
+    __table_args__ = (
+        CheckConstraint("volume_cubic_meters > 0", name="mined_ore_lot_volume_valid"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    pilot_id: Mapped[UUID] = mapped_column(ForeignKey("pilots.id"), index=True, nullable=False)
+    container_id: Mapped[UUID] = mapped_column(
+        ForeignKey("inventory_containers.id"), index=True, nullable=False
+    )
+    asteroid_id: Mapped[UUID] = mapped_column(ForeignKey("asteroids.id"), index=True, nullable=False)
+    composition: Mapped[str] = mapped_column(String(64), nullable=False)
+    mineral_assay: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    volume_cubic_meters: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class JettisonedItem(TimestampedModel, Base):
+    """A public, expiring in-space snapshot of an inventory item stack."""
+
+    __tablename__ = "jettisoned_items"
+    __table_args__ = (
+        CheckConstraint("quantity > 0", name="jettisoned_item_quantity_valid"),
+        CheckConstraint("volume_per_unit >= 0", name="jettisoned_item_volume_valid"),
+        CheckConstraint(
+            "module_definition_id IS NULL OR quantity = 1",
+            name="jettisoned_module_singleton",
+        ),
+        CheckConstraint(
+            "(ore_asteroid_id IS NULL AND ore_composition IS NULL AND ore_mineral_assay IS NULL) "
+            "OR (ore_asteroid_id IS NOT NULL AND ore_composition IS NOT NULL "
+            "AND ore_mineral_assay IS NOT NULL AND module_definition_id IS NULL "
+            "AND quantity = 1 AND volume_per_unit > 0)",
+            name="jettisoned_ore_metadata_valid",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    definition_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    definition_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    module_definition_id: Mapped[UUID | None] = mapped_column(ForeignKey("module_definitions.id"))
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    durability: Mapped[float] = mapped_column(Float, nullable=False)
+    volume_per_unit: Mapped[float] = mapped_column(Float, nullable=False)
+    ore_asteroid_id: Mapped[UUID | None] = mapped_column(ForeignKey("asteroids.id"))
+    ore_composition: Mapped[str | None] = mapped_column(String(64))
+    ore_mineral_assay: Mapped[str | None] = mapped_column(Text)
+    position_x: Mapped[float] = mapped_column(Float, nullable=False)
+    position_y: Mapped[float] = mapped_column(Float, nullable=False)
+    position_z: Mapped[float] = mapped_column(Float, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), index=True, nullable=False
+    )
 
 
 class InventoryContainer(TimestampedModel, Base):
@@ -196,6 +337,7 @@ class InventoryContainer(TimestampedModel, Base):
             "(ship_id IS NULL) <> (station_id IS NULL)", name="container_has_one_location"
         ),
         CheckConstraint("capacity_cubic_meters >= 0", name="container_capacity_valid"),
+        UniqueConstraint("pilot_id", "station_id", name="uq_pilot_station_container"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
@@ -214,6 +356,9 @@ class InventoryItem(TimestampedModel, Base):
         CheckConstraint("quantity > 0", name="inventory_item_quantity_valid"),
         CheckConstraint("durability >= 0", name="inventory_item_durability_valid"),
         CheckConstraint("volume_per_unit >= 0", name="inventory_item_volume_valid"),
+        CheckConstraint(
+            "module_definition_id IS NULL OR quantity = 1", name="inventory_module_singleton"
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)

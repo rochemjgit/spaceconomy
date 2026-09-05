@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">Kepler Station docking concourse</title>
+  <desc id="desc">A dark station concourse with service bays arranged around a central docking area.</desc>
+  <rect width="1600" height="900" fill="#000000"/>
+  <g fill="none" stroke="#173443" stroke-width="3">
+    <path d="M0 126H416L548 258M1600 126H1184L1052 258M0 774H416L548 642M1600 774H1184L1052 642"/>
+    <path d="M0 264H344L508 428M1600 264H1256L1092 428M0 636H344L508 472M1600 636H1256L1092 472"/>
+    <path d="M172 0V176L420 424M1428 0V176L1180 424M172 900V724L420 476M1428 900V724L1180 476"/>
+  </g>
+  <g fill="#06151c" stroke="#245162" stroke-width="3">
+    <path d="M0 54H334L458 178L340 302H0Z"/>
+    <path d="M1600 54H1266L1142 178L1260 302H1600Z"/>
+    <path d="M0 846H334L458 722L340 598H0Z"/>
+    <path d="M1600 846H1266L1142 722L1260 598H1600Z"/>
+  </g>
+  <g fill="#0b2832" stroke="#4ea6aa" stroke-width="3">
+    <path d="M232 152H364L424 212L364 272H232Z"/>
+    <path d="M1236 152H1368V272H1236L1176 212Z"/>
+    <path d="M232 628H364L424 688L364 748H232Z"/>
+    <path d="M1236 628H1368V748H1236L1176 688Z"/>
+  </g>
+  <g fill="#0b2832" stroke="#4ea6aa" stroke-width="3">
+    <path d="M578 62H706L752 108V246L706 292H578L532 246V108Z"/>
+    <path d="M894 62H1022L1068 108V246L1022 292H894L848 246V108Z"/>
+    <path d="M578 608H706L752 654V792L706 838H578L532 792V654Z"/>
+  </g>
+  <g fill="none" stroke="#1d5664" stroke-width="4">
+    <circle cx="800" cy="450" r="238"/>
+    <circle cx="800" cy="450" r="202"/>
+    <path d="M562 450H1038M800 212V688"/>
+  </g>
+  <g fill="#5ce3c6">
+    <circle cx="392" cy="212" r="6"/><circle cx="1208" cy="212" r="6"/><circle cx="392" cy="688" r="6"/><circle cx="1208" cy="688" r="6"/>
+    <circle cx="645" cy="278" r="6"/><circle cx="955" cy="278" r="6"/><circle cx="645" cy="622" r="6"/>
+  </g>
+</svg>

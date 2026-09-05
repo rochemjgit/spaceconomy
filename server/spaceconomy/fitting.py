@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 from collections.abc import Iterable
+from math import isfinite
 from typing import Final
 
 
@@ -25,11 +26,71 @@ class ModifierOperation(StrEnum):
     FLOOR = "floor"
 
 
+class ShipStatistic(StrEnum):
+    """The closed set of definition-driven ship statistics."""
+
+    CPU_AVAILABLE = "cpu_available"
+    CPU_USED = "cpu_used"
+    POWERGRID_AVAILABLE = "powergrid_available"
+    POWERGRID_USED = "powergrid_used"
+    CARGO_VOLUME = "cargo_volume"
+    MASS_KG = "mass_kg"
+    COLLISION_RADIUS_METERS = "collision_radius_meters"
+    MOMENT_OF_INERTIA_FACTOR = "moment_of_inertia_factor"
+    LINEAR_THRUST_NEWTONS = "linear_thrust_newtons"
+    ANGULAR_TORQUE_NEWTON_METERS = "angular_torque_newton_meters"
+    BRAKING_FORCE_NEWTONS = "braking_force_newtons"
+    MAXIMUM_SPEED = "maximum_speed"
+    MAXIMUM_ANGULAR_SPEED = "maximum_angular_speed"
+    CAPACITOR_CAPACITY = "capacitor_capacity"
+    CAPACITOR_GENERATION = "capacitor_generation"
+    CAPACITOR_RECHARGE = "capacitor_recharge"
+    HEAT_TOLERANCE = "heat_tolerance"
+    HEAT_DISSIPATION_PER_SECOND = "heat_dissipation_per_second"
+    HEAT_GENERATION_PER_SECOND = "heat_generation_per_second"
+    MINING_YIELD = "mining_yield"
+    SHIELD_CAPACITY = "shield_capacity"
+    ARMOR = "armor"
+    HULL_DURABILITY = "hull_durability"
+
+
+@dataclass(frozen=True, slots=True)
+class FlightPerformance:
+    """Derived movement values calculated from total mass, force, and torque."""
+
+    linear_acceleration_meters_per_second_squared: float
+    angular_acceleration_radians_per_second_squared: float
+
+
+def derive_flight_performance(statistics: dict[str, float]) -> FlightPerformance:
+    """Calculate acceleration without conflating force, torque, and speed caps."""
+    mass = statistics[ShipStatistic.MASS_KG]
+    radius = statistics[ShipStatistic.COLLISION_RADIUS_METERS]
+    inertia_factor = statistics[ShipStatistic.MOMENT_OF_INERTIA_FACTOR]
+    if mass <= 0 or radius <= 0 or inertia_factor <= 0:
+        raise ValueError("mass, collision radius, and inertia factor must be positive")
+    moment_of_inertia = inertia_factor * mass * radius**2
+    return FlightPerformance(
+        linear_acceleration_meters_per_second_squared=(
+            statistics.get(ShipStatistic.LINEAR_THRUST_NEWTONS, 0.0) / mass
+        ),
+        angular_acceleration_radians_per_second_squared=(
+            statistics.get(ShipStatistic.ANGULAR_TORQUE_NEWTON_METERS, 0.0) / moment_of_inertia
+        ),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class StatisticModifier:
     statistic: str
     operation: ModifierOperation
     value: float
+
+    def __post_init__(self) -> None:
+        if self.statistic not in ShipStatistic:
+            raise ValueError(f"unknown ship statistic: {self.statistic}")
+        if not isfinite(self.value):
+            raise ValueError("statistic modifier value must be finite")
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +101,13 @@ class HullDefinition:
     universal_hardpoint_count: int
     core_system_slot_count: int
     base_statistics: dict[str, float]
+
+    def __post_init__(self) -> None:
+        unknown = set(self.base_statistics).difference(ShipStatistic)
+        if unknown:
+            raise ValueError(f"unknown hull statistics: {', '.join(sorted(unknown))}")
+        if any(not isfinite(value) for value in self.base_statistics.values()):
+            raise ValueError("hull statistic values must be finite")
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,7 +120,19 @@ class ModuleDefinition:
     cpu_demand: float
     powergrid_demand: float
     durability_maximum: float
+    mass_kg: float = 0.0
+    volume_cubic_meters: float = 0.0
     passive_effects: tuple[StatisticModifier, ...] = ()
+
+    def __post_init__(self) -> None:
+        if any(not isfinite(value) or value < 0 for value in (
+            self.cpu_demand,
+            self.powergrid_demand,
+            self.durability_maximum,
+            self.mass_kg,
+            self.volume_cubic_meters,
+        )):
+            raise ValueError("module base statistics must be finite and non-negative")
 
 
 @dataclass(slots=True)
@@ -219,6 +299,9 @@ class FittingService:
         for item in modules:
             statistics["cpu_used"] += item.definition.cpu_demand
             statistics["powergrid_used"] += item.definition.powergrid_demand
+            statistics[ShipStatistic.MASS_KG] = (
+                statistics.get(ShipStatistic.MASS_KG, 0.0) + item.definition.mass_kg
+            )
             for modifier in item.definition.passive_effects:
                 match modifier.operation:
                     case ModifierOperation.FLAT:
@@ -244,6 +327,9 @@ class FittingService:
                     statistics[modifier.statistic] = min(current, modifier.value)
                 else:
                     statistics[modifier.statistic] = max(current, modifier.value)
+        performance = derive_flight_performance(statistics)
+        statistics["linear_acceleration"] = performance.linear_acceleration_meters_per_second_squared
+        statistics["angular_acceleration"] = performance.angular_acceleration_radians_per_second_squared
         return statistics
 
 
@@ -257,8 +343,18 @@ STARTER_MINER: Final = HullDefinition(
         "cpu_available": 100.0,
         "powergrid_available": 80.0,
         "cargo_volume": 80.0,
+        "mass_kg": 12_000.0,
+        "collision_radius_meters": 8.0,
+        "moment_of_inertia_factor": 0.4,
+        "linear_thrust_newtons": 48_000.0,
+        "angular_torque_newton_meters": 220_000.0,
+        "braking_force_newtons": 36_000.0,
+        "maximum_angular_speed": 0.9,
         "capacitor_capacity": 100.0,
+        "capacitor_generation": 6.0,
         "capacitor_recharge": 6.0,
+        "heat_tolerance": 100.0,
+        "heat_dissipation_per_second": 4.0,
         "mining_yield": 1.0,
         "maximum_speed": 120.0,
         "shield_capacity": 60.0,
@@ -273,7 +369,7 @@ COMBAT_FRIGATE: Final = HullDefinition(
     display_name="Combat Frigate",
     universal_hardpoint_count=4,
     core_system_slot_count=3,
-    base_statistics={**STARTER_MINER.base_statistics, "cargo_volume": 35.0, "maximum_speed": 180.0, "shield_capacity": 100.0},
+    base_statistics={**STARTER_MINER.base_statistics, "cargo_volume": 35.0, "mass_kg": 9_000.0, "maximum_speed": 180.0, "shield_capacity": 100.0},
 )
 
 GENERALIST_HAULER: Final = HullDefinition(
@@ -282,7 +378,7 @@ GENERALIST_HAULER: Final = HullDefinition(
     display_name="Generalist Hauler",
     universal_hardpoint_count=5,
     core_system_slot_count=4,
-    base_statistics={**STARTER_MINER.base_statistics, "cargo_volume": 180.0, "maximum_speed": 75.0, "powergrid_available": 125.0},
+    base_statistics={**STARTER_MINER.base_statistics, "cargo_volume": 180.0, "mass_kg": 24_000.0, "maximum_speed": 75.0, "powergrid_available": 125.0},
 )
 
 MINING_LASER: Final = ModuleDefinition(
@@ -294,6 +390,8 @@ MINING_LASER: Final = ModuleDefinition(
     cpu_demand=18.0,
     powergrid_demand=14.0,
     durability_maximum=100.0,
+    mass_kg=240.0,
+    volume_cubic_meters=1.5,
     passive_effects=(StatisticModifier("mining_yield", ModifierOperation.PERCENT, 0.2),),
 )
 
@@ -306,6 +404,8 @@ SHIELD_BOOSTER: Final = ModuleDefinition(
     cpu_demand=25.0,
     powergrid_demand=22.0,
     durability_maximum=100.0,
+    mass_kg=480.0,
+    volume_cubic_meters=2.0,
     passive_effects=(StatisticModifier("shield_capacity", ModifierOperation.FLAT, 30.0),),
 )
 
@@ -318,7 +418,27 @@ CAPACITOR_BANK: Final = ModuleDefinition(
     cpu_demand=12.0,
     powergrid_demand=16.0,
     durability_maximum=100.0,
+    mass_kg=750.0,
+    volume_cubic_meters=3.0,
     passive_effects=(StatisticModifier("capacitor_capacity", ModifierOperation.FLAT, 40.0),),
+)
+
+REACTOR_CORE: Final = ModuleDefinition(
+    definition_id="module.reactor.r1",
+    version=1,
+    display_name="R1 Compact Reactor",
+    family="reactor",
+    fit_location=SlotLocation.CORE_SYSTEM,
+    cpu_demand=10.0,
+    powergrid_demand=20.0,
+    durability_maximum=100.0,
+    mass_kg=1_200.0,
+    volume_cubic_meters=3.5,
+    passive_effects=(
+        StatisticModifier("capacitor_generation", ModifierOperation.FLAT, 12.0),
+        StatisticModifier("capacitor_capacity", ModifierOperation.FLAT, 60.0),
+        StatisticModifier("heat_tolerance", ModifierOperation.FLAT, 20.0),
+    ),
 )
 
 
@@ -329,4 +449,5 @@ def create_demo_fitting_service() -> FittingService:
     service.add_station_item(ModuleItem("item.mining_laser.1", MINING_LASER, "station.kepler", "pilot.demo.1", 100.0))
     service.add_station_item(ModuleItem("item.shield_booster.1", SHIELD_BOOSTER, "station.kepler", "pilot.demo.1", 100.0))
     service.add_station_item(ModuleItem("item.capacitor_bank.1", CAPACITOR_BANK, "station.kepler", "pilot.demo.1", 100.0))
+    service.add_station_item(ModuleItem("item.reactor_core.1", REACTOR_CORE, "station.kepler", "pilot.demo.1", 100.0))
     return service

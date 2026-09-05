@@ -1,0 +1,5 @@
+# Isolated inventory API/database regression tests (no PostgreSQL or Redis required).
+aiosqlite>=0.22
+httpx>=0.28
+pytest>=9.0
+pytest-asyncio>=1.3

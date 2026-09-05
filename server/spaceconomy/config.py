@@ -31,6 +31,18 @@ class Settings(BaseSettings):
     client_origin: str = "http://127.0.0.1:5173"
     simulation_tick_hz: int = 20
     snapshot_tick_hz: int = 10
+    system_radius_meters: float = 18_000_000
+    system_crossing_seconds: float = 1_800
+    object_render_radius_meters: float = 40_000
+    asteroid_spawn_interval_seconds: int = 300
+    asteroid_spawn_batch_size: int = 6
+    asteroid_field_maximum_active_asteroids: int = 36
+    world_spawn_tick_seconds: int = 30
+    sensor_default_range_meters: float = 1_500_000
+    sensor_default_power_cost_megajoules: float = 35
+    sensor_default_cooldown_seconds: float = 20
+    jettison_expiry_seconds: int = 300
+    jettison_pickup_range_meters: float = 250
 
     model_config = SettingsConfigDict(
         env_file=".env", env_prefix="SPACECONOMY_", env_ignore_empty=True

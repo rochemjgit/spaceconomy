@@ -4,3 +4,17 @@
   width: 72px;
   transform: translateX(-50%);
 }
+
+.fitting-stat-strip { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0; }
+.fitting-stat-strip span { padding: 7px 9px; border: 1px solid rgb(78 166 170 / 45%); color: #b9d4d6; background: rgb(0 8 12 / 52%); font: 700 9px ui-monospace, monospace; letter-spacing: .06em; }
+.live-fitting-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, .8fr); gap: 18px; }
+.live-fitting-layout .eyebrow { margin: 0 0 8px; }
+.live-fitting-slots { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 8px; margin: 0 0 18px; }
+.live-fitting-slot, .live-module-item { display: grid; align-content: start; gap: 5px; min-height: 78px; padding: 10px; border: 1px solid rgb(78 166 170 / 45%); color: #d8eeee; background: rgb(0 8 12 / 58%); text-align: left; cursor: pointer; }
+.live-fitting-slot > span, .live-module-item small { color: #8db6c2; font: 700 8px Inter, ui-sans-serif, system-ui, sans-serif; letter-spacing: .1em; }
+.live-fitting-slot strong, .live-module-item strong { font-size: 11px; letter-spacing: .04em; }.live-fitting-slot small { color: #a9c5c7; font-size: 9px; }
+.live-fitting-slot.is-selected, .live-module-item.is-selected { border-color: #ffbd4a; background: rgb(67 42 10 / 46%); }.live-fitting-slot:hover, .live-fitting-slot:focus-visible, .live-module-item:hover, .live-module-item:focus-visible { border-color: #5ce3c6; outline: 1px solid #b6fff1; outline-offset: 2px; }
+.live-module-items { display: grid; gap: 8px; }.live-module-item { grid-template-columns: 30px minmax(0, 1fr); }.live-module-item small { grid-column: 2; }.live-module-item .inventory-item-icon { grid-row: span 2; }
+.live-fitting-actions { display: flex; flex-wrap: wrap; gap: 8px; }.live-fitting-actions button { min-height: 36px; padding: 0 11px; border: 1px solid rgb(92 227 198 / 62%); color: #bffff0; background: rgb(5 42 46 / 72%); font: 700 9px Inter, ui-sans-serif, system-ui, sans-serif; letter-spacing: .08em; cursor: pointer; }.live-fitting-actions button:disabled { cursor: not-allowed; opacity: .38; }.live-fitting-actions button:hover:not(:disabled), .live-fitting-actions button:focus-visible { color: #031813; background: #5ce3c6; outline: 1px solid #c5fff4; outline-offset: 2px; }
+
+@media (max-width: 640px) { .live-fitting-layout { grid-template-columns: 1fr; }.fitting-stat-strip { gap: 6px; } }

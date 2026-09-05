@@ -4,15 +4,34 @@
 
 Establish the durable and realtime data foundation for Spaceconomy. PostgreSQL and Redis both run as Docker Compose containers. PostgreSQL is the authoritative record for player, world, inventory, fitting, and economy state. Redis accelerates sessions, idempotency lookups, cached snapshots, presence, rate limits, and realtime event fan-out.
 
-This plan implements the complete Phase 1 data schema now, while only exposing gameplay APIs whose supporting rules already exist or are necessary to bootstrap an authenticated player.
+This plan now has an implemented foundation for authenticated pilots, persistent ship state, docked/in-space handoff scaffolding, realtime presence, private field discovery, local asteroid interest snapshots, and transactional asteroid extraction. Remaining Phase 1 systems are described as planned work below.
 
 ## Current Baseline
 
 - `compose.yaml` already defines PostgreSQL, Redis, and the FastAPI API container.
-- `server/spaceconomy/config.py` provides database and Redis connection URLs, but neither is wired into application lifecycle code.
-- `server/spaceconomy/api.py` exposes only the health endpoint.
+- `server/spaceconomy/db.py` and Redis lifecycle support are wired into the FastAPI lifespan.
+- `server/spaceconomy/api.py` exposes versioned health, auth, ship-state, realtime, and mining routers.
 - `server/spaceconomy/fitting.py` provides deterministic in-memory fitting rules and tests. It must remain the rules engine, with persistence added around it rather than inside it.
-- SQLAlchemy, asyncpg, Alembic, Redis, Argon2, and JWT dependencies are already declared in `server/pyproject.toml`.
+- SQLAlchemy, asyncpg, Alembic, Redis, Argon2, and JWT support PostgreSQL-backed application state.
+
+## Implemented Mining World
+
+- `SolarSystem`, `AsteroidField`, `Asteroid`, and `PilotDiscovery` are durable PostgreSQL entities, seeded idempotently for Kepler.
+- The API starts a configurable field replenishment service. It creates bounded batches of server-owned asteroids and respects each field's active-object maximum.
+- A sensor scan spends durable capacitor power, observes a durable cooldown, and writes pilot-private field discoveries.
+- The local asteroid API exposes only non-depleted asteroids in personally discovered fields that are near the requested bounded visual interest position.
+- Asteroid extraction locks the ship and asteroid rows in one transaction, verifies docking state, discovery, range, hold capacity, and system bounds, then updates remaining ore and `ShipState.cargo_cubic_meters` atomically.
+- Extraction creates or updates a ship-container `MinedOreLot` with matching source asteroid and assay. Lots can be split, transferred to unlimited station storage, merged only with matching source/composition/assay, or jettisoned and recovered. Migration 12 backfills existing lots into ship cargo and removes the old pilot/asteroid uniqueness constraint. Ore yields no minerals until a future refining command consumes it.
+- `MineralDefinition` seeds a versioned catalog of scientific and rare endgame fictional minerals. Each asteroid receives a deterministic, bounded, multi-mineral assay from its durable spawn seed, and that immutable assay is copied to the source `MinedOreLot` on extraction.
+- Ferrous and silicate fields contain scientific minerals only. Rare-field anomaly variants have a constrained chance to include fictional minerals; refining remains unimplemented, so mining never creates mineral stacks directly.
+- Ship inventory stacks can be jettisoned while undocked into durable, public `JettisonedItem` world objects. No ownership or permission check applies to pickup; any undocked pilot within the configurable pickup radius (250 m by default) can collect the full stack if it fits in their cargo container. Objects expire after the configurable lifetime (five minutes by default), and world ticks purge them even when no client is polling.
+- Public ore snapshots also retain source and assay, and world pruning preserves referenced source asteroids. Modules never merge into stacks. All hold-capacity checks include container-owned ore; client ship-state checkpoints cannot overwrite the inventory-derived cargo total.
+- Inventory commands serialize on the pilot ship-state row before ship/container and item locks. Ship-only split/merge remains available in space, while station mutations and station snapshot visibility require docking. Durable idempotent command results and immutable audit entries remain planned, not implemented by these transactions.
+- Babylon meshes are keyed by durable asteroid UUID and are reconciled from local snapshots. A visual ore chunk is created only after the extraction response succeeds.
+
+## Current Authority Limitation
+
+Flight transforms are currently client-predicted and checkpointed on state transitions. The local interest and extraction endpoints accept a bounded client position for the prototype. A future system simulation server must own movement, reconciliation, spatial interest, and extraction-range validation from authoritative transforms; clients must then stop sending positions for those decisions.
 
 ## Authority Rules
 
@@ -191,7 +210,7 @@ Add typed Pydantic contracts and authenticated endpoints for:
 
 Add WebSocket JWT authentication using the versioned MessagePack envelope in `client/src/network/protocol.ts`. Bridge Redis pub/sub events only to authorized connected sockets. Store connection and presence state in Redis and remove it during disconnect.
 
-Define durable location checkpoint storage now, but defer authoritative flight simulation, client prediction/reconciliation, mining, combat, market, and manufacturing rules until their respective phases.
+Define durable location checkpoint storage now. Mining discovery and fixed-cycle extraction are implemented; authoritative flight simulation, client prediction/reconciliation, combat, market, and manufacturing rules remain deferred.
 
 ### 8. Docker and Operational Hardening
 

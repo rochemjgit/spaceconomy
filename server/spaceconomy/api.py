@@ -1,6 +1,7 @@
 """FastAPI application entrypoint for HTTP and realtime endpoints."""
 
 from collections.abc import AsyncIterator
+import asyncio
 from contextlib import asynccontextmanager
 from typing import Final
 
@@ -11,8 +12,12 @@ from pydantic import BaseModel
 from .auth import router as auth_router
 from .config import settings
 from .db import close_database
+from .fitting_api import router as fitting_router
+from .inventory import router as inventory_router
+from .mining import router as mining_router
 from .redis import close_redis
 from .realtime import router as realtime_router
+from .world import run_system_world
 
 API_VERSION: Final = "v1"
 
@@ -29,9 +34,14 @@ class HealthResponse(BaseModel):
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     """Release lazy infrastructure clients without making startup depend on a request."""
-    yield
-    await close_redis()
-    await close_database()
+    world_task = asyncio.create_task(run_system_world())
+    try:
+        yield
+    finally:
+        world_task.cancel()
+        await asyncio.gather(world_task, return_exceptions=True)
+        await close_redis()
+        await close_database()
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
@@ -43,6 +53,9 @@ app.add_middleware(
     allow_headers=["authorization", "content-type"],
 )
 app.include_router(auth_router)
+app.include_router(fitting_router)
+app.include_router(inventory_router)
+app.include_router(mining_router)
 app.include_router(realtime_router)
 
 

@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import settings
 from .db import get_session
-from .models import Account, AccountActivation, Pilot, RefreshSession, ShipState
+from .models import Account, AccountActivation, InventoryContainer, Pilot, RefreshSession, ShipState
 from .redis import delete_session, set_session
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
@@ -403,7 +403,20 @@ async def save_ship_state(
         ship_state.shields = payload.shields
         ship_state.hull = payload.hull
         ship_state.fuel_liters = payload.fuel_liters
-        ship_state.cargo_cubic_meters = payload.cargo_cubic_meters
+        # Cargo belongs to the inventory ledger, not a stale/untrusted client checkpoint.
+        # Local import avoids the inventory -> authentication dependency cycle.
+        from .inventory import _used_volume
+
+        await session.flush()
+        container_id = await session.scalar(
+            select(InventoryContainer.id).where(
+                InventoryContainer.pilot_id == pilot_id,
+                InventoryContainer.container_type == "ship_cargo",
+            )
+        )
+        ship_state.cargo_cubic_meters = (
+            await _used_volume(session, container_id) if container_id is not None else 0.0
+        )
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)

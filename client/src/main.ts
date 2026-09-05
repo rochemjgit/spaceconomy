@@ -7,8 +7,15 @@ import './fitting.css'
 import './core-systems.css'
 import './station-services.css'
 import './hardpoints.css'
+import './inventory.css'
 import { Vector3 } from '@babylonjs/core'
 import { createStationInteriorScene, createSystemScene } from './game/scene'
+import type { MiningExtractionResult, ServerAsteroid, ServerJettisonedItem } from './game/scene'
+import stationInteriorUrl from './assets/station-interior.svg'
+import refineryUrl from './assets/refinery.png'
+import { escapeHtml, freeVolume, inventoryEntries, InventoryRequestGuard, parseInventoryDrag, quantityLimit, resolveInventoryEntry, validateQuantity } from './inventory'
+import type { InventoryAction, InventoryContainer, InventoryEntry, InventorySelection, InventorySnapshot } from './inventory'
+import { isEditingText } from './game/input'
 
 const app = document.querySelector<HTMLDivElement>('#app')
 
@@ -34,6 +41,20 @@ type SavedShipState = {
   hull: number
   fuel_liters: number
   cargo_cubic_meters: number
+}
+
+type DockedInventory = {
+  ship: InventoryContainer
+  station: InventoryContainer
+}
+
+type FittingSnapshot = {
+  ship_id: string
+  hull_definition_id: string
+  universal_hardpoint_count: number
+  core_system_slot_count: number
+  fitted_modules: { item_id: string; definition_id: string; display_name: string; family: string; slot_location: string; slot_index: number; durability: number; mass_kg: number }[]
+  statistics: Record<string, number>
 }
 
 function renderAuthentication() {
@@ -372,8 +393,9 @@ function launchGame(
   pilots: { id: string; display_name: string }[],
   selectedPilotId: string,
 ) {
-let realtimeSocket: WebSocket | undefined
 let lastRealtimeUpdateAt = 0
+let locationTransitionPending = false
+let locationTransitionError = ''
 const starterHardpoints = [
   { moduleName: 'Mining Laser', icon: 'ML', name: 'MINING LASER' },
 ]
@@ -385,6 +407,16 @@ const hardpointSlotsMarkup = starterHardpoints.map((hardpoint, index) => `
 appRoot.innerHTML = `
   <main class="game-shell">
     <canvas id="game-canvas" aria-label="Spaceconomy game world"></canvas>
+    <div id="station-backdrop" class="station-backdrop" style="--station-scene-image: url('${stationInteriorUrl}')" hidden aria-hidden="true"></div>
+    <section id="station-hotspots" class="station-hotspots" aria-label="Kepler Station services" hidden>
+      <button class="station-service-button hotspot-market" type="button" data-station-service="market"><strong>MARKET</strong><span>BUY / SELL</span></button>
+      <button class="station-service-button hotspot-maintenance" type="button" data-station-service="maintenance"><strong>MAINTENANCE</strong><span>REPAIR / RELOAD</span></button>
+      <button class="station-service-button hotspot-fitting" type="button" data-station-service="fitting"><strong>FITTING</strong><span>MODULE SYSTEMS</span></button>
+      <button class="station-service-button hotspot-refining" type="button" data-station-service="refining"><strong>REFINING</strong><span>ORE PROCESSING</span></button>
+      <button class="station-service-button hotspot-crafting" type="button" data-station-service="crafting"><strong>CRAFTING</strong><span>WORKSTATIONS</span></button>
+      <button class="station-service-button hotspot-inventory" type="button" data-station-service="inventory"><strong>INVENTORY</strong><span>SHIP / STATION</span></button>
+      <button class="station-service-button hotspot-hangar" type="button" data-station-service="hangar"><strong>HANGAR</strong><span>STORED SHIPS</span></button>
+    </section>
     <div class="ship-reticle" aria-hidden="true"></div>
     <header class="topbar">
       <div class="topbar-left">
@@ -409,10 +441,11 @@ appRoot.innerHTML = `
       <div class="core-systems" aria-label="Installed core systems">
         <p class="eyebrow">CORE SYSTEMS</p>
         <div class="core-system-icons">
+          <button class="core-system-icon" type="button" aria-label="Warp Drive: Class I core with 100 warp capacity, 2 capacity per second recharge, 10 kilometer per second maximum speed, and a calculated 450 kilometer range." data-core-system="warp" data-tooltip="ALT+1 WARP DRIVE: Start or exit free-flight warp."><span aria-hidden="true">WD</span></button>
+          <button class="core-system-icon" type="button" aria-label="Sensors: active spherical scan for nearby asteroid fields." data-core-system="sensors" data-tooltip="ALT+2 SENSORS: Scan all directions for asteroid fields. Uses capacitor power."><span aria-hidden="true">SN</span></button>
           <button class="core-system-icon" type="button" aria-label="Reactor: Compact Fission Plant. Output 120 megawatts with 76 percent heat tolerance." data-tooltip="REACTOR: Compact Fission Plant. 120 MW output, 76% heat tolerance."><span aria-hidden="true">RP</span></button>
           <button class="core-system-icon" type="button" aria-label="Shield Generator: capacity 100, recharge 6 per second." data-tooltip="SHIELD GENERATOR: Capacity 100, recharge 6.0/s."><span aria-hidden="true">SG</span></button>
           <button class="core-system-icon" type="button" aria-label="Sublight Drive: conventional thrust and maneuvering." data-tooltip="SUBLIGHT DRIVE: 34 kN thrust, 92% turn response."><span aria-hidden="true">SL</span></button>
-          <button class="core-system-icon" type="button" aria-label="Warp Drive: Class I core with a 4.2 second spool time." data-tooltip="WARP DRIVE: Class I core, 4.2 s spool time."><span aria-hidden="true">WD</span></button>
           <button class="core-system-icon" type="button" aria-label="Fuel Tank: 80 unit deuterium reserve, estimated range five jumps." data-tooltip="FUEL TANK: 80/80 reserve, estimated 5 jumps."><span aria-hidden="true">FT</span></button>
           <button class="core-system-icon" type="button" aria-label="Cargo Hold: capacity 24 cubic meters." data-tooltip="CARGO HOLD: 0.0 / 24.0 m3 capacity."><span aria-hidden="true">CH</span></button>
         </div>
@@ -425,6 +458,7 @@ appRoot.innerHTML = `
     </section>
     <section class="durability-readout" aria-label="Ship durability">
       <div class="durability-layer"><div class="durability-label"><span>POWER</span><strong id="ship-power">100.00 / 100.00 MJ</strong></div><span class="durability-bar"><span id="ship-power-bar" class="durability-fill power-fill"></span></span></div>
+      <div class="durability-layer"><div class="durability-label"><span>WARP CAPACITY</span><strong id="ship-warp-capacity">100.00 / 100.00 WC</strong></div><span class="durability-bar"><span id="ship-warp-capacity-bar" class="durability-fill warp-capacity-fill"></span></span></div>
       <div class="durability-layer"><div class="durability-label"><span>SHIELDS</span><strong id="ship-shields">100%</strong></div><span class="durability-bar"><span id="ship-shields-bar" class="durability-fill shield-fill"></span></span></div>
       <div class="durability-layer"><div class="durability-label"><span>HULL</span><strong id="ship-hull">100%</strong></div><span class="durability-bar"><span id="ship-hull-bar" class="durability-fill hull-fill"></span></span></div>
       <div class="durability-layer"><div class="durability-label"><span>FUEL</span><strong id="ship-fuel">80.00 / 80.00 L</strong></div><span class="durability-bar"><span id="ship-fuel-bar" class="durability-fill fuel-fill"></span></span></div>
@@ -438,16 +472,17 @@ appRoot.innerHTML = `
         <span id="map-primary-star" class="map-poi map-star" title="Primary Star"></span>
         <span id="map-starter-world" class="map-poi map-planet" title="Starter World"></span>
         <span id="map-kepler-station" class="map-poi map-station" title="Kepler Station"></span>
-        <span id="map-asterion-belt" class="map-poi map-asteroid-belt" title="Asterion Belt - 240.0 km beyond Starter World"></span>
-        <span id="map-vesper-belt" class="map-poi map-asteroid-belt map-vesper-belt" title="Vesper Belt - remote cold-rock field"></span>
-        <span id="map-nadir-belt" class="map-poi map-asteroid-belt map-nadir-belt" title="Nadir Belt - outer trailing field"></span>
+        <span id="map-asterion-belt" class="map-poi map-asteroid-belt" title="Asterion Belt - 240.0 km beyond Starter World" hidden></span>
+        <span id="map-vesper-belt" class="map-poi map-asteroid-belt map-vesper-belt" title="Vesper Belt - remote cold-rock field" hidden></span>
+        <span id="map-nadir-belt" class="map-poi map-asteroid-belt map-nadir-belt" title="Nadir Belt - outer trailing field" hidden></span>
         <span id="player-map-marker" class="player-map-marker" title="Your ship"></span>
       </div>
       <div class="map-legend"><span class="legend-star">STAR</span><span class="legend-planet">WORLD</span><span class="legend-station">STATION</span><span class="legend-belt">BELT</span><span class="legend-player">YOU</span></div>
     </section>
     <section id="target-window" class="target-window" aria-label="Selected target" hidden>
       <div class="target-window-heading"><p id="target-lock-label" class="eyebrow">TARGET LOCK</p><button id="clear-target" type="button" aria-label="Unlock target">×</button></div>
-      <div id="target-thumbnail" class="target-thumbnail" aria-hidden="true"><span></span></div><div><p id="target-name" class="target-name"></p><p id="target-range" class="target-range"></p></div></div>
+      <div id="target-thumbnail" class="target-thumbnail" aria-hidden="true"><span></span></div><div><p id="target-name" class="target-name"></p><p id="target-range" class="target-range"></p><button id="pickup-jettisoned-item" type="button" hidden>COLLECT CARGO</button></div></div>
+      <p id="cargo-pickup-feedback" class="inventory-feedback" role="status"></p>
       <span id="target-lock-progress" class="target-lock-progress"><span></span></span>
     </section>
     <section id="available-actions" class="available-actions" aria-label="Available actions" hidden>
@@ -457,48 +492,20 @@ appRoot.innerHTML = `
     <section id="docked-status" class="docked-status" aria-label="Station status" hidden>
       <p class="eyebrow">KEPLER STATION</p>
       <p>DOCKING BAY 04</p>
-      <p class="docked-terminal-hint">SELECT THE STATION TERMINAL TO ACCESS SERVICES</p>
+      <p class="docked-terminal-hint">SELECT A MARKED STATION SERVICE</p>
+      <p id="docked-transition-error" class="inventory-error" role="alert" hidden></p>
       <button id="undock-action" type="button">UNDOCK</button>
     </section>
     <section id="station-services" class="station-services" aria-label="Kepler Station services" hidden>
       <header class="station-services-heading"><div><p class="eyebrow">STATION SERVICES</p><h1>KEPLER STATION</h1></div><button id="exit-services-action" type="button">EXIT SERVICES</button></header>
-      <div id="station-service-grid" class="station-service-grid" aria-label="Available station services">
-        <button class="station-service-button" type="button" data-station-service="market"><strong>MARKET</strong><span>BUY / SELL</span></button>
-        <button class="station-service-button" type="button" data-station-service="maintenance"><strong>MAINTENANCE</strong><span>REPAIR / RELOAD</span></button>
-        <button class="station-service-button" type="button" data-station-service="fitting"><strong>FITTING</strong><span>MODULE SYSTEMS</span></button>
-        <button class="station-service-button" type="button" data-station-service="refining"><strong>REFINING</strong><span>ORE PROCESSING</span></button>
-        <button class="station-service-button" type="button" data-station-service="crafting"><strong>CRAFTING</strong><span>WORKSTATIONS</span></button>
-        <button class="station-service-button" type="button" data-station-service="inventory"><strong>INVENTORY</strong><span>SHIP / STATION</span></button>
-        <button class="station-service-button" type="button" data-station-service="hangar"><strong>HANGAR</strong><span>STORED SHIPS</span></button>
-      </div>
-      <div id="station-service-panel" class="station-service-panel" hidden>
+      <div id="station-service-panel" class="station-service-panel">
         <button id="station-service-back" class="station-service-back" type="button">BACK TO SERVICES</button>
         <section data-station-panel="market" hidden><p class="eyebrow">MARKET EXCHANGE</p><h2>MARKET</h2><p class="station-service-empty">Buy and sell orders will load from the Kepler market. Purchases and sales settle through your Kepler station inventory.</p></section>
         <section data-station-panel="maintenance" hidden><p class="eyebrow">SHIPYARD SERVICES</p><h2>MAINTENANCE</h2><p class="station-service-empty">Repair prices, fuel, reload supplies, and crafted consumables require an authoritative docked-state snapshot.</p></section>
-        <section id="fitting-panel" data-station-panel="fitting" hidden>
-        <div class="fitting-heading"><span class="eyebrow">STARTER CORVETTE</span><strong>UNIVERSAL SYSTEMS</strong></div>
-        <div class="fitting-layout">
-          <div class="ship-fitting-map" aria-label="Top-down starter corvette module layout">
-            <div class="ship-hull-outline" aria-hidden="true"><span class="ship-hull-core"></span><span class="ship-hull-nose"></span><span class="ship-hull-port-wing"></span><span class="ship-hull-starboard-wing"></span></div>
-            <button class="fitting-slot fitting-slot-reactor is-selected" type="button" data-fitting-module="reactor" aria-pressed="true"><span>REACTOR</span><small>PLANT-01</small></button>
-            <button class="fitting-slot fitting-slot-shields" type="button" data-fitting-module="shields" aria-pressed="false"><span>SHIELDS</span><small>SG-01</small></button>
-            <button class="fitting-slot fitting-slot-sublight" type="button" data-fitting-module="sublight" aria-pressed="false"><span>SUBLIGHT</span><small>SD-01</small></button>
-            <button class="fitting-slot fitting-slot-warp" type="button" data-fitting-module="warp" aria-pressed="false"><span>WARP</span><small>WD-01</small></button>
-            <button class="fitting-slot fitting-slot-fuel" type="button" data-fitting-module="fuel" aria-pressed="false"><span>FUEL</span><small>FT-01</small></button>
-            <button class="fitting-slot fitting-slot-cargo" type="button" data-fitting-module="cargo" aria-pressed="false"><span>CARGO</span><small>CH-01</small></button>
-            <button class="fitting-slot fitting-slot-hardpoint" type="button" data-fitting-module="hardpoint" aria-pressed="false"><span>HARDPOINT</span><small>MINING LASER</small></button>
-          </div>
-          <div class="fitting-module-details" aria-live="polite">
-            <p id="fitting-module-type" class="eyebrow">POWER SYSTEM</p>
-            <h2 id="fitting-module-name">COMPACT FISSION PLANT</h2>
-            <p id="fitting-module-spec" class="fitting-module-spec">Output 120 MW · Heat tolerance 76%</p>
-            <p id="fitting-module-description">Provides shipwide power. Excess load produces heat that must be managed by the hull.</p>
-          </div>
-        </div>
-        </section>
-        <section data-station-panel="refining" hidden><p class="eyebrow">REFINERY QUEUE</p><h2>REFINING</h2><p class="station-service-empty">Refining jobs and queue times will appear here when local inventory reservations are available.</p></section>
+        <section id="fitting-panel" data-station-panel="fitting" hidden aria-live="polite"></section>
+        <section class="refining-panel" data-station-panel="refining" style="--refinery-image: url('${refineryUrl}')" hidden><div class="refining-panel-content"><p class="eyebrow">REFINERY QUEUE</p><h2>REFINING</h2><p class="station-service-empty">Refining jobs and queue times will appear here when local inventory reservations are available.</p></div></section>
         <section data-station-panel="crafting" hidden><p class="eyebrow">MANUFACTURING WORKSTATIONS</p><h2>CRAFTING</h2><p class="station-service-empty">Crafting recipes, material reservations, and production queues will appear here when connected to the station worker service.</p></section>
-        <section data-station-panel="inventory" hidden><p class="eyebrow">LOCAL ASSET MANAGEMENT</p><h2>INVENTORY</h2><p class="station-service-empty">Ship cargo and personal Kepler storage will load separately. Transfers are allowed only between this ship and this station.</p></section>
+        <section id="inventory-panel" class="inventory-panel" data-station-panel="inventory" hidden aria-live="polite"></section>
         <section data-station-panel="hangar" hidden><p class="eyebrow">KEPLER SHIP STORAGE</p><h2>HANGAR</h2><p class="station-service-empty">Ships physically stored at Kepler Station will appear here. Move a ship by flying it to its destination station.</p></section>
       </div>
     </section>
@@ -560,20 +567,18 @@ const mapNadirBelt = document.querySelector<HTMLElement>('#map-nadir-belt')
 const availableActions = document.querySelector<HTMLElement>('#available-actions')
 const dockAction = document.querySelector<HTMLButtonElement>('#dock-action')
 const dockedStatus = document.querySelector<HTMLElement>('#docked-status')
+const stationBackdrop = document.querySelector<HTMLElement>('#station-backdrop')
+const stationHotspots = document.querySelector<HTMLElement>('#station-hotspots')
 const stationServices = document.querySelector<HTMLElement>('#station-services')
 const undockAction = document.querySelector<HTMLButtonElement>('#undock-action')
 const systemStatus = document.querySelector<HTMLElement>('#system-status')
-const stationServiceGrid = document.querySelector<HTMLElement>('#station-service-grid')
 const stationServicePanel = document.querySelector<HTMLElement>('#station-service-panel')
+const inventoryPanel = document.querySelector<HTMLElement>('#inventory-panel')
 const stationServiceButtons = document.querySelectorAll<HTMLButtonElement>('[data-station-service]')
 const stationPanels = document.querySelectorAll<HTMLElement>('[data-station-panel]')
 const stationServiceBack = document.querySelector<HTMLButtonElement>('#station-service-back')
 const exitServicesAction = document.querySelector<HTMLButtonElement>('#exit-services-action')
-const fittingSlots = document.querySelectorAll<HTMLButtonElement>('[data-fitting-module]')
-const fittingModuleType = document.querySelector<HTMLElement>('#fitting-module-type')
-const fittingModuleName = document.querySelector<HTMLElement>('#fitting-module-name')
-const fittingModuleSpec = document.querySelector<HTMLElement>('#fitting-module-spec')
-const fittingModuleDescription = document.querySelector<HTMLElement>('#fitting-module-description')
+const fittingPanel = document.querySelector<HTMLElement>('#fitting-panel')
 const gameMenuToggle = document.querySelector<HTMLButtonElement>('#game-menu-toggle')
 const gameMenuActions = document.querySelector<HTMLElement>('#game-menu-actions')
 const gameModal = document.querySelector<HTMLElement>('#game-modal')
@@ -583,6 +588,7 @@ const gameModalContent = document.querySelector<HTMLElement>('#game-modal-conten
 const gameModalActions = document.querySelector<HTMLElement>('#game-modal-actions')
 const gameModalClose = document.querySelector<HTMLButtonElement>('#game-modal-close')
 const moduleSlots = document.querySelectorAll<HTMLButtonElement>('[data-module]')
+const coreSystemButtons = document.querySelectorAll<HTMLButtonElement>('[data-core-system]')
 const systemMapModal = document.querySelector<HTMLElement>('#system-map-modal')
 const systemMapClose = document.querySelector<HTMLButtonElement>('#system-map-close')
 const systemMapDisplay = document.querySelector<HTMLElement>('.system-map-display')
@@ -604,6 +610,8 @@ const targetLockProgress = document.querySelector<HTMLElement>('#target-lock-pro
 const clearTarget = document.querySelector<HTMLButtonElement>('#clear-target')
 const powerDisplay = document.querySelector<HTMLElement>('#ship-power')
 const powerBar = document.querySelector<HTMLElement>('#ship-power-bar')
+const warpCapacityDisplay = document.querySelector<HTMLElement>('#ship-warp-capacity')
+const warpCapacityBar = document.querySelector<HTMLElement>('#ship-warp-capacity-bar')
 const shieldsDisplay = document.querySelector<HTMLElement>('#ship-shields')
 const hullDisplay = document.querySelector<HTMLElement>('#ship-hull')
 const shieldsBar = document.querySelector<HTMLElement>('#ship-shields-bar')
@@ -619,9 +627,9 @@ const minimumMinimapRadius = 20_000
 const maximumMinimapRadius = 400_000
 let minimapRadius = 140_000
 let playerMapPosition = { x: 123_078, y: 480, z: -2_691 }
-let selectedTarget: { name: string; kind: 'asteroid' | 'pilot'; shipType?: string; position: Vector3; oreRemainingCubicMeters: number; initialOreCubicMeters: number; locked: boolean; locking: boolean; lockProgress: number } | undefined
+let selectedTarget: { name: string; kind: 'asteroid' | 'pilot' | 'cargo'; shipType?: string; jettisonedItemId?: string; position: Vector3; oreRemainingCubicMeters: number; initialOreCubicMeters: number; locked: boolean; locking: boolean; lockProgress: number } | undefined
 let cargoCubicMeters = 0
-let maximumCargoCubicMeters = 24
+let cargoCapacityCubicMeters = 24
 let shipPowerMegajoules = savedShipState.power_megajoules
 let shipShields = savedShipState.shields
 let shipHull = savedShipState.hull
@@ -637,8 +645,8 @@ function renderSavedShipState() {
   if (hullBar) hullBar.style.width = `${shipHull}%`
   if (fuelDisplay) fuelDisplay.textContent = `${shipFuelLiters.toFixed(2)} / 80.00 L`
   if (fuelBar) fuelBar.style.width = `${(shipFuelLiters / 80) * 100}%`
-  if (cargoDisplay) cargoDisplay.textContent = `${cargoCubicMeters.toFixed(2)} / 24.00 M3`
-  if (cargoBar) cargoBar.style.width = `${(cargoCubicMeters / 24) * 100}%`
+  if (cargoDisplay) cargoDisplay.textContent = `${cargoCubicMeters.toFixed(2)} / ${cargoCapacityCubicMeters.toFixed(2)} M3`
+  if (cargoBar) cargoBar.style.width = `${(cargoCubicMeters / cargoCapacityCubicMeters) * 100}%`
 }
 let systemMapPanX = 0
 let systemMapPanY = 0
@@ -669,7 +677,9 @@ const modalContent: Record<ModalName, { eyebrow: string; title: string; content:
 }
 
 function closeGameModal() {
+  invalidateInventoryView()
   gameModal?.setAttribute('hidden', '')
+  if (gameModal) delete gameModal.dataset.view
   gameModalActions?.replaceChildren()
 }
 
@@ -704,7 +714,7 @@ function closeSystemMap() {
 }
 
 function openSystemMap() {
-  if (!systemMapModal || gameModal?.hasAttribute('hidden') === false) return
+  if (locationTransitionPending || !systemMapModal || gameModal?.hasAttribute('hidden') === false) return
   systemMapModal.removeAttribute('hidden')
   systemMapClose?.focus()
 }
@@ -725,8 +735,11 @@ function selectPoi(name: PoiName) {
 }
 
 function openGameModal(name: ModalName) {
+  if (locationTransitionPending) return
   const content = modalContent[name]
   if (!gameModal || !gameModalEyebrow || !gameModalTitle || !gameModalContent || !gameModalActions) return
+  invalidateInventoryView()
+  gameModal.dataset.view = name
   gameModalEyebrow.textContent = content.eyebrow
   gameModalTitle.textContent = content.title
   gameModalContent.innerHTML = content.content
@@ -737,21 +750,18 @@ function openGameModal(name: ModalName) {
   document.querySelector<HTMLButtonElement>('#logout-confirm')?.addEventListener('click', () => void logout())
 }
 
-async function logout() {
-  try {
-    await fetch(`${apiBaseUrl}/auth/ship-state`, {
+async function saveShipState(dockedStationName: string | null, position = playerMapPosition) {
+  const response = await fetch(`${apiBaseUrl}/auth/ship-state`, {
       method: 'PUT',
       headers: {
         authorization: `Bearer ${pilotAccessToken}`,
         'content-type': 'application/json',
       },
       body: JSON.stringify({
-        position_x: playerMapPosition.x,
-        position_y: playerMapPosition.y,
-        position_z: playerMapPosition.z,
-        docked_station_name: document.querySelector('.game-shell')?.classList.contains('is-docked')
-          ? 'KEPLER STATION'
-          : null,
+        position_x: position.x,
+        position_y: position.y,
+        position_z: position.z,
+        docked_station_name: dockedStationName,
         power_megajoules: shipPowerMegajoules,
         shields: shipShields,
         hull: shipHull,
@@ -759,26 +769,499 @@ async function logout() {
         cargo_cubic_meters: cargoCubicMeters,
       }),
     })
-  } finally {
-    closeGameModal()
-    realtimeSocket?.close()
-    window.removeEventListener('keydown', handleGameNavigationKeyDown)
-    window.removeEventListener('keydown', handleHardpointKeyDown)
-    scene.dispose()
-    renderPilotSelection(accountAccessToken, pilots)
+  if (!response.ok) throw new Error(`Checkpoint rejected (HTTP ${response.status}): ${await response.text()}`)
+}
+
+async function logout() {
+  if (inventoryLocked()) return
+  try {
+    await saveShipState(document.querySelector('.game-shell')?.classList.contains('is-docked') ? 'KEPLER STATION' : null)
+  } catch (error) {
+    if (gameModalContent) gameModalContent.textContent = `Unable to save before signing out: ${error instanceof Error ? error.message : 'Network error'}.`
+    return
   }
+  closeGameModal()
+  realtimeSocket?.close()
+  window.removeEventListener('keydown', handleGameNavigationKeyDown)
+  window.removeEventListener('keydown', handleHardpointKeyDown)
+  scene.dispose()
+  renderPilotSelection(accountAccessToken, pilots)
 }
 
 function openShipInventory() {
+  if (locationTransitionPending) return
   if (!gameModal || !gameModalEyebrow || !gameModalTitle || !gameModalContent || !gameModalActions) return
+  invalidateInventoryView()
+  gameModal.dataset.view = 'inventory'
+  selectedInventoryItem = null
   gameModalEyebrow.textContent = 'SHIP CARGO HOLD'
   gameModalTitle.textContent = 'INVENTORY'
-  gameModalContent.innerHTML = cargoCubicMeters > 0
-    ? `<p class="modal-copy">MINED ORE</p><p class="speed">${cargoCubicMeters.toFixed(2)} <small>/ ${maximumCargoCubicMeters.toFixed(2)} m3</small></p>`
-    : `<p class="modal-copy">Cargo hold empty.</p><p class="speed">0.00 <small>/ ${maximumCargoCubicMeters.toFixed(2)} m3</small></p>`
+  gameModalContent.innerHTML = '<p class="station-service-empty">Loading ship inventory...</p>'
   gameModalActions.innerHTML = ''
   gameModal.removeAttribute('hidden')
   gameModalClose?.focus()
+  renderShipInventoryModal()
+  void loadShipInventory()
+}
+
+let dockedInventory: DockedInventory | null = null
+let shipInventorySnapshot: InventoryContainer | null = null
+let fittingSnapshot: FittingSnapshot | null = null
+let selectedFittingSlot: { location: string; index: number } | null = null
+let selectedStationModuleId: string | null = null
+let inventoryFilter = ''
+let inventorySort: 'name' | 'volume' = 'name'
+let selectedInventoryItem: InventorySelection | null = null
+let inventoryBusy = false
+let inventoryMessage = ''
+let inventoryMessageIsError = false
+let inventoryDialog: HTMLDialogElement | null = null
+let inventoryViewRevision = 0
+let draggedInventoryEntry: InventorySelection | null = null
+const inventoryRequests = new InventoryRequestGuard()
+
+function inventoryLocked(): boolean {
+  return inventoryBusy || inventoryDialog !== null || locationTransitionPending
+}
+
+function activeInventoryView(): 'ship' | 'docked' | null {
+  if (gameModal?.hidden === false && gameModal.dataset.view === 'inventory') return 'ship'
+  if (gameModal?.hidden === false) return null
+  if (stationServices?.hidden === false && inventoryPanel?.hidden === false) return 'docked'
+  return null
+}
+
+function gameInputBlocked(): boolean {
+  return locationTransitionPending || gameModal?.hidden === false || systemMapModal?.hidden === false || stationServices?.hidden === false || !!inventoryDialog?.open || isEditingText(document.activeElement)
+}
+
+function liveInventoryContainers(): InventoryContainer[] {
+  if (!isInSystemSpace && dockedInventory) return [dockedInventory.ship, dockedInventory.station]
+  return shipInventorySnapshot ? [shipInventorySnapshot] : []
+}
+
+function selectedInventoryEntry() {
+  return resolveInventoryEntry(liveInventoryContainers(), selectedInventoryItem)
+}
+
+function applyInventorySnapshot(snapshot: InventorySnapshot) {
+  inventoryRequests.invalidate()
+  shipInventorySnapshot = snapshot.ship
+  dockedInventory = snapshot.station ? { ship: snapshot.ship, station: snapshot.station } : null
+  if (!selectedInventoryEntry()) selectedInventoryItem = null
+  cargoCubicMeters = snapshot.ship.used_volume_cubic_meters
+  cargoCapacityCubicMeters = snapshot.ship.capacity_cubic_meters ?? cargoCapacityCubicMeters
+  scene.setCargoCubicMeters?.(cargoCubicMeters, cargoCapacityCubicMeters)
+  if (cargoDisplay) cargoDisplay.textContent = `${cargoCubicMeters.toFixed(2)} / ${cargoCapacityCubicMeters.toFixed(2)} M3`
+  if (cargoBar) cargoBar.style.width = `${cargoCapacityCubicMeters > 0 ? Math.min(100, cargoCubicMeters / cargoCapacityCubicMeters * 100) : 0}%`
+}
+
+function invalidateInventoryView() {
+  inventoryRequests.invalidate()
+  inventoryViewRevision += 1
+  if (inventoryDialog) {
+    const dialog = inventoryDialog
+    inventoryDialog = null
+    dialog.close()
+    dialog.remove()
+  }
+  inventoryMessage = ''
+  draggedInventoryEntry = null
+}
+
+function inventoryIcon(definitionId: string) {
+  if (definitionId.includes('ore')) return 'OR'
+  if (definitionId.includes('laser')) return 'ML'
+  if (definitionId.includes('shield')) return 'SH'
+  if (definitionId.includes('capacitor')) return 'CP'
+  return 'IT'
+}
+
+function renderInventoryContainer(container: InventoryContainer, kind: 'ship' | 'station', showTransferAll = true) {
+  const capacity = container.capacity_cubic_meters
+  const percentage = capacity === null || capacity <= 0 ? 0 : Math.min(100, (container.used_volume_cubic_meters / capacity) * 100)
+  const capacityLabel = capacity === null
+    ? `${container.used_volume_cubic_meters.toFixed(1)} m3 / UNLIMITED`
+    : `${container.used_volume_cubic_meters.toFixed(1)} / ${capacity.toFixed(1)} m3`
+  const cargoTiles = inventoryEntries(container, inventoryFilter, inventorySort).map((entry) => {
+    const selected = selectedInventoryItem?.id === entry.id && selectedInventoryItem.containerId === container.id && selectedInventoryItem.kind === entry.kind
+    return `<button class="inventory-item${selected ? ' is-selected' : ''}" type="button" draggable="${showTransferAll && !inventoryLocked()}" ${inventoryLocked() ? 'disabled' : ''} data-entry-id="${escapeHtml(entry.id)}" data-entry-kind="${entry.kind}" data-inventory-source="${escapeHtml(container.id)}" aria-pressed="${selected}">
+      <span class="inventory-item-icon" aria-hidden="true">${inventoryIcon(entry.kind === 'ore' ? 'ore.raw' : entry.item.definition_id)}</span>
+      <span class="inventory-item-name">${escapeHtml(entry.name)}</span>
+      <span class="inventory-item-quantity">${entry.kind === 'ore' ? 'LOT' : entry.item.quantity}</span>
+      <span class="inventory-item-volume">${entry.volume.toFixed(3)} m³</span></button>`
+  }).join('') || '<p class="inventory-empty">No matching items or ore lots.</p>'
+  const destination = liveInventoryContainers().find((candidate) => candidate.id !== container.id)
+  return `
+    <section class="inventory-container" data-inventory-drop="${escapeHtml(container.id)}">
+      <header class="inventory-container-heading"><div><p class="eyebrow">${kind === 'ship' ? 'ACTIVE VESSEL' : 'PERSONAL STORAGE'}</p><h3>${escapeHtml(container.name)}</h3></div><strong>${capacityLabel}</strong></header>
+      <span class="inventory-capacity"><span style="width: ${percentage}%"></span></span>
+      <div class="inventory-items">${cargoTiles}</div>
+      ${showTransferAll && destination ? `<button class="inventory-transfer-all" type="button" ${inventoryLocked() ? 'disabled' : ''} data-transfer-all-source="${escapeHtml(container.id)}" data-transfer-all-destination="${escapeHtml(destination.id)}">TRANSFER ALL ${kind === 'ship' ? 'TO STATION' : 'TO SHIP'}</button>` : ''}
+    </section>`
+}
+
+function renderShipInventoryModal() {
+  if (activeInventoryView() !== 'ship' || !gameModalContent) return
+  renderInventoryView(gameModalContent, false)
+}
+
+function renderDockedInventory() {
+  if (activeInventoryView() !== 'docked' || !inventoryPanel) return
+  renderInventoryView(inventoryPanel, true)
+}
+
+function renderActiveInventory() {
+  renderShipInventoryModal()
+  renderDockedInventory()
+  const pickup = document.querySelector<HTMLButtonElement>('#pickup-jettisoned-item')
+  if (pickup) pickup.disabled = inventoryLocked()
+  if (inventoryLocked()) fittingPanel?.querySelectorAll<HTMLButtonElement>('#fit-selected-module, #unfit-selected-module').forEach((button) => { button.disabled = true })
+}
+
+function inventoryDetails(entry: InventoryEntry | undefined): string {
+  if (!entry) return '<p>Select an item or ore lot to view details and actions.</p>'
+  if (entry.kind === 'item') return `<h3>${escapeHtml(entry.name)}</h3><p>Condition: ${entry.item.durability.toFixed(1)} points · Definition version: ${entry.item.definition_version}</p><p>Module definition: ${escapeHtml(entry.item.module_definition_id ?? 'Not a module')}</p><p>Quantity: ${entry.item.quantity} · Unit volume: ${entry.item.volume_per_unit} m³ · Total: ${entry.volume} m³</p>`
+  return `<h3>${escapeHtml(entry.name)}</h3><p>Source asteroid: ${escapeHtml(entry.lot.asteroid_id)} · Volume: ${entry.volume} m³</p><p>Assay (preserved by all inventory actions):</p><ul>${entry.lot.mineral_assay.map((mineral) => `<li>${escapeHtml(mineral.definition_id)}: ${mineral.percentage}%</li>`).join('') || '<li>No assay reported.</li>'}</ul>`
+}
+
+function renderInventoryView(scope: HTMLElement, docked: boolean) {
+  const entry = selectedInventoryEntry()
+  const focused = scope.contains(document.activeElement) ? document.activeElement as HTMLElement : null
+  const focusKey = focused?.dataset.inventoryControl
+  const selection = focused instanceof HTMLInputElement ? [focused.selectionStart, focused.selectionEnd] : null
+  const disabled = (condition = false) => inventoryLocked() || condition ? 'disabled' : ''
+  scope.setAttribute('aria-busy', String(inventoryLocked()))
+  scope.innerHTML = `${docked ? '<h2>INVENTORY</h2>' : ''}
+    <div class="inventory-tools"><label>FILTER <input data-inventory-control="filter" type="search" value="${escapeHtml(inventoryFilter)}" placeholder="ITEM, ORE OR MINERAL"></label>
+    <div class="inventory-tool-actions">
+      <button data-inventory-control="sort" type="button">SORT: ${inventorySort.toUpperCase()}</button>
+      <button data-inventory-control="refresh" type="button" ${disabled()}>REFRESH</button>
+      <button data-inventory-control="split" type="button" ${disabled(!entry || quantityLimit(entry, 'split') <= 0)}>SPLIT SELECTED</button>
+      <button data-inventory-control="merge" type="button" ${disabled()}>MERGE ALL</button>
+      ${docked ? `<button data-inventory-control="transfer" type="button" ${disabled(!entry)}>TRANSFER SELECTED</button>` : `<button data-inventory-control="jettison" type="button" ${disabled(!entry || !isInSystemSpace)}>JETTISON SELECTED</button>`}
+    </div></div>
+    <p class="inventory-feedback ${inventoryMessageIsError ? 'inventory-error' : ''}" role="${inventoryMessageIsError ? 'alert' : 'status'}">${inventoryBusy ? 'Inventory operation pending… ' : ''}${escapeHtml(inventoryMessage)}</p>
+    ${docked && dockedInventory ? `<div class="inventory-layout">${renderInventoryContainer(dockedInventory.ship, 'ship')}${renderInventoryContainer(dockedInventory.station, 'station')}</div>` : shipInventorySnapshot ? renderInventoryContainer(shipInventorySnapshot, 'ship', false) : '<p>Inventory not loaded. Use Refresh.</p>'}
+    <section class="inventory-details" aria-label="Selected inventory details">${inventoryDetails(entry)}</section>`
+  scope.querySelector<HTMLInputElement>('[data-inventory-control="filter"]')?.addEventListener('input', (event) => {
+    inventoryFilter = (event.target as HTMLInputElement).value
+    renderActiveInventory()
+  })
+  const bind = (name: string, action: () => void) => scope.querySelector(`[data-inventory-control="${name}"]`)?.addEventListener('click', action)
+  bind('sort', () => { inventorySort = inventorySort === 'name' ? 'volume' : 'name'; renderActiveInventory() })
+  bind('refresh', () => void (docked ? loadDockedInventory() : loadShipInventory()))
+  bind('split', () => openInventoryQuantityDialog('split'))
+  bind('jettison', () => openInventoryQuantityDialog('jettison'))
+  bind('transfer', () => openInventoryQuantityDialog('transfer'))
+  bind('merge', () => void mutateInventory('merge-all'))
+  scope.querySelectorAll<HTMLButtonElement>('[data-transfer-all-source]').forEach((button) => {
+    button.addEventListener('click', () => void transferAll(button.dataset.transferAllSource, button.dataset.transferAllDestination))
+  })
+  scope.querySelectorAll<HTMLButtonElement>('[data-entry-id]').forEach((button) => {
+    const identity: InventorySelection = { id: button.dataset.entryId!, kind: button.dataset.entryKind as 'item' | 'ore', containerId: button.dataset.inventorySource! }
+    button.addEventListener('click', () => {
+      if (inventoryLocked() || !resolveInventoryEntry(liveInventoryContainers(), identity)) return
+      selectedInventoryItem = identity
+      renderActiveInventory()
+      scope.querySelector<HTMLButtonElement>('[aria-pressed="true"]')?.focus()
+    })
+    button.addEventListener('dragstart', (event) => {
+      if (inventoryLocked() || !docked || !resolveInventoryEntry(liveInventoryContainers(), identity)) { event.preventDefault(); return }
+      draggedInventoryEntry = identity
+      event.dataTransfer?.setData('application/x-spaceconomy-inventory', JSON.stringify(identity))
+      if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move'
+    })
+    button.addEventListener('dragend', () => { draggedInventoryEntry = null; scope.querySelectorAll('.is-drop-target').forEach((target) => target.classList.remove('is-drop-target')) })
+  })
+  scope.querySelectorAll<HTMLElement>('[data-inventory-drop]').forEach((container) => {
+    const destination = () => liveInventoryContainers().find((candidate) => candidate.id === container.dataset.inventoryDrop)
+    container.addEventListener('dragover', (event) => {
+      const dragged = resolveInventoryEntry(liveInventoryContainers(), draggedInventoryEntry)
+      if (inventoryLocked() || !docked || !dragged || quantityLimit(dragged, 'transfer', destination()) <= 0) return
+      event.preventDefault()
+      container.classList.add('is-drop-target')
+    })
+    container.addEventListener('dragleave', () => container.classList.remove('is-drop-target'))
+    container.addEventListener('drop', (event) => {
+      event.preventDefault()
+      container.classList.remove('is-drop-target')
+      const identity = parseInventoryDrag(event.dataTransfer?.getData('application/x-spaceconomy-inventory') ?? '')
+      if (inventoryLocked() || !docked || !identity || !draggedInventoryEntry || identity.id !== draggedInventoryEntry.id || identity.kind !== draggedInventoryEntry.kind || identity.containerId !== draggedInventoryEntry.containerId) return
+      const dragged = resolveInventoryEntry(liveInventoryContainers(), identity)
+      draggedInventoryEntry = null
+      if (!dragged || quantityLimit(dragged, 'transfer', destination()) <= 0) { showInventoryError('Invalid transfer or destination is full.'); return }
+      selectedInventoryItem = identity
+      openInventoryQuantityDialog('transfer', destination()?.id)
+    })
+  })
+  if (focusKey) {
+    const replacement = scope.querySelector<HTMLElement>(`[data-inventory-control="${focusKey}"]`)
+    replacement?.focus()
+    if (replacement instanceof HTMLInputElement && selection) replacement.setSelectionRange(selection[0], selection[1])
+  }
+}
+
+function showInventoryError(message: string) {
+  if (!activeInventoryView()) return
+  inventoryMessage = message
+  inventoryMessageIsError = true
+  renderActiveInventory()
+}
+
+async function loadDockedInventory() {
+  await loadInventory('docked')
+}
+
+async function loadShipInventory(background = false) {
+  await loadInventory('ship', background)
+}
+
+async function loadInventory(view: 'ship' | 'docked', background = false) {
+  if (inventoryLocked() || (!background && activeInventoryView() !== view)) return
+  const originalView = activeInventoryView()
+  inventoryRequests.invalidate()
+  const revision = inventoryRequests.capture()
+  inventoryMessage = 'Refreshing inventory…'
+  inventoryMessageIsError = false
+  renderActiveInventory()
+  try {
+    const response = await fetch(`${apiBaseUrl}/inventory/${!isInSystemSpace ? 'docked' : view}`, { headers: { authorization: `Bearer ${pilotAccessToken}` } })
+    if (!response.ok) throw new Error(await response.text())
+    const payload = await response.json() as InventorySnapshot | InventoryContainer
+    if (!inventoryRequests.isCurrent(revision) || inventoryLocked() || activeInventoryView() !== originalView) return
+    applyInventorySnapshot('ship' in payload ? payload : { ship: payload, station: isInSystemSpace ? null : dockedInventory?.station ?? null })
+    inventoryMessage = 'Inventory refreshed.'
+    renderActiveInventory()
+  } catch (error) {
+    if (inventoryRequests.isCurrent(revision) && activeInventoryView() === view) showInventoryError(`Refresh failed: ${error instanceof Error ? error.message : 'Network error'}`)
+  }
+}
+
+type InventoryMutationResult = InventorySnapshot & { moved_volume_cubic_meters?: number; remaining_stacks?: number; expires_at?: string }
+
+async function mutateInventory(endpoint: string, body?: object): Promise<boolean> {
+  if (inventoryLocked()) return false
+  inventoryBusy = true
+  inventoryRequests.invalidate()
+  const viewRevision = inventoryRequests.capture()
+  const viewIdentity = inventoryViewRevision
+  const view = activeInventoryView()
+  inventoryMessage = ''
+  inventoryMessageIsError = false
+  renderActiveInventory()
+  try {
+    const response = await fetch(`${apiBaseUrl}/inventory/${endpoint}`, {
+      method: 'POST', headers: { authorization: `Bearer ${pilotAccessToken}`, 'content-type': 'application/json' },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    })
+    if (!response.ok) throw new Error(await response.text())
+    const payload = await response.json() as InventoryMutationResult
+    const sameView = inventoryRequests.isCurrent(viewRevision) && activeInventoryView() === view
+    applyInventorySnapshot(payload)
+    if (sameView) inventoryMessage = payload.remaining_stacks !== undefined
+      ? `Moved ${(payload.moved_volume_cubic_meters ?? 0).toFixed(3)} m³. ${payload.remaining_stacks} item stacks / ore lots left in source${payload.remaining_stacks ? ' (capacity limited; nothing discarded)' : ''}.`
+      : payload.expires_at ? `Public cargo jettisoned. Expires ${new Date(payload.expires_at).toLocaleString()}.` : 'Inventory updated.'
+    if (endpoint.includes('jettison')) {
+      try { await refreshNearbyJettisonedItems() } catch { if (sameView && viewIdentity === inventoryViewRevision) inventoryMessage += ' World cargo refresh failed; inventory was saved.' }
+    }
+    return true
+  } catch (error) {
+    if (inventoryRequests.isCurrent(viewRevision) && activeInventoryView() === view) {
+      showInventoryError(`Inventory action failed: ${error instanceof Error ? error.message : 'Network error'}. Outcome may be unknown; Refresh before trying again. No automatic retry.`)
+    }
+    return false
+  } finally {
+    inventoryBusy = false
+    renderActiveInventory()
+  }
+}
+
+async function transferAll(sourceId: string | undefined, destinationId: string | undefined) {
+  const containers = liveInventoryContainers()
+  if (isInSystemSpace || sourceId === destinationId || !containers.some((entry) => entry.id === sourceId) || !containers.some((entry) => entry.id === destinationId)) return
+  await mutateInventory('transfer-all', { source_container_id: sourceId, destination_container_id: destinationId })
+}
+
+function openInventoryQuantityDialog(action: InventoryAction, destinationId?: string) {
+  const entry = selectedInventoryEntry()
+  if (inventoryLocked() || !entry || !activeInventoryView() || (action === 'jettison' && (!isInSystemSpace || entry.containerId !== shipInventorySnapshot?.id))) return
+  const identity: InventorySelection = { kind: entry.kind, id: entry.id, containerId: entry.containerId }
+  const destination = action === 'transfer' ? liveInventoryContainers().find((container) => destinationId ? container.id === destinationId : container.id !== entry.containerId) : undefined
+  const maximum = quantityLimit(entry, action, destination)
+  if (maximum <= 0) { showInventoryError('No valid quantity: the destination is full or this entry cannot be split.'); return }
+  inventoryRequests.invalidate()
+  const dialog = document.createElement('dialog')
+  inventoryDialog = dialog
+  renderActiveInventory()
+  dialog.className = 'inventory-quantity-dialog'
+  dialog.setAttribute('aria-labelledby', 'inventory-quantity-title')
+  dialog.innerHTML = `<form novalidate><h2 id="inventory-quantity-title">${action.toUpperCase()} ${escapeHtml(entry.name)}</h2>
+    ${destination ? `<p>Destination: ${escapeHtml(destination.name)}</p>` : ''}
+    <label> ${entry.kind === 'ore' ? 'Volume (m³, decimal)' : 'Quantity (whole units)'}<input name="amount" type="text" inputmode="${entry.kind === 'ore' ? 'decimal' : 'numeric'}" autocomplete="off" value="${action === 'split' ? entry.kind === 'ore' ? entry.volume / 2 : 1 : maximum}" aria-describedby="inventory-quantity-preview" required></label>
+    <button type="button" data-max>MAX</button><p id="inventory-quantity-preview" role="status"></p>
+    ${action === 'jettison' ? '<p class="inventory-warning">Jettisoned cargo is immediately PUBLIC SALVAGE: anyone can collect it. It expires and is permanently lost when the server expiry timer ends.</p><label class="inventory-confirm-public"><input type="checkbox" name="public"> I confirm public jettison and the risk of permanent loss.</label>' : ''}
+    <p class="inventory-dialog-error" role="alert"></p><div class="inventory-dialog-actions"><button type="button" data-cancel>CANCEL</button><button type="submit">${action === 'jettison' ? 'CONFIRM PUBLIC JETTISON' : 'CONFIRM'}</button></div></form>`
+  document.body.append(dialog)
+  const input = dialog.querySelector<HTMLInputElement>('[name="amount"]')!
+  const confirm = dialog.querySelector<HTMLButtonElement>('[type="submit"]')!
+  const preview = dialog.querySelector<HTMLElement>('#inventory-quantity-preview')!
+  const publicConfirmation = dialog.querySelector<HTMLInputElement>('[name="public"]')
+  const live = () => resolveInventoryEntry(liveInventoryContainers(), identity)
+  const liveDestination = () => liveInventoryContainers().find((container) => container.id === destination?.id)
+  const updatePreview = () => {
+    const current = live()
+    const amount = current ? validateQuantity(input.value, current, action, liveDestination()) : null
+    const volume = amount === null ? 0 : amount * (current?.kind === 'item' ? current.item.volume_per_unit : 1)
+    const target = liveDestination()
+    const source = liveInventoryContainers().find((container) => container.id === current?.containerId)
+    const sourceAfter = source ? Math.max(0, source.used_volume_cubic_meters - (action === 'split' ? 0 : volume)) : 0
+    preview.textContent = `Max: ${current ? quantityLimit(current, action, target) : 0}. Selected: ${volume.toFixed(3)} m³. Source after: ${sourceAfter.toFixed(3)} / ${source?.capacity_cubic_meters ?? 'unlimited'} m³.${target ? freeVolume(target) === Infinity ? ' Destination capacity: unlimited.' : ` Destination after: ${(target.used_volume_cubic_meters + volume).toFixed(3)} / ${target.capacity_cubic_meters} m³.` : ''}`
+    confirm.disabled = amount === null || (publicConfirmation !== null && !publicConfirmation.checked)
+    dialog.querySelector<HTMLElement>('.inventory-dialog-error')!.textContent = amount === null ? 'Enter a positive valid amount within the displayed Max; splitting must leave some behind.' : ''
+    return amount
+  }
+  input.addEventListener('input', updatePreview)
+  publicConfirmation?.addEventListener('change', updatePreview)
+  dialog.querySelector('[data-max]')?.addEventListener('click', () => { const current = live(); input.value = String(current ? quantityLimit(current, action, liveDestination()) : 0); updatePreview(); input.focus() })
+  dialog.querySelector('[data-cancel]')?.addEventListener('click', () => dialog.close())
+  let submitted = false
+  dialog.addEventListener('close', () => {
+    dialog.remove()
+    if (inventoryDialog !== dialog) return
+    inventoryDialog = null
+    if (!submitted) {
+      renderActiveInventory()
+      const scope = activeInventoryView() === 'ship' ? gameModalContent : inventoryPanel
+      scope?.querySelector<HTMLButtonElement>(`[data-inventory-control="${action}"]`)?.focus()
+    }
+  }, { once: true })
+  dialog.querySelector('form')?.addEventListener('submit', (event) => {
+    event.preventDefault()
+    const amount = updatePreview()
+    const current = live()
+    if (submitted || confirm.disabled || amount === null || !current) return
+    submitted = true
+    const body = {
+      ...(current.kind === 'ore' ? { lot_id: current.id, volume_cubic_meters: amount } : { item_id: current.id, quantity: amount }),
+      ...(action === 'transfer' ? { source_container_id: current.containerId, destination_container_id: destination?.id } : action === 'split' ? { container_id: current.containerId } : { position_x: playerMapPosition.x, position_y: playerMapPosition.y, position_z: playerMapPosition.z }),
+    }
+    inventoryDialog = null
+    dialog.close()
+    dialog.remove()
+    const viewIdentity = inventoryViewRevision
+    void mutateInventory(`${current.kind === 'ore' ? 'ore/' : ''}${action}`, body).then(() => {
+      if (viewIdentity !== inventoryViewRevision) return
+      const scope = activeInventoryView() === 'ship' ? gameModalContent : inventoryPanel
+      scope?.querySelector<HTMLButtonElement>(`[data-inventory-control="${action}"]`)?.focus()
+    })
+  })
+  dialog.showModal()
+  updatePreview()
+  input.focus()
+  input.select()
+}
+
+function renderDockedFitting() {
+  if (!fittingPanel || !fittingSnapshot || !dockedInventory) return
+  const slots = (location: string, count: number, label: string) => Array.from({ length: count }, (_, index) => {
+    const fitted = fittingSnapshot?.fitted_modules.find((module) => module.slot_location === location && module.slot_index === index)
+    const selected = selectedFittingSlot?.location === location && selectedFittingSlot.index === index
+    return `<button class="live-fitting-slot${selected ? ' is-selected' : ''}" type="button" data-fitting-location="${location}" data-fitting-index="${index}" aria-pressed="${selected}"><span>${label} ${index + 1}</span><strong>${fitted?.display_name ?? 'EMPTY'}</strong>${fitted ? `<small>${fitted.mass_kg.toFixed(0)} kg · ${fitted.durability.toFixed(0)}%</small>` : ''}</button>`
+  }).join('')
+  const stationModules = dockedInventory.station.items
+    .filter((item) => item.definition_id.startsWith('module.'))
+    .map((item) => `<button class="live-module-item${selectedStationModuleId === item.id ? ' is-selected' : ''}" type="button" data-station-module="${item.id}" aria-pressed="${selectedStationModuleId === item.id}"><span class="inventory-item-icon" aria-hidden="true">${inventoryIcon(item.definition_id)}</span><strong>${item.definition_id.replace(/^module\./, '').replaceAll('_', ' ')}</strong><small>${item.volume_per_unit.toFixed(1)} m3 · ${item.durability.toFixed(0)}%</small></button>`)
+    .join('') || '<p class="inventory-empty">No module objects in station storage.</p>'
+  const selectedSlot = selectedFittingSlot
+  const selectedFitted = selectedSlot
+    ? fittingSnapshot.fitted_modules.find((module) => module.slot_location === selectedSlot.location && module.slot_index === selectedSlot.index)
+    : undefined
+  const statistics = fittingSnapshot.statistics
+  fittingPanel.innerHTML = `
+    <header class="inventory-heading"><div><p class="eyebrow">${fittingSnapshot.hull_definition_id.replace(/^hull\./, '').replaceAll('_', ' ')}</p><h2>SHIP FITTING</h2></div><p id="fitting-error" class="inventory-error" hidden></p></header>
+    <div class="fitting-stat-strip"><span>CPU ${statistics.cpu_used.toFixed(0)} / ${statistics.cpu_available.toFixed(0)}</span><span>GRID ${statistics.powergrid_used.toFixed(0)} / ${statistics.powergrid_available.toFixed(0)}</span><span>MASS ${statistics.mass_kg.toFixed(0)} kg</span><span>ACCEL ${statistics.linear_acceleration.toFixed(2)} m/s2</span></div>
+    <div class="live-fitting-layout"><section><p class="eyebrow">UNIVERSAL HARDPOINTS</p><div class="live-fitting-slots">${slots('universal_hardpoint', fittingSnapshot.universal_hardpoint_count, 'HP')}</div><p class="eyebrow">CORE SYSTEMS</p><div class="live-fitting-slots">${slots('core_system', fittingSnapshot.core_system_slot_count, 'CORE')}</div><div class="live-fitting-actions"><button id="fit-selected-module" type="button" ${selectedStationModuleId && selectedFittingSlot && !selectedFitted ? '' : 'disabled'}>FIT SELECTED MODULE</button><button id="unfit-selected-module" type="button" ${selectedFitted ? '' : 'disabled'}>UNFIT SELECTED MODULE</button></div></section><section><p class="eyebrow">KEPLER STATION MODULE OBJECTS</p><div class="live-module-items">${stationModules}</div></section></div>`
+  fittingPanel.querySelectorAll<HTMLButtonElement>('[data-fitting-location]').forEach((slot) => {
+    slot.addEventListener('click', () => {
+      selectedFittingSlot = { location: slot.dataset.fittingLocation ?? '', index: Number(slot.dataset.fittingIndex) }
+      renderDockedFitting()
+    })
+  })
+  fittingPanel.querySelectorAll<HTMLButtonElement>('[data-station-module]').forEach((module) => {
+    module.addEventListener('click', () => {
+      selectedStationModuleId = module.dataset.stationModule ?? null
+      renderDockedFitting()
+    })
+  })
+  fittingPanel.querySelector<HTMLButtonElement>('#fit-selected-module')?.addEventListener('click', () => void fitSelectedModule())
+  fittingPanel.querySelector<HTMLButtonElement>('#unfit-selected-module')?.addEventListener('click', () => void unfitSelectedModule())
+  if (inventoryLocked()) fittingPanel.querySelectorAll<HTMLButtonElement>('button').forEach((button) => { button.disabled = true })
+}
+
+function showFittingError(message: string) {
+  const error = fittingPanel?.querySelector<HTMLElement>('#fitting-error')
+  if (!error) return
+  error.textContent = message
+  error.removeAttribute('hidden')
+}
+
+async function loadDockedFitting() {
+  if (inventoryLocked() || isInSystemSpace) return
+  const revision = inventoryRequests.capture()
+  if (fittingPanel) fittingPanel.innerHTML = '<p class="station-service-empty">Loading fitted modules...</p>'
+  const [fittingResponse, inventoryResponse] = await Promise.all([
+    fetch(`${apiBaseUrl}/fitting/docked`, { headers: { authorization: `Bearer ${pilotAccessToken}` } }),
+    fetch(`${apiBaseUrl}/inventory/docked`, { headers: { authorization: `Bearer ${pilotAccessToken}` } }),
+  ])
+  if (!fittingResponse.ok || !inventoryResponse.ok) throw new Error('Unable to load docked fitting.')
+  const fitting = await fittingResponse.json() as FittingSnapshot
+  const inventory = await inventoryResponse.json() as InventorySnapshot
+  if (!inventoryRequests.isCurrent(revision) || inventoryLocked() || isInSystemSpace || stationServices?.hidden !== false || fittingPanel?.hidden !== false) return
+  fittingSnapshot = fitting
+  applyInventorySnapshot(inventory)
+  selectedFittingSlot ??= { location: 'universal_hardpoint', index: 0 }
+  selectedStationModuleId = null
+  renderDockedFitting()
+}
+
+async function fitSelectedModule() {
+  if (!selectedStationModuleId || !selectedFittingSlot) return
+  await mutateFitting('fit', { item_id: selectedStationModuleId, slot_location: selectedFittingSlot.location, slot_index: selectedFittingSlot.index })
+}
+
+async function unfitSelectedModule() {
+  if (!selectedFittingSlot) return
+  await mutateFitting('unfit', { slot_location: selectedFittingSlot.location, slot_index: selectedFittingSlot.index })
+}
+
+async function mutateFitting(endpoint: 'fit' | 'unfit', body: object) {
+  if (inventoryLocked() || isInSystemSpace) return
+  inventoryBusy = true
+  inventoryRequests.invalidate()
+  renderActiveInventory()
+  let failure = ''
+  try {
+    const response = await fetch(`${apiBaseUrl}/fitting/${endpoint}`, {
+      method: 'POST', headers: { authorization: `Bearer ${pilotAccessToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (!response.ok) throw new Error(await response.text())
+    fittingSnapshot = await response.json() as FittingSnapshot
+    selectedStationModuleId = null
+  } catch (error) {
+    failure = `Fitting action failed: ${error instanceof Error ? error.message : 'Network error'}. Refresh before retrying.`
+  } finally {
+    inventoryBusy = false
+    renderActiveInventory()
+    renderDockedFitting()
+  }
+  if (failure) { showFittingError(failure); return }
+  try {
+    await loadDockedFitting()
+  } catch {
+    showFittingError('Fitting saved, but inventory refresh failed. Reopen fitting to refresh.')
+  }
 }
 
 gameMenuToggle?.addEventListener('click', () => {
@@ -796,6 +1279,7 @@ document.querySelectorAll<HTMLButtonElement>('[data-modal]').forEach((button) =>
 gameModalClose?.addEventListener('click', closeGameModal)
 document.querySelector<HTMLElement>('[data-modal-close]')?.addEventListener('click', closeGameModal)
 const handleGameNavigationKeyDown = (event: KeyboardEvent) => {
+  if (locationTransitionPending || inventoryDialog?.open || isEditingText(event.target)) return
   if (event.key === 'Escape') {
     closeGameModal()
     closeSystemMap()
@@ -816,6 +1300,7 @@ systemMapClose?.addEventListener('click', closeSystemMap)
 document.querySelector<HTMLElement>('[data-system-map-close]')?.addEventListener('click', closeSystemMap)
 systemPois.forEach((poi) => poi.addEventListener('click', () => selectPoi(poi.dataset.poi as PoiName)))
 warpAction?.addEventListener('click', () => {
+  if (locationTransitionPending) return
   const destination = poiDetails[selectedPoi].position
   if (scene.warpTo(new Vector3(destination.x, destination.y, destination.z))) closeSystemMap()
 })
@@ -877,7 +1362,8 @@ function toggleHardpoint(slot: HTMLButtonElement) {
 moduleSlots.forEach((slot) => slot.addEventListener('click', () => toggleHardpoint(slot)))
 
 const handleHardpointKeyDown = (event: KeyboardEvent) => {
-  if (event.repeat || !/^[1-9]$/.test(event.key)) return
+  if (gameInputBlocked() || isEditingText(event.target)) return
+  if (event.altKey || event.repeat || !/^[1-9]$/.test(event.key)) return
   const slot = Array.from(moduleSlots).find((hardpoint) => hardpoint.dataset.hardpointIndex === event.key)
   if (!slot || slot.disabled) return
   event.preventDefault()
@@ -922,11 +1408,21 @@ function updateTargetWindow() {
   targetRange.textContent = distance >= 1_000 ? `${(distance / 1_000).toFixed(1)} km` : `${distance.toFixed(0)} m`
   targetLockProgress.toggleAttribute('hidden', !selectedTarget.locking)
   targetLockProgress.firstElementChild?.setAttribute('style', `width: ${(selectedTarget.lockProgress * 100).toFixed(1)}%`)
+  document.querySelector<HTMLButtonElement>('#pickup-jettisoned-item')?.toggleAttribute('hidden', selectedTarget.kind !== 'cargo')
   targetWindow.removeAttribute('hidden')
 }
 
 clearTarget?.addEventListener('click', () => {
   scene.toggleTargetLock()
+})
+
+document.querySelector<HTMLButtonElement>('#pickup-jettisoned-item')?.addEventListener('click', () => {
+  if (inventoryLocked()) return
+  const feedback = document.querySelector<HTMLElement>('#cargo-pickup-feedback')
+  if (feedback) feedback.textContent = 'Collecting public cargo…'
+  void scene.pickupJettisonedItem?.().then((collected) => {
+    if (feedback) feedback.textContent = collected ? 'Cargo collected.' : 'Collection failed or outcome unknown. Refresh inventory before trying again.'
+  })
 })
 
 function updateMinimapMarkers() {
@@ -957,12 +1453,15 @@ function createFlightScene(
   ),
 ) {
   return createSystemScene(gameCanvas, {
+    isInputBlocked: gameInputBlocked,
+    isSimulationPaused: () => locationTransitionPending,
     initialPosition,
     initialPowerMegajoules: shipPowerMegajoules,
     initialShields: shipShields,
     initialHull: shipHull,
     initialFuelLiters: shipFuelLiters,
-    initialCargoCubicMeters: savedShipState.cargo_cubic_meters,
+    initialCargoCubicMeters: cargoCubicMeters,
+    initialMaximumCargoCubicMeters: cargoCapacityCubicMeters,
     initialLaunchSpeed,
     initialFlightAssistEnabled,
     onWarpUpdate(isWarping, phase) {
@@ -986,6 +1485,54 @@ function createFlightScene(
         realtimeSocket.send(JSON.stringify({ type: 'mining', payload: { active, source_x: source?.x ?? 0, source_y: source?.y ?? 0, source_z: source?.z ?? 0, target_x: target?.x ?? 0, target_y: target?.y ?? 0, target_z: target?.z ?? 0 } }))
       }
     },
+    async onAsteroidExtraction(asteroidId, position): Promise<MiningExtractionResult | undefined> {
+      if (inventoryLocked()) return undefined
+      inventoryBusy = true
+      inventoryRequests.invalidate()
+      renderActiveInventory()
+      try {
+      const response = await fetch(`${apiBaseUrl}/mining/extract`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${pilotAccessToken}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          asteroid_id: asteroidId,
+          position_x: position.x,
+          position_y: position.y,
+          position_z: position.z,
+        }),
+      })
+      if (!response.ok) return undefined
+      const payload = await response.json() as {
+        asteroid_id: string
+        extracted_ore_cubic_meters: number
+        remaining_ore_cubic_meters: number
+        cargo_cubic_meters: number
+      }
+      return {
+        asteroidId: payload.asteroid_id,
+        extractedOreCubicMeters: payload.extracted_ore_cubic_meters,
+        remainingOreCubicMeters: payload.remaining_ore_cubic_meters,
+        cargoCubicMeters: payload.cargo_cubic_meters,
+      }
+      } catch {
+        showInventoryError('Mining update failed. Refresh inventory to reconcile cargo.')
+        return undefined
+      } finally {
+        inventoryBusy = false
+        renderActiveInventory()
+      }
+    },
+    onInventoryChanged() {
+      if (gameModal?.hasAttribute('hidden') === false && gameModalTitle?.textContent === 'INVENTORY') {
+        void loadShipInventory()
+      }
+    },
+    async onJettisonedItemPickup(jettisonedItemId, position) {
+      return mutateInventory('jettisoned/pickup', { jettisoned_item_id: jettisonedItemId, position_x: position.x, position_y: position.y, position_z: position.z })
+    },
     onPilotTargetLockChange(targetPilotId, active) {
       if (realtimeSocket?.readyState === WebSocket.OPEN) {
         realtimeSocket.send(JSON.stringify({ type: 'targeting', payload: { target_pilot_id: targetPilotId, active } }))
@@ -993,13 +1540,16 @@ function createFlightScene(
     },
     onShipStatusChange(status) {
       cargoCubicMeters = status.cargoCubicMeters
-      maximumCargoCubicMeters = status.maximumCargoCubicMeters
+      cargoCapacityCubicMeters = status.maximumCargoCubicMeters
       shipPowerMegajoules = status.powerMegajoules
       shipShields = status.shields
       shipHull = status.hull
       shipFuelLiters = status.fuelLiters
       if (powerDisplay) powerDisplay.textContent = `${status.powerMegajoules.toFixed(2)} / ${status.maximumPowerMegajoules.toFixed(2)} MJ`
       if (powerBar) powerBar.style.width = `${(status.powerMegajoules / status.maximumPowerMegajoules) * 100}%`
+      if (warpCapacityDisplay) warpCapacityDisplay.textContent = `${status.warpCapacity.toFixed(2)} / ${status.maximumWarpCapacity.toFixed(2)} WC`
+      if (warpCapacityBar) warpCapacityBar.style.width = `${(status.warpCapacity / status.maximumWarpCapacity) * 100}%`
+      warpCapacityBar?.setAttribute('title', `Maximum range: ${status.maximumWarpRangeKilometers.toFixed(0)} km`)
       if (shieldsDisplay) shieldsDisplay.textContent = `${Math.ceil(status.shields)}%`
       if (hullDisplay) hullDisplay.textContent = `${Math.ceil(status.hull)}%`
       if (shieldsBar) shieldsBar.style.width = `${status.shields}%`
@@ -1008,7 +1558,7 @@ function createFlightScene(
       if (fuelBar) fuelBar.style.width = `${(status.fuelLiters / status.maximumFuelLiters) * 100}%`
       if (cargoDisplay) cargoDisplay.textContent = `${status.cargoCubicMeters.toFixed(2)} / ${status.maximumCargoCubicMeters.toFixed(2)} M3`
       if (cargoBar) cargoBar.style.width = `${(status.cargoCubicMeters / status.maximumCargoCubicMeters) * 100}%`
-      if (collisionAlert) collisionAlert.textContent = status.collisionName ? `IMPACT: ${status.collisionName}` : ''
+      if (collisionAlert) collisionAlert.textContent = locationTransitionError || (status.collisionName ? `IMPACT: ${status.collisionName}` : '')
       shipDestroyedOverlay?.toggleAttribute('hidden', !status.destroyed)
       if (destructionCause) destructionCause.textContent = status.destroyed && status.collisionName ? `Collision with ${status.collisionName}` : ''
     },
@@ -1022,6 +1572,11 @@ function createFlightScene(
       positionMapMarker(playerMapMarker, position.x, position.z)
       updateTargetWindow()
       updateSelectedPoiDetails()
+      if (performance.now() - lastAsteroidSnapshotAt >= 3_000) {
+        lastAsteroidSnapshotAt = performance.now()
+        void refreshNearbyAsteroids()
+        void refreshNearbyJettisonedItems()
+      }
       if (realtimeSocket?.readyState === WebSocket.OPEN && performance.now() - lastRealtimeUpdateAt >= 100) {
         lastRealtimeUpdateAt = performance.now()
         realtimeSocket.send(JSON.stringify({ type: 'movement', payload: { x: position.x, y: position.y, z: position.z, yaw, pitch, roll } }))
@@ -1042,11 +1597,129 @@ playerMapPosition = {
   z: savedShipState.position_z,
 }
 renderSavedShipState()
-let scene = createFlightScene()
-let isSceneTransitioning = false
-
+let isInSystemSpace = !savedShipState.docked_station_name
+let lastAsteroidSnapshotAt = 0
+// Initialize before constructing a scene: its callbacks can reference this socket.
 const realtimeUrl = `${apiBaseUrl.replace(/^http/, 'ws').replace('/api/v1', '')}/api/v1/realtime?token=${encodeURIComponent(pilotAccessToken)}`
-realtimeSocket = new WebSocket(realtimeUrl)
+const realtimeSocket = new WebSocket(realtimeUrl)
+let scene = createFlightScene()
+
+const discoveredFieldMarkers: Record<string, HTMLElement | null> = {
+  'ASTERION BELT': mapAsterionBelt,
+  'VESPER BELT': mapVesperBelt,
+  'NADIR DEBRIS FIELD': mapNadirBelt,
+}
+
+function revealDiscoveredFields(fields: { display_name: string }[]) {
+  fields.forEach((field) => discoveredFieldMarkers[field.display_name]?.removeAttribute('hidden'))
+}
+
+async function loadDiscoveryBootstrap() {
+  const response = await fetch(`${apiBaseUrl}/mining/bootstrap`, {
+    headers: { authorization: `Bearer ${pilotAccessToken}` },
+  })
+  if (!response.ok) return
+  const payload = await response.json() as { discovered_fields: { display_name: string }[] }
+  revealDiscoveredFields(payload.discovered_fields)
+}
+
+async function refreshNearbyAsteroids() {
+  if (!isInSystemSpace) return
+  const query = new URLSearchParams({
+    position_x: playerMapPosition.x.toString(),
+    position_y: playerMapPosition.y.toString(),
+    position_z: playerMapPosition.z.toString(),
+  })
+  const response = await fetch(`${apiBaseUrl}/mining/asteroids?${query}`, {
+    headers: { authorization: `Bearer ${pilotAccessToken}` },
+  })
+  if (!response.ok) return
+  const payload = await response.json() as { id: string; position_x: number; position_y: number; position_z: number; radius_meters: number; composition: string; initial_volume_cubic_meters: number; remaining_volume_cubic_meters: number }[]
+  const asteroids: ServerAsteroid[] = payload.map((asteroid) => ({
+    id: asteroid.id,
+    position: new Vector3(asteroid.position_x, asteroid.position_y, asteroid.position_z),
+    radius: asteroid.radius_meters,
+    composition: asteroid.composition,
+    initialOreCubicMeters: asteroid.initial_volume_cubic_meters,
+    remainingOreCubicMeters: asteroid.remaining_volume_cubic_meters,
+  }))
+  scene.replaceAsteroids?.(asteroids)
+}
+
+async function refreshNearbyJettisonedItems() {
+  if (!isInSystemSpace) return
+  const query = new URLSearchParams({
+    position_x: playerMapPosition.x.toString(),
+    position_y: playerMapPosition.y.toString(),
+    position_z: playerMapPosition.z.toString(),
+  })
+  const response = await fetch(`${apiBaseUrl}/inventory/jettisoned?${query}`, {
+    headers: { authorization: `Bearer ${pilotAccessToken}` },
+  })
+  if (!response.ok) return
+  const payload = await response.json() as {
+    id: string
+    definition_id: string
+    quantity: number
+    position_x: number
+    position_y: number
+    position_z: number
+  }[]
+  const items: ServerJettisonedItem[] = payload.map((item) => ({
+    id: item.id,
+    definitionId: item.definition_id,
+    quantity: item.quantity,
+    position: new Vector3(item.position_x, item.position_y, item.position_z),
+  }))
+  scene.replaceJettisonedItems?.(items)
+}
+
+async function runSensorScan() {
+  const sensorButton = document.querySelector<HTMLButtonElement>('[data-core-system="sensors"]')
+  if (sensorButton?.disabled || !isInSystemSpace) return
+  sensorButton?.setAttribute('aria-busy', 'true')
+  try {
+    const response = await fetch(`${apiBaseUrl}/mining/scan`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${pilotAccessToken}` },
+    })
+    if (!response.ok) return
+    const payload = await response.json() as { newly_discovered_fields: { display_name: string }[] }
+    scene.emitSensorPing?.()
+    revealDiscoveredFields(payload.newly_discovered_fields)
+    void refreshNearbyAsteroids()
+  } finally {
+    sensorButton?.removeAttribute('aria-busy')
+  }
+}
+
+coreSystemButtons.forEach((button) => {
+  button.addEventListener('click', () => {
+    if (locationTransitionPending) return
+    if (button.dataset.coreSystem === 'warp') scene.toggleWarp?.()
+    if (button.dataset.coreSystem === 'sensors') void runSensorScan()
+  })
+})
+
+window.addEventListener('keydown', (event) => {
+  if (gameInputBlocked() || isEditingText(event.target)) return
+  if (!event.altKey || event.repeat) return
+  if (event.key === '1') {
+    event.preventDefault()
+    scene.toggleWarp?.()
+  }
+  if (event.key === '2') {
+    event.preventDefault()
+    void runSensorScan()
+  }
+})
+
+void loadDiscoveryBootstrap()
+void loadShipInventory(true)
+
+realtimeSocket.addEventListener('open', () => {
+  if (!isInSystemSpace) realtimeSocket?.send(JSON.stringify({ type: 'docked', payload: {} }))
+})
 realtimeSocket.addEventListener('message', (event) => {
   const message = JSON.parse(event.data) as { type: string; payload: { pilots?: { pilot_id: string; display_name: string; ship_type: string; x: number; y: number; z: number; yaw: number; pitch: number; roll: number }[]; pilot_id?: string; target_pilot_id?: string; display_name?: string; ship_type?: string; x?: number; y?: number; z?: number; yaw?: number; pitch?: number; roll?: number; active?: boolean; source_x?: number; source_y?: number; source_z?: number; target_x?: number; target_y?: number; target_z?: number } }
   if (message.type === 'snapshot') {
@@ -1072,102 +1745,127 @@ realtimeSocket.addEventListener('message', (event) => {
 
 if (savedShipState.docked_station_name) {
   scene.dispose()
-  scene = createStationInteriorScene(gameCanvas, { onTerminalInteract: openStationServices })
+  scene = createStationInteriorScene(gameCanvas)
+  stationBackdrop?.removeAttribute('hidden')
+  stationHotspots?.removeAttribute('hidden')
   dockedStatus?.removeAttribute('hidden')
   systemStatus?.setAttribute('hidden', '')
   document.querySelector('.game-shell')?.classList.add('is-docked')
 }
 
 function closeStationServices() {
+  invalidateInventoryView()
   stationServices?.setAttribute('hidden', '')
-  stationServiceGrid?.removeAttribute('hidden')
-  stationServicePanel?.setAttribute('hidden', '')
 }
 
-function openStationServices() {
+function openStationServices(selectedService: string) {
+  if (locationTransitionPending || isInSystemSpace) return
+  closeGameModal()
   stationServices?.removeAttribute('hidden')
-  stationServiceGrid?.removeAttribute('hidden')
-  stationServicePanel?.setAttribute('hidden', '')
+  stationServicePanel?.removeAttribute('hidden')
+  stationPanels.forEach((panel) => {
+    panel.hidden = panel.dataset.stationPanel !== selectedService
+  })
 }
 
 async function transitionScene(replaceScene: () => void) {
-  if (isSceneTransitioning) return
-  isSceneTransitioning = true
   gameCanvas.classList.add('is-scene-transitioning')
-  await new Promise<void>((resolve) => window.setTimeout(resolve, 180))
-  replaceScene()
-  window.requestAnimationFrame(() => {
+  try {
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 180))
+    replaceScene()
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()))
+  } finally {
     gameCanvas.classList.remove('is-scene-transitioning')
-    isSceneTransitioning = false
-  })
+  }
 }
 
-dockAction?.addEventListener('click', () => {
-  void transitionScene(() => {
-    scene.dispose()
-    scene = createStationInteriorScene(gameCanvas, { onTerminalInteract: openStationServices })
-    availableActions?.setAttribute('hidden', '')
-    dockedStatus?.removeAttribute('hidden')
-    systemStatus?.setAttribute('hidden', '')
-    document.querySelector('.game-shell')?.classList.add('is-docked')
-  })
-})
+async function changeDockedState(docking: boolean) {
+  if (inventoryLocked() || docking !== isInSystemSpace) return
+  locationTransitionPending = true
+  locationTransitionError = ''
+  inventoryRequests.invalidate()
+  const errorDisplay = document.querySelector<HTMLElement>('#docked-transition-error')
+  errorDisplay?.setAttribute('hidden', '')
+  if (collisionAlert) collisionAlert.textContent = ''
+  for (const button of [dockAction, undockAction]) {
+    if (button) { button.disabled = true; button.setAttribute('aria-busy', 'true') }
+  }
+  renderActiveInventory()
+  const position = docking ? { ...playerMapPosition } : { x: 123_078, y: 480, z: -2_690.5 }
+  try {
+    await saveShipState(docking ? 'KEPLER STATION' : null, position)
+  } catch (error) {
+    locationTransitionError = `${docking ? 'Docking' : 'Undocking'} failed: ${error instanceof Error ? error.message : 'Network error'}. Location unchanged locally; verify connection before retrying.`
+    if (docking && collisionAlert) collisionAlert.textContent = locationTransitionError
+    if (!docking && errorDisplay) {
+      errorDisplay.textContent = locationTransitionError
+      errorDisplay.removeAttribute('hidden')
+    }
+    finishLocationTransition()
+    return
+  }
 
-undockAction?.addEventListener('click', () => {
-  void transitionScene(() => {
-    scene.dispose()
-    scene = createFlightScene(25, false, new Vector3(123_078, 480, -2_690.5))
-    dockedStatus?.setAttribute('hidden', '')
+  try {
+    closeGameModal()
     closeStationServices()
-    systemStatus?.removeAttribute('hidden')
-    document.querySelector('.game-shell')?.classList.remove('is-docked')
-  })
-})
+    await transitionScene(() => {
+      scene.dispose()
+      isInSystemSpace = !docking
+      playerMapPosition = position
+      dockedInventory = null
+      fittingSnapshot = null
+      selectedInventoryItem = null
+      scene = docking ? createStationInteriorScene(gameCanvas) : createFlightScene(25, false, new Vector3(position.x, position.y, position.z))
+      stationBackdrop?.toggleAttribute('hidden', !docking)
+      stationHotspots?.toggleAttribute('hidden', !docking)
+      dockedStatus?.toggleAttribute('hidden', !docking)
+      systemStatus?.toggleAttribute('hidden', docking)
+      availableActions?.setAttribute('hidden', '')
+      document.querySelector('.game-shell')?.classList.toggle('is-docked', docking)
+      if (realtimeSocket.readyState === WebSocket.OPEN) realtimeSocket.send(JSON.stringify({ type: docking ? 'docked' : 'undocked', payload: {} }))
+    })
+  } finally {
+    finishLocationTransition()
+  }
+  void loadShipInventory(true)
+  if (!docking) {
+    void refreshNearbyAsteroids()
+    void refreshNearbyJettisonedItems()
+  }
+}
+
+function finishLocationTransition() {
+  inventoryRequests.invalidate()
+  locationTransitionPending = false
+  for (const button of [dockAction, undockAction]) {
+    if (button) { button.disabled = false; button.removeAttribute('aria-busy') }
+  }
+  renderActiveInventory()
+  if (stationServices?.hidden === false && fittingPanel?.hidden === false) renderDockedFitting()
+}
+
+dockAction?.addEventListener('click', () => void changeDockedState(true))
+undockAction?.addEventListener('click', () => void changeDockedState(false))
 
 stationServiceButtons.forEach((button) => {
   button.addEventListener('click', () => {
+    if (locationTransitionPending || isInSystemSpace) return
     const selectedService = button.dataset.stationService
-    stationServiceGrid?.setAttribute('hidden', '')
-    stationServicePanel?.removeAttribute('hidden')
-    stationPanels.forEach((panel) => {
-      panel.hidden = panel.dataset.stationPanel !== selectedService
+    if (!selectedService) return
+    openStationServices(selectedService)
+    if (selectedService === 'inventory') void loadDockedInventory()
+    if (selectedService === 'fitting') void loadDockedFitting().catch((error: unknown) => {
+      if (fittingPanel) fittingPanel.innerHTML = '<p class="station-service-empty">Unable to load docked fitting.</p>'
+      console.error(error)
     })
   })
 })
 
 stationServiceBack?.addEventListener('click', () => {
-  stationServicePanel?.setAttribute('hidden', '')
-  stationServiceGrid?.removeAttribute('hidden')
+  closeStationServices()
 })
 
 exitServicesAction?.addEventListener('click', closeStationServices)
-
-const fittingModuleDetails = {
-  reactor: { type: 'POWER SYSTEM', name: 'COMPACT FISSION PLANT', spec: 'Output 120 MW · Heat tolerance 76%', description: 'Provides shipwide power. Excess load produces heat that must be managed by the hull.' },
-  shields: { type: 'DEFENSIVE SYSTEM', name: 'SHIELD GENERATOR', spec: 'Capacity 100 · Recharge 6.0/s', description: 'Projects the first defensive layer and restores protection while the ship has available power.' },
-  sublight: { type: 'SUBLIGHT PROPULSION', name: 'PULSE DRIVE ARRAY', spec: 'Thrust 34 kN · Turn response 92%', description: 'Provides conventional thrust, acceleration, and maneuvering control within a system.' },
-  warp: { type: 'WARP PROPULSION', name: 'WARP DRIVE CORE', spec: 'Class I · Spool time 4.2 s', description: 'Folds local space for inter-orbit travel once the drive has spooled and sufficient fuel is available.' },
-  fuel: { type: 'CONSUMABLE SYSTEM', name: 'DEUTERIUM TANK', spec: 'Reserve 80 / 80 · 5 jumps', description: 'Stores propellant for conventional flight and warp travel. Refuel while docked.' },
-  cargo: { type: 'LOGISTICS SYSTEM', name: 'STANDARD CARGO HOLD', spec: 'Capacity 0.0 / 24.0 m3', description: 'Carries mined materials and trade goods between stations, worlds, and industrial sites.' },
-  hardpoint: { type: 'HIGH SLOT · HARDPOINT 1 / 1', name: 'MINING LASER', spec: 'Range 2.5 km · Yield 1.0 m3/cycle', description: 'The starter corvette has one hardpoint, fitted with a basic mining laser for extracting asteroid ore.' },
-} as const
-
-fittingSlots.forEach((slot) => {
-  slot.addEventListener('click', () => {
-    const moduleId = slot.dataset.fittingModule as keyof typeof fittingModuleDetails | undefined
-    if (!moduleId) return
-    const details = fittingModuleDetails[moduleId]
-    fittingSlots.forEach((fittingSlot) => {
-      const isSelected = fittingSlot === slot
-      fittingSlot.classList.toggle('is-selected', isSelected)
-      fittingSlot.setAttribute('aria-pressed', String(isSelected))
-    })
-    if (fittingModuleType) fittingModuleType.textContent = details.type
-    if (fittingModuleName) fittingModuleName.textContent = details.name
-    if (fittingModuleSpec) fittingModuleSpec.textContent = details.spec
-    if (fittingModuleDescription) fittingModuleDescription.textContent = details.description
-  })
-})
 
 if (import.meta.hot) {
   import.meta.hot.dispose(() => scene.dispose())
