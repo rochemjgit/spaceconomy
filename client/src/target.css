@@ -15,6 +15,33 @@
   display: none;
 }
 
+.target-list {
+  position: absolute;
+  z-index: 2;
+  bottom: 172px;
+  left: 28px;
+  width: 254px;
+  border: 1px solid rgb(83 255 198 / 38%);
+  background: rgb(3 14 29 / 84%);
+  box-shadow: 0 0 22px rgb(44 219 190 / 10%);
+  backdrop-filter: blur(8px);
+}
+
+.target-list-heading { display: flex; align-items: center; justify-content: space-between; min-height: 34px; padding: 0 8px 0 10px; border-bottom: 1px solid rgb(83 255 198 / 18%); }
+.target-list-heading .eyebrow { margin: 0; color: #53ffc6; }
+.target-list-heading button, .target-list-filters button { border: 1px solid rgb(115 207 255 / 28%); color: #9fc8d8; background: transparent; font: 700 8px ui-monospace, monospace; letter-spacing: .06em; cursor: pointer; }
+.target-list-heading button { min-height: 22px; padding: 0 6px; }
+.target-list-heading button:hover, .target-list-heading button:focus-visible, .target-list-filters button:hover, .target-list-filters button:focus-visible { border-color: #53ffc6; color: #eafff8; outline: none; }
+.target-list-filters { display: flex; gap: 4px; padding: 7px 8px; border-bottom: 1px solid rgb(115 207 255 / 14%); }
+.target-list-filters button { flex: 1; min-width: 0; min-height: 22px; padding: 0 2px; opacity: .42; }
+.target-list-filters button[aria-pressed='true'] { color: #53ffc6; border-color: rgb(83 255 198 / 52%); opacity: 1; }
+.target-list-items { max-height: 188px; overflow-y: auto; }
+.target-list-item { display: grid; grid-template-columns: 34px minmax(0, 1fr) auto auto; gap: 6px; align-items: center; width: 100%; min-height: 31px; padding: 0 9px; border: 0; border-bottom: 1px solid rgb(115 207 255 / 10%); color: #bdd1db; background: transparent; font: 700 9px ui-monospace, monospace; letter-spacing: .04em; text-align: left; cursor: pointer; }
+.target-list-item:hover, .target-list-item:focus-visible { color: #f3ffff; background: rgb(83 255 198 / 10%); outline: none; }
+.target-list-item.is-selected { color: #effff9; background: rgb(83 255 198 / 15%); box-shadow: inset 3px 0 #53ffc6; }.target-list-item.is-locked { color: #fff5dd; background: rgb(255 189 74 / 16%); box-shadow: inset 3px 0 #ffbd4a; }
+.target-list-type { color: #8ca8b7; font-size: 7px; }.target-list-item-player .target-list-type { color: #70dfff; }.target-list-item-asteroid .target-list-type { color: #ffbd4a; }.target-list-item-station .target-list-type { color: #9cf4ee; }.target-list-item-planet .target-list-type { color: #79b8f6; }.target-list-item-warpable .target-list-type { color: #ffa65c; }
+.target-list-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.target-list-state { color: #53ffc6; font-size: 7px; }.is-locked .target-list-state { color: #ffcf78; }.target-list-range { color: #82a5b6; font-size: 8px; white-space: nowrap; }.target-list-empty { margin: 0; padding: 13px 10px; color: #718b9b; font: 700 8px ui-monospace, monospace; letter-spacing: .08em; }
+
 .target-window-heading {
   display: flex;
   align-items: center;
@@ -67,4 +94,8 @@
     left: 12px;
     width: 154px;
   }
+  .target-list { bottom: 220px; left: 12px; width: min(220px, calc(100vw - 178px)); }
+  .target-list-filters { gap: 2px; padding: 6px; }
+  .target-list-filters button { font-size: 7px; }
+  .target-list-items { max-height: 142px; }
 }

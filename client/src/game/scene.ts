@@ -29,6 +29,9 @@ export interface SceneController {
   setCargoCubicMeters?(cargoCubicMeters: number, maximumCargoCubicMeters?: number): void
   setModuleActive(moduleName: string, isActive: boolean): void
   toggleTargetLock(): void
+  clearTargetSelection?(): void
+  getTargetables?(): TargetableObject[]
+  selectTarget?(targetId: string): void
   updateRemotePilot?(pilot: RemotePilot): void
   removeRemotePilot?(pilotId: string): void
   setRemotePilotMining?(pilotId: string, active: boolean, source: Vector3, target: Vector3): void
@@ -68,13 +71,22 @@ export interface ServerJettisonedItem {
   position: Vector3
 }
 
+export interface TargetableObject {
+  id: string
+  name: string
+  kind: 'player' | 'asteroid' | 'warpable' | 'station' | 'planet'
+  position: Vector3
+  locked: boolean
+  locking: boolean
+}
+
 export interface SceneOptions {
   isInputBlocked?: () => boolean
   isSimulationPaused?: () => boolean
   onFlightUpdate: (position: Vector3, speed: number, flightAssistEnabled: boolean, yaw: number, pitch: number, roll: number, miningSource?: Vector3, miningTarget?: Vector3) => void
   onDockingAvailabilityChange?: (isAvailable: boolean) => void
   onWarpUpdate?: (isWarping: boolean, phase: WarpPhase, progress: number) => void
-  onTargetSelectionChange?: (target?: { name: string; kind: 'asteroid' | 'pilot' | 'cargo'; shipType?: string; jettisonedItemId?: string; position: Vector3; oreRemainingCubicMeters: number; initialOreCubicMeters: number; locked: boolean; locking: boolean; lockProgress: number }) => void
+  onTargetSelectionChange?: (target?: { id?: string; name: string; kind: 'asteroid' | 'pilot' | 'cargo' | 'warpable' | 'station' | 'planet'; shipType?: string; jettisonedItemId?: string; position: Vector3; oreRemainingCubicMeters: number; initialOreCubicMeters: number; locked: boolean; locking: boolean; lockProgress: number }) => void
   onShipStatusChange?: (status: ShipStatus) => void
   onModuleActiveChange?: (moduleName: string, isActive: boolean) => void
   onMiningLaserUpdate?: (active: boolean, source?: Vector3, target?: Vector3) => void
@@ -92,6 +104,7 @@ export interface SceneOptions {
   initialMaximumCargoCubicMeters?: number
   initialLaunchSpeed?: number
   initialFlightAssistEnabled?: boolean
+  maximumTargetLocks?: number
   systemRadiusMeters?: number
   warpCruiseSpeedMetersPerSecond?: number
 }
@@ -131,8 +144,9 @@ interface AsteroidInteractionTarget {
 }
 
 interface TargetDescriptor {
+  targetId?: string
   name: string
-  kind: 'asteroid' | 'pilot' | 'cargo'
+  kind: 'asteroid' | 'pilot' | 'cargo' | 'warpable' | 'station' | 'planet'
   pilotId?: string
   shipType?: string
   jettisonedItemId?: string
@@ -165,6 +179,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   const asteroidMeshes = new Map<string, AbstractMesh>()
   const jettisonedItemMeshes = new Map<string, AbstractMesh>()
   const targetDescriptors = new Map<number, TargetDescriptor>()
+  const targetableMeshes = new Map<string, AbstractMesh>()
   const renderableObjects: { mesh: AbstractMesh; rangeMeters: number }[] = []
   const registerRenderableObject = (mesh: AbstractMesh, rangeMeters: number) => {
     renderableObjects.push({ mesh, rangeMeters })
@@ -181,7 +196,8 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       oreRemainingCubicMeters: oreVolume,
       baseScaling: mesh.scaling.clone(),
     })
-    targetDescriptors.set(mesh.uniqueId, { name, kind: 'asteroid' })
+    targetDescriptors.set(mesh.uniqueId, { targetId: asteroidId ? `asteroid:${asteroidId}` : undefined, name, kind: 'asteroid' })
+    if (asteroidId) targetableMeshes.set(`asteroid:${asteroidId}`, mesh)
     registerCollisionTarget(mesh, name, 4_000_000_000, radius * 1.3)
     registerRenderableObject(mesh, 30_000)
   }
@@ -230,6 +246,8 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   starMaterial.emissiveColor = new Color3(1, 0.45, 0.08)
   starMaterial.diffuseColor = new Color3(0.7, 0.16, 0.02)
   star.material = starMaterial
+  targetDescriptors.set(star.uniqueId, { targetId: 'warpable:primary-star', name: 'PRIMARY STAR', kind: 'warpable' })
+  targetableMeshes.set('warpable:primary-star', star)
   registerRenderableObject(star, Number.POSITIVE_INFINITY)
   registerCollisionTarget(star, 'PRIMARY STAR', 1.989e30, starVisualDiameter / 2, true)
   const starVisualScaleDistance = 60_000
@@ -241,6 +259,8 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   planetMaterial.diffuseColor = new Color3(0.12, 0.34, 0.58)
   planetMaterial.specularColor = new Color3(0.08, 0.12, 0.2)
   planet.material = planetMaterial
+  targetDescriptors.set(planet.uniqueId, { targetId: 'planet:starter-world', name: 'STARTER WORLD', kind: 'planet' })
+  targetableMeshes.set('planet:starter-world', planet)
   registerRenderableObject(planet, 180_000)
   registerCollisionTarget(planet, 'STARTER WORLD', 5.972e24, 3_000, true)
 
@@ -254,6 +274,8 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   const station = MeshBuilder.CreateTorus('station-marker', { diameter: 337.5, thickness: 24, tessellation: 32 }, scene)
   station.position = stationPosition
   station.material = stationMaterial
+  targetDescriptors.set(station.uniqueId, { targetId: 'station:kepler-station', name: 'KEPLER STATION', kind: 'station' })
+  targetableMeshes.set('station:kepler-station', station)
   registerRenderableObject(station, 60_000)
   registerCollisionTarget(station, 'KEPLER STATION', 8_000_000_000, 170)
 
@@ -304,7 +326,8 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       remoteHull.material = remoteMaterial
       remoteHull.parent = remoteShip
       remoteHull.isPickable = true
-      targetDescriptors.set(remoteHull.uniqueId, { name: pilot.displayName, kind: 'pilot', pilotId: pilot.pilotId, shipType: pilot.shipType })
+      targetDescriptors.set(remoteHull.uniqueId, { targetId: `player:${pilot.pilotId}`, name: pilot.displayName, kind: 'pilot', pilotId: pilot.pilotId, shipType: pilot.shipType })
+      targetableMeshes.set(`player:${pilot.pilotId}`, remoteHull)
       const remoteNose = MeshBuilder.CreateCylinder(`remote-pilot-nose-${pilot.pilotId}`, {
         height: 1.9,
         diameterTop: 0.08,
@@ -367,14 +390,15 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   }
   const removeRemotePilot = (pilotId: string) => {
     const remote = remotePilots.get(pilotId)
-    if (remote && (targetedAsteroid === remote.targetMesh || lockedAsteroid === remote.targetMesh || lockingTarget?.asteroid === remote.targetMesh)) {
-      unlockTarget()
-      clearTarget()
-    }
+    if (remote && targetedAsteroid === remote.targetMesh) clearTarget()
+    if (remote) unlockTarget(remote.targetMesh)
     remote?.miningBeam?.dispose()
     hostileTargetBrackets.get(pilotId)?.dispose()
     hostileTargetBrackets.delete(pilotId)
-    if (remote) targetDescriptors.delete(remote.targetMesh.uniqueId)
+    if (remote) {
+      targetDescriptors.delete(remote.targetMesh.uniqueId)
+      targetableMeshes.delete(`player:${pilotId}`)
+    }
     remote?.ship.dispose(false, true)
     remotePilots.delete(pilotId)
   }
@@ -756,11 +780,11 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   }
   const handleContextMenu = (event: MouseEvent) => event.preventDefault()
   let targetedAsteroid: AbstractMesh | undefined
-  let lockedAsteroid: AbstractMesh | undefined
+  const lockedTargets = new Map<AbstractMesh, TransformNode>()
   let lockingTarget: { asteroid: AbstractMesh; elapsedSeconds: number } | undefined
   let targetBrackets: TransformNode | undefined
-  let lockedTargetBrackets: TransformNode | undefined
   const hostileTargetBrackets = new Map<string, TransformNode>()
+  const maximumTargetLocks = options.maximumTargetLocks ?? 3
   const miningLaserRange = 2_500
   const miningLaserMaterial = new StandardMaterial('mining-laser-beam-material', scene)
   miningLaserMaterial.diffuseColor = new Color3(0.1, 0.8, 0.45)
@@ -808,7 +832,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     targetedAsteroid = undefined
   }
   const reportTargetLock = () => {
-    const targetMesh = lockedAsteroid ?? lockingTarget?.asteroid ?? targetedAsteroid
+    const targetMesh = targetedAsteroid ?? lockingTarget?.asteroid
     if (!targetMesh) {
       options.onTargetSelectionChange?.()
       return
@@ -817,6 +841,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     if (!descriptor) return
     const asteroid = asteroidTargets.get(targetMesh.uniqueId)
     options.onTargetSelectionChange?.({
+      id: descriptor.targetId,
       name: descriptor.name,
       kind: descriptor.kind,
       shipType: descriptor.shipType,
@@ -824,18 +849,24 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       position: targetMesh.getAbsolutePosition().clone(),
       oreRemainingCubicMeters: asteroid?.oreRemainingCubicMeters ?? 0,
       initialOreCubicMeters: asteroid?.initialOreCubicMeters ?? 0,
-      locked: lockedAsteroid !== undefined,
-      locking: lockingTarget !== undefined,
-      lockProgress: lockingTarget ? Math.min(1, lockingTarget.elapsedSeconds / targetLockDurationSeconds) : 1,
+      locked: lockedTargets.has(targetMesh),
+      locking: lockingTarget?.asteroid === targetMesh,
+      lockProgress: lockingTarget?.asteroid === targetMesh ? Math.min(1, lockingTarget.elapsedSeconds / targetLockDurationSeconds) : 1,
     })
   }
-  const unlockTarget = () => {
-    const targetPilotId = targetDescriptors.get((lockedAsteroid ?? lockingTarget?.asteroid)?.uniqueId ?? -1)?.pilotId
+  const unlockTarget = (targetMesh?: AbstractMesh) => {
+    const target = targetMesh ?? targetedAsteroid ?? lockingTarget?.asteroid
+    if (!target) return
+    const targetPilotId = targetDescriptors.get(target.uniqueId)?.pilotId
     if (targetPilotId) options.onPilotTargetLockChange?.(targetPilotId, false)
-    lockedTargetBrackets?.dispose()
-    lockedTargetBrackets = undefined
-    lockedAsteroid = undefined
-    lockingTarget = undefined
+    lockedTargets.get(target)?.dispose()
+    lockedTargets.delete(target)
+    if (lockingTarget?.asteroid === target) lockingTarget = undefined
+    reportTargetLock()
+  }
+  const clearTargetSelection = () => {
+    if (targetedAsteroid && lockingTarget?.asteroid === targetedAsteroid) unlockTarget(targetedAsteroid)
+    clearTarget()
     reportTargetLock()
   }
   const replaceAsteroids = (asteroids: ServerAsteroid[]) => {
@@ -843,9 +874,10 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     for (const [asteroidId, mesh] of asteroidMeshes) {
       if (incomingIds.has(asteroidId)) continue
       if (targetedAsteroid === mesh) clearTarget()
-      if (lockedAsteroid === mesh || lockingTarget?.asteroid === mesh) unlockTarget()
+      unlockTarget(mesh)
       asteroidTargets.delete(mesh.uniqueId)
       targetDescriptors.delete(mesh.uniqueId)
+      targetableMeshes.delete(`asteroid:${asteroidId}`)
       const collisionIndex = collisionTargets.findIndex((target) => target.mesh === mesh)
       if (collisionIndex >= 0) collisionTargets.splice(collisionIndex, 1)
       mesh.dispose()
@@ -873,7 +905,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     for (const [itemId, mesh] of jettisonedItemMeshes) {
       if (incomingIds.has(itemId)) continue
       if (targetedAsteroid === mesh) clearTarget()
-      if (lockedAsteroid === mesh || lockingTarget?.asteroid === mesh) unlockTarget()
+      unlockTarget(mesh)
       targetDescriptors.delete(mesh.uniqueId)
       mesh.dispose()
       jettisonedItemMeshes.delete(itemId)
@@ -892,7 +924,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   }
   let pickupPending = false
   const pickupJettisonedItem = async () => {
-    const mesh = lockedAsteroid
+    const mesh = targetedAsteroid && lockedTargets.has(targetedAsteroid) ? targetedAsteroid : undefined
     const itemId = mesh ? targetDescriptors.get(mesh.uniqueId)?.jettisonedItemId : undefined
     if (pickupPending || !mesh || !itemId || !options.onJettisonedItemPickup) return false
     pickupPending = true
@@ -915,30 +947,22 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     updateShipStatus()
   }
   const toggleTargetLock = () => {
-    if (lockedAsteroid) {
-      if (targetedAsteroid && targetedAsteroid !== lockedAsteroid) {
-        unlockTarget()
-        lockingTarget = { asteroid: targetedAsteroid, elapsedSeconds: 0 }
-        const targetPilotId = targetDescriptors.get(targetedAsteroid.uniqueId)?.pilotId
-        if (targetPilotId) options.onPilotTargetLockChange?.(targetPilotId, true)
-        reportTargetLock()
-        return
-      }
-      unlockTarget()
-      return
-    }
     if (!targetedAsteroid) {
       if (lockingTarget) {
-        lockingTarget = undefined
-        reportTargetLock()
+        unlockTarget(lockingTarget.asteroid)
       }
       return
     }
-    if (lockedAsteroid) return
     if (lockingTarget?.asteroid === targetedAsteroid) {
-      unlockTarget()
+      unlockTarget(targetedAsteroid)
       return
     }
+    if (lockedTargets.has(targetedAsteroid)) {
+      unlockTarget(targetedAsteroid)
+      return
+    }
+    if (lockingTarget) unlockTarget(lockingTarget.asteroid)
+    if (lockedTargets.size >= maximumTargetLocks) return
     lockingTarget = { asteroid: targetedAsteroid, elapsedSeconds: 0 }
     const targetPilotId = targetDescriptors.get(targetedAsteroid.uniqueId)?.pilotId
     if (targetPilotId) options.onPilotTargetLockChange?.(targetPilotId, true)
@@ -969,12 +993,28 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     }
   }
   const showTargetBrackets = (asteroid: AbstractMesh) => {
-    if (lockingTarget && lockingTarget.asteroid !== asteroid) {
-      unlockTarget()
-    }
     targetBrackets?.dispose()
     targetedAsteroid = asteroid
     targetBrackets = createTargetBrackets(new Color3(1, 0.72, 0.2), 'active')
+  }
+  const getTargetables = (): TargetableObject[] => {
+    const targets: TargetableObject[] = []
+    for (const [id, mesh] of targetableMeshes) {
+      const descriptor = targetDescriptors.get(mesh.uniqueId)
+      if (!descriptor || descriptor.kind === 'cargo' || descriptor.kind === 'pilot') continue
+      targets.push({ id, name: descriptor.name, kind: descriptor.kind, position: mesh.getAbsolutePosition().clone(), locked: lockedTargets.has(mesh), locking: lockingTarget?.asteroid === mesh })
+    }
+    for (const [pilotId, remote] of remotePilots) {
+      const descriptor = targetDescriptors.get(remote.targetMesh.uniqueId)
+      if (descriptor) targets.push({ id: `player:${pilotId}`, name: descriptor.name, kind: 'player', position: remote.targetMesh.getAbsolutePosition().clone(), locked: lockedTargets.has(remote.targetMesh), locking: lockingTarget?.asteroid === remote.targetMesh })
+    }
+    return targets
+  }
+  const selectTarget = (targetId: string) => {
+    const targetMesh = targetableMeshes.get(targetId)
+    if (!targetMesh) return
+    showTargetBrackets(targetMesh)
+    reportTargetLock()
   }
   const handleClick = (event: MouseEvent) => {
     if (event.button !== 0 || warp || options.isInputBlocked?.()) return
@@ -990,7 +1030,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     }
     showTargetBrackets(picked.pickedMesh)
     reportTargetLock()
-    if (event.detail === 2 && !lockedAsteroid) toggleTargetLock()
+    if (event.detail === 2) toggleTargetLock()
   }
   canvas.addEventListener('pointerdown', handleMouseDown, true)
   canvas.addEventListener('pointermove', handlePointerMove, true)
@@ -1040,9 +1080,8 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     if (lockingTarget) {
       lockingTarget.elapsedSeconds += deltaSeconds
       if (lockingTarget.elapsedSeconds >= targetLockDurationSeconds) {
-        lockedAsteroid = lockingTarget.asteroid
+        lockedTargets.set(lockingTarget.asteroid, createTargetBrackets(new Color3(0.72, 0.78, 0.82), 'locked'))
         lockingTarget = undefined
-        lockedTargetBrackets = createTargetBrackets(new Color3(0.72, 0.78, 0.82), 'locked')
       }
       reportTargetLock()
     }
@@ -1169,7 +1208,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       ship.position.addInPlace(velocity.scale(deltaSeconds))
     }
     resolveWorldCollisions()
-    const miningTarget = lockedAsteroid ?? lockingTarget?.asteroid
+    const miningTarget = targetedAsteroid && (lockedTargets.has(targetedAsteroid) || lockingTarget?.asteroid === targetedAsteroid) ? targetedAsteroid : undefined
     const miningTargetDetails = miningTarget ? asteroidTargets.get(miningTarget.uniqueId) : undefined
     const miningLaserActive = Boolean(
       miningTarget
@@ -1268,7 +1307,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
           if (collisionIndex >= 0) collisionTargets.splice(collisionIndex, 1)
           miningTarget.dispose()
           if (targetedAsteroid === miningTarget) clearTarget()
-          unlockTarget()
+          unlockTarget(miningTarget)
         }
         }).catch(() => {
           miningExtractionPending = false
@@ -1328,15 +1367,15 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     strafeThrusterMaterials[1].emissiveColor.copyFromFloats(0, 0.85 * Number(pressedKeys.has('d')), Number(pressedKeys.has('d')))
     camera.target.copyFrom(ship.position)
     if (targetedAsteroid && targetBrackets) {
-      targetBrackets.setEnabled(!lockingTarget || Math.floor(now / 130) % 2 === 0)
+      targetBrackets.setEnabled(lockingTarget?.asteroid !== targetedAsteroid || Math.floor(now / 130) % 2 === 0)
       targetBrackets.position.copyFrom(targetedAsteroid.getAbsolutePosition())
       targetBrackets.rotationQuaternion = camera.absoluteRotation.clone()
       targetBrackets.scaling.setAll(targetedAsteroid.getBoundingInfo().boundingSphere.radiusWorld * 1.35)
     }
-    if (lockedAsteroid && lockedTargetBrackets) {
-      lockedTargetBrackets.position.copyFrom(lockedAsteroid.getAbsolutePosition())
-      lockedTargetBrackets.rotationQuaternion = camera.absoluteRotation.clone()
-      lockedTargetBrackets.scaling.setAll(lockedAsteroid.getBoundingInfo().boundingSphere.radiusWorld * 1.35)
+    for (const [lockedTarget, brackets] of lockedTargets) {
+      brackets.position.copyFrom(lockedTarget.getAbsolutePosition())
+      brackets.rotationQuaternion = camera.absoluteRotation.clone()
+      brackets.scaling.setAll(lockedTarget.getBoundingInfo().boundingSphere.radiusWorld * 1.35)
     }
     const actualSpeed = Vector3.Distance(ship.position, frameStartPosition) / deltaSeconds
     for (const [pilotId, remote] of remotePilots) {
@@ -1385,6 +1424,9 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     setCargoCubicMeters,
     setModuleActive,
     toggleTargetLock,
+    clearTargetSelection,
+    getTargetables,
+    selectTarget,
     updateRemotePilot,
     removeRemotePilot,
     setRemotePilotMining,

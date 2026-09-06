@@ -21,6 +21,7 @@ packages = ["spaceconomy"]
 
 [dependency-groups]
 dev = [
+  "aiosqlite>=0.22.0",
   "pytest>=9.0.0",
   "pytest-asyncio>=1.3.0",
   "ruff>=0.14.0",
