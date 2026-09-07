@@ -108,6 +108,34 @@ class MinedOreLotResponse(BaseModel):
     volume_cubic_meters: float
 
 
+def _combined_mineral_assay(
+    existing_assay: str, existing_volume: float, extracted_assay: str, extracted_volume: float
+) -> str:
+    weighted_percentages: dict[tuple[str, int], float] = {}
+    for assay, volume in ((existing_assay, existing_volume), (extracted_assay, extracted_volume)):
+        for entry in json.loads(assay):
+            definition_id = str(entry["definition_id"])
+            definition_version = int(entry.get("definition_version", entry.get("version", 1)))
+            weighted_percentages[definition_id, definition_version] = (
+                weighted_percentages.get((definition_id, definition_version), 0)
+                + float(entry["percentage"]) * volume
+            )
+    total_volume = existing_volume + extracted_volume
+    return json.dumps(
+        [
+            {
+                "definition_id": definition_id,
+                "definition_version": definition_version,
+                "percentage": round(weighted_percentage / total_volume, 3),
+            }
+            for (definition_id, definition_version), weighted_percentage in sorted(
+                weighted_percentages.items()
+            )
+        ],
+        separators=(",", ":"),
+    )
+
+
 def _distance(ship_state: ShipState, field: AsteroidField) -> float:
     return math.dist(
         (ship_state.position_x, ship_state.position_y, ship_state.position_z),
@@ -375,17 +403,21 @@ async def extract_asteroid(
             0,
             ship_container.capacity_cubic_meters - used_volume,
         )
-        extracted = min(0.5, asteroid.remaining_volume_cubic_meters, available_cargo)
+        extracted = min(
+            1,
+            math.floor(asteroid.remaining_volume_cubic_meters),
+            math.floor(available_cargo),
+        )
         if extracted <= VOLUME_EPSILON:
-            raise HTTPException(status.HTTP_409_CONFLICT, "cargo hold is full")
+            raise HTTPException(
+                status.HTTP_409_CONFLICT, "cargo hold lacks space for one cubic meter of ore"
+            )
         mined_ore_lot = await session.scalar(
             select(MinedOreLot)
             .where(
                 MinedOreLot.pilot_id == pilot_id,
                 MinedOreLot.container_id == ship_container.id,
-                MinedOreLot.asteroid_id == asteroid.id,
-                MinedOreLot.composition == asteroid.composition,
-                MinedOreLot.mineral_assay == asteroid.mineral_assay,
+                MinedOreLot.composition == "Ore",
             )
             .order_by(MinedOreLot.created_at, MinedOreLot.id)
             .limit(1)
@@ -396,13 +428,19 @@ async def extract_asteroid(
                 pilot_id=pilot_id,
                 container_id=ship_container.id,
                 asteroid_id=asteroid.id,
-                composition=asteroid.composition,
+                composition="Ore",
                 mineral_assay=asteroid.mineral_assay,
                 volume_cubic_meters=extracted,
             )
             session.add(mined_ore_lot)
             await session.flush()
         else:
+            mined_ore_lot.mineral_assay = _combined_mineral_assay(
+                mined_ore_lot.mineral_assay,
+                mined_ore_lot.volume_cubic_meters,
+                asteroid.mineral_assay,
+                extracted,
+            )
             mined_ore_lot.volume_cubic_meters += extracted
         asteroid.remaining_volume_cubic_meters -= extracted
         if asteroid.remaining_volume_cubic_meters == 0:

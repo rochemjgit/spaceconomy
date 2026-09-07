@@ -566,17 +566,17 @@ async def test_mining_only_ship_and_exact_assay_source(game):
         "/api/v1/mining/extract", json={"asteroid_id": str(game.asteroid), **POSITION}
     )
     assert response.status_code == 200
-    assert response.json()["cargo_cubic_meters"] == 1.5
+    assert response.json()["cargo_cubic_meters"] == 2
     assert response.json()["mined_ore_lot_id"] != str(old)
     first = response.json()["mined_ore_lot_id"]
     response = await game.client.post(
         "/api/v1/mining/extract", json={"asteroid_id": str(game.asteroid), **POSITION}
     )
     assert response.json()["mined_ore_lot_id"] == first
-    assert response.json()["mined_ore_lot_volume_cubic_meters"] == 1
+    assert response.json()["mined_ore_lot_volume_cubic_meters"] == 2
     response = await game.client.get("/api/v1/mining/ore")
     assert len(response.json()) == 2
-    assert sum(lot["volume_cubic_meters"] for lot in response.json()) == 2
+    assert sum(lot["volume_cubic_meters"] for lot in response.json()) == 3
     async with game.sessions() as session:
         assert (await session.get(MinedOreLot, old)).mineral_assay == "[]"
 
@@ -773,7 +773,7 @@ async def test_invalid_split_and_jettison_permissions(game):
     ).status_code == 422
 
 
-async def test_ore_merge_and_mining_do_not_mix_sources(game):
+async def test_mining_combines_all_cargo_ore_into_a_volume_weighted_assay(game):
     second_id = uuid4()
     async with game.sessions.begin() as session:
         original = await session.get(Asteroid, game.asteroid)
@@ -784,24 +784,29 @@ async def test_ore_merge_and_mining_do_not_mix_sources(game):
                 spawn_seed=2,
                 **POSITION,
                 radius_meters=10,
-                composition="ferrous",
-                mineral_assay=ASSAY,
+                composition="cuprous",
+                mineral_assay='[{"definition_id":"copper","version":2,"percentage":100}]',
                 initial_volume_cubic_meters=100,
                 remaining_volume_cubic_meters=100,
             )
         )
-    await game.ore(volume=1)
-    other = await game.ore(volume=2, asteroid=second_id)
-    response = await game.post("/merge-all")
-    assert len(response.json()["ship"]["raw_ore_lots"]) == 2
     await game.dock(False)
-    response = await game.client.post(
+    first = await game.client.post(
         "/api/v1/mining/extract", json={"asteroid_id": str(game.asteroid), **POSITION}
     )
-    assert response.status_code == 200
-    assert response.json()["mined_ore_lot_volume_cubic_meters"] == 1.5
-    async with game.sessions() as session:
-        assert (await session.get(MinedOreLot, other)).volume_cubic_meters == 2
+    second = await game.client.post(
+        "/api/v1/mining/extract", json={"asteroid_id": str(second_id), **POSITION}
+    )
+    assert first.status_code == second.status_code == 200
+    assert first.json()["mined_ore_lot_id"] == second.json()["mined_ore_lot_id"]
+    assert second.json()["composition"] == "Ore"
+    assert second.json()["mined_ore_lot_volume_cubic_meters"] == 2
+    assert second.json()["mineral_assay"] == [
+        {"definition_id": "copper", "definition_version": 2, "percentage": 50},
+        {"definition_id": "iron", "definition_version": 2, "percentage": 50},
+    ]
+    cargo = await game.client.get("/api/v1/mining/ore")
+    assert len(cargo.json()) == 1
 
 
 async def test_mining_capacity_counts_items_and_ore_not_station(game):
@@ -811,10 +816,9 @@ async def test_mining_capacity_counts_items_and_ore_not_station(game):
     await game.dock(False)
     payload = {"asteroid_id": str(game.asteroid), **POSITION}
     response = await game.client.post("/api/v1/mining/extract", json=payload)
-    assert response.status_code == 200
-    assert response.json()["extracted_ore_cubic_meters"] == 0.25
-    assert response.json()["cargo_cubic_meters"] == 24
-    assert (await game.client.post("/api/v1/mining/extract", json=payload)).status_code == 409
+    assert response.status_code == 409
+    ship = await game.client.get(PREFIX + "/ship")
+    assert ship.json()["used_volume_cubic_meters"] == 23.75
 
 
 async def test_replenish_preserves_public_ore_source_and_prunes_unreferenced(game, monkeypatch):

@@ -13,7 +13,15 @@ from sqlalchemy import delete, func, select
 from .config import settings
 from .db import session_factory
 from .inventory import expire_jettisoned_items
-from .models import Asteroid, AsteroidField, JettisonedItem, MinedOreLot
+from .models import (
+    Asteroid,
+    AsteroidField,
+    InventoryItem,
+    JettisonedItem,
+    MinedOreLot,
+    RefineryJob,
+    RefineryService,
+)
 
 
 def mineral_assay_for_profile(profile: dict[str, object], spawn_seed: int) -> str:
@@ -151,8 +159,127 @@ async def replenish_asteroid_fields(now: datetime | None = None) -> int:
     return created
 
 
+async def _deliver_refinery_outputs(
+    session, job: RefineryJob, container_id
+) -> None:
+    for output in json.loads(job.expected_outputs):
+        matching_stack = await session.scalar(
+            select(InventoryItem)
+            .where(
+                InventoryItem.container_id == container_id,
+                InventoryItem.module_definition_id.is_(None),
+                InventoryItem.definition_id == output["definition_id"],
+                InventoryItem.definition_version == output["definition_version"],
+                InventoryItem.durability == 100,
+                InventoryItem.volume_per_unit == 1,
+            )
+            .with_for_update()
+        )
+        if matching_stack is not None:
+            matching_stack.quantity += int(output["quantity_cubic_meters"])
+            continue
+        session.add(
+            InventoryItem(
+                pilot_id=job.pilot_id,
+                container_id=container_id,
+                module_definition_id=None,
+                definition_id=output["definition_id"],
+                definition_version=int(output["definition_version"]),
+                quantity=int(output["quantity_cubic_meters"]),
+                durability=100,
+                volume_per_unit=1,
+            )
+        )
+
+
+async def complete_refinery_jobs(now: datetime | None = None) -> int:
+    """Consume due refinery inputs, deliver frozen outputs, and advance queued work."""
+    now = now or datetime.now(UTC)
+    completed = 0
+    async with session_factory.begin() as session:
+        due_jobs = list(
+            await session.scalars(
+                select(RefineryJob)
+                .where(RefineryJob.state == "processing", RefineryJob.completes_at <= now)
+                .order_by(RefineryJob.completes_at, RefineryJob.queue_sequence)
+                .with_for_update(skip_locked=True)
+            )
+        )
+        service_ids: set = set()
+        for job in due_jobs:
+            source = None
+            if job.source_ore_lot_id is not None:
+                source = await session.get(MinedOreLot, job.source_ore_lot_id, with_for_update=True)
+            elif job.source_inventory_item_id is not None:
+                source = await session.get(
+                    InventoryItem, job.source_inventory_item_id, with_for_update=True
+                )
+            if source is None or source.container_id is None:
+                job.state = "failed"
+                job.failure_reason = "reserved refinery input was unavailable"
+                job.source_ore_lot_id = None
+                job.source_inventory_item_id = None
+                job.completed_at = now
+                service_ids.add(job.refinery_service_id)
+                continue
+            await _deliver_refinery_outputs(session, job, source.container_id)
+            job.source_ore_lot_id = None
+            job.source_inventory_item_id = None
+            job.state = "completed"
+            job.completed_at = now
+            await session.flush()
+            await session.delete(source)
+            service_ids.add(job.refinery_service_id)
+            completed += 1
+
+        for service_id in service_ids:
+            service = await session.get(RefineryService, service_id, with_for_update=True)
+            if service is None:
+                continue
+            processing_count = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(RefineryJob)
+                    .where(
+                        RefineryJob.refinery_service_id == service.id,
+                        RefineryJob.state == "processing",
+                    )
+                )
+                or 0
+            )
+            available_lanes = max(0, service.active_job_capacity - processing_count)
+            if not available_lanes:
+                continue
+            queued_jobs = list(
+                await session.scalars(
+                    select(RefineryJob)
+                    .where(
+                        RefineryJob.refinery_service_id == service.id,
+                        RefineryJob.state == "queued",
+                    )
+                    .order_by(RefineryJob.queue_sequence)
+                    .limit(available_lanes)
+                    .with_for_update(skip_locked=True)
+                )
+            )
+            for queued_job in queued_jobs:
+                queued_job.state = "processing"
+                queued_job.started_at = now
+                queued_job.completes_at = now + timedelta(
+                    seconds=queued_job.quoted_duration_seconds
+                )
+    return completed
+
+
 async def run_system_world() -> None:
     """Run the future `system:kepler` world tick while co-hosted by the API process."""
     while True:
         await replenish_asteroid_fields()
         await asyncio.sleep(settings.world_spawn_tick_seconds)
+
+
+async def run_refinery_worker() -> None:
+    """Run durable refinery completion independently of the slower world tick."""
+    while True:
+        await complete_refinery_jobs()
+        await asyncio.sleep(settings.refinery_tick_seconds)

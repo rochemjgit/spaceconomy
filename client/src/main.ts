@@ -13,6 +13,7 @@ import { createStationInteriorScene, createSystemScene } from './game/scene'
 import type { MiningExtractionResult, ServerAsteroid, ServerJettisonedItem } from './game/scene'
 import stationInteriorUrl from './assets/station-interior.svg'
 import refineryUrl from './assets/refinery.png'
+import rawOreIconUrl from './assets/items/raw ore.png'
 import { escapeHtml, freeVolume, inventoryEntries, InventoryRequestGuard, parseInventoryDrag, quantityLimit, resolveInventoryEntry, validateQuantity } from './inventory'
 import type { InventoryAction, InventoryContainer, InventoryEntry, InventorySelection, InventorySnapshot } from './inventory'
 import { isEditingText } from './game/input'
@@ -55,6 +56,12 @@ type FittingSnapshot = {
   core_system_slot_count: number
   fitted_modules: { item_id: string; definition_id: string; display_name: string; family: string; slot_location: string; slot_index: number; durability: number; mass_kg: number }[]
   statistics: Record<string, number>
+}
+
+type RefinerySnapshot = {
+  server_time: string
+  service: { display_name: string; fee_credits: number; queue_capacity: number; first_pass_seconds_per_cubic_meter: number; first_pass_efficiency: number; second_pass_seconds_per_cubic_meter: number; second_pass_efficiency: number }
+  jobs: { id: string; stage: string; state: string; queue_sequence: number; quoted_duration_seconds: number; quoted_efficiency: number; quoted_fee_credits: number; expected_outputs: { definition_id: string; definition_version: number; quantity_cubic_meters: number }[]; started_at: string | null; completes_at: string | null }[]
 }
 
 function renderAuthentication() {
@@ -485,13 +492,6 @@ appRoot.innerHTML = `
       <p id="cargo-pickup-feedback" class="inventory-feedback" role="status"></p>
       <span id="target-lock-progress" class="target-lock-progress"><span></span></span>
     </section>
-    <section class="target-list" aria-label="Target list">
-      <header class="target-list-heading"><p class="eyebrow">TARGETS</p><button id="target-distance-sort" type="button" aria-label="Sort targets by nearest distance">RANGE ↑</button></header>
-      <div id="target-list-filters" class="target-list-filters" aria-label="Target type filters">
-        <button type="button" data-target-filter="player" aria-pressed="true">PLYR</button><button type="button" data-target-filter="asteroid" aria-pressed="true">AST</button><button type="button" data-target-filter="warpable" aria-pressed="true">WARP</button><button type="button" data-target-filter="station" aria-pressed="true">STN</button><button type="button" data-target-filter="planet" aria-pressed="true">PLNT</button>
-      </div>
-      <div id="target-list-items" class="target-list-items" role="list"></div>
-    </section>
     <section id="available-actions" class="available-actions" aria-label="Available actions" hidden>
       <p class="eyebrow">AVAILABLE ACTIONS</p>
       <button id="dock-action" type="button">DOCK AT KEPLER STATION</button>
@@ -510,7 +510,7 @@ appRoot.innerHTML = `
         <section data-station-panel="market" hidden><p class="eyebrow">MARKET EXCHANGE</p><h2>MARKET</h2><p class="station-service-empty">Buy and sell orders will load from the Kepler market. Purchases and sales settle through your Kepler station inventory.</p></section>
         <section data-station-panel="maintenance" hidden><p class="eyebrow">SHIPYARD SERVICES</p><h2>MAINTENANCE</h2><p class="station-service-empty">Repair prices, fuel, reload supplies, and crafted consumables require an authoritative docked-state snapshot.</p></section>
         <section id="fitting-panel" data-station-panel="fitting" hidden aria-live="polite"></section>
-        <section class="refining-panel" data-station-panel="refining" style="--refinery-image: url('${refineryUrl}')" hidden><div class="refining-panel-content"><p class="eyebrow">REFINERY QUEUE</p><h2>REFINING</h2><p class="station-service-empty">Refining jobs and queue times will appear here when local inventory reservations are available.</p></div></section>
+        <section id="refining-panel" class="refining-panel" data-station-panel="refining" style="--refinery-image: url('${refineryUrl}')" hidden aria-live="polite"></section>
         <section data-station-panel="crafting" hidden><p class="eyebrow">MANUFACTURING WORKSTATIONS</p><h2>CRAFTING</h2><p class="station-service-empty">Crafting recipes, material reservations, and production queues will appear here when connected to the station worker service.</p></section>
         <section id="inventory-panel" class="inventory-panel" data-station-panel="inventory" hidden aria-live="polite"></section>
         <section data-station-panel="hangar" hidden><p class="eyebrow">KEPLER SHIP STORAGE</p><h2>HANGAR</h2><p class="station-service-empty">Ships physically stored at Kepler Station will appear here. Move a ship by flying it to its destination station.</p></section>
@@ -586,6 +586,7 @@ const stationPanels = document.querySelectorAll<HTMLElement>('[data-station-pane
 const stationServiceBack = document.querySelector<HTMLButtonElement>('#station-service-back')
 const exitServicesAction = document.querySelector<HTMLButtonElement>('#exit-services-action')
 const fittingPanel = document.querySelector<HTMLElement>('#fitting-panel')
+const refiningPanel = document.querySelector<HTMLElement>('#refining-panel')
 const gameMenuToggle = document.querySelector<HTMLButtonElement>('#game-menu-toggle')
 const gameMenuActions = document.querySelector<HTMLElement>('#game-menu-actions')
 const gameModal = document.querySelector<HTMLElement>('#game-modal')
@@ -615,9 +616,6 @@ const targetRange = document.querySelector<HTMLElement>('#target-range')
 const targetLockLabel = document.querySelector<HTMLElement>('#target-lock-label')
 const targetLockProgress = document.querySelector<HTMLElement>('#target-lock-progress')
 const clearTarget = document.querySelector<HTMLButtonElement>('#clear-target')
-const targetListItems = document.querySelector<HTMLElement>('#target-list-items')
-const targetDistanceSort = document.querySelector<HTMLButtonElement>('#target-distance-sort')
-const targetListFilters = document.querySelectorAll<HTMLButtonElement>('[data-target-filter]')
 const powerDisplay = document.querySelector<HTMLElement>('#ship-power')
 const powerBar = document.querySelector<HTMLElement>('#ship-power-bar')
 const warpCapacityDisplay = document.querySelector<HTMLElement>('#ship-warp-capacity')
@@ -637,61 +635,13 @@ const minimumMinimapRadius = 20_000
 const maximumMinimapRadius = 400_000
 let minimapRadius = 140_000
 let playerMapPosition = { x: 123_078, y: 480, z: -2_691 }
-let selectedTarget: { id?: string; name: string; kind: 'asteroid' | 'pilot' | 'cargo' | 'warpable' | 'station' | 'planet'; shipType?: string; jettisonedItemId?: string; position: Vector3; oreRemainingCubicMeters: number; initialOreCubicMeters: number; locked: boolean; locking: boolean; lockProgress: number } | undefined
+let selectedTarget: { name: string; kind: 'asteroid' | 'pilot' | 'cargo' | 'warpable' | 'station' | 'planet'; shipType?: string; jettisonedItemId?: string; position: Vector3; oreRemainingCubicMeters: number; initialOreCubicMeters: number; locked: boolean; locking: boolean; lockProgress: number } | undefined
 let cargoCubicMeters = 0
 let cargoCapacityCubicMeters = 24
 let shipPowerMegajoules = savedShipState.power_megajoules
 let shipShields = savedShipState.shields
 let shipHull = savedShipState.hull
 let shipFuelLiters = savedShipState.fuel_liters
-const enabledTargetTypes = new Set(['player', 'asteroid', 'warpable', 'station', 'planet'])
-let targetDistanceDescending = false
-let lastTargetListRenderAt = 0
-
-function formatTargetDistance(distanceMeters: number) {
-  return distanceMeters >= 1_000 ? `${(distanceMeters / 1_000).toFixed(1)} km` : `${distanceMeters.toFixed(0)} m`
-}
-
-function renderTargetList() {
-  const targets = scene.getTargetables?.() ?? []
-  const visibleTargets = targets
-    .filter((target) => enabledTargetTypes.has(target.kind))
-    .map((target) => ({ ...target, distanceMeters: Vector3.Distance(target.position, new Vector3(playerMapPosition.x, playerMapPosition.y, playerMapPosition.z)) }))
-    .sort((first, second) => targetDistanceDescending ? second.distanceMeters - first.distanceMeters : first.distanceMeters - second.distanceMeters)
-  if (targetListItems) {
-    targetListItems.innerHTML = visibleTargets.length
-      ? visibleTargets.map((target) => {
-        const state = target.locked ? 'locked' : selectedTarget?.id === target.id ? 'selected' : ''
-        return `<button class="target-list-item target-list-item-${target.kind}${state ? ` is-${state}` : ''}" type="button" role="listitem" aria-pressed="${state !== ''}" data-target-id="${target.id}"><span class="target-list-type">${target.kind}</span><span class="target-list-name">${escapeHtml(target.name)}</span><span class="target-list-state">${state ? state.toUpperCase() : ''}</span><span class="target-list-range">${formatTargetDistance(target.distanceMeters)}</span></button>`
-      }).join('')
-      : '<p class="target-list-empty">NO TARGETS IN FILTER</p>'
-  }
-}
-
-function selectTargetListItem(event: Event) {
-  const target = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-target-id]')
-  if (target && targetListItems?.contains(target)) scene.selectTarget?.(target.dataset.targetId ?? '')
-}
-
-targetListItems?.addEventListener('pointerdown', selectTargetListItem)
-targetListItems?.addEventListener('click', selectTargetListItem)
-
-targetListFilters.forEach((filter) => {
-  filter.addEventListener('click', () => {
-    const targetType = filter.dataset.targetFilter
-    if (!targetType) return
-    if (enabledTargetTypes.has(targetType)) enabledTargetTypes.delete(targetType)
-    else enabledTargetTypes.add(targetType)
-    filter.setAttribute('aria-pressed', String(enabledTargetTypes.has(targetType)))
-    renderTargetList()
-  })
-})
-targetDistanceSort?.addEventListener('click', () => {
-  targetDistanceDescending = !targetDistanceDescending
-  targetDistanceSort.textContent = targetDistanceDescending ? 'RANGE ↓' : 'RANGE ↑'
-  targetDistanceSort.setAttribute('aria-label', `Sort targets by ${targetDistanceDescending ? 'farthest' : 'nearest'} distance`)
-  renderTargetList()
-})
 
 function renderSavedShipState() {
   cargoCubicMeters = savedShipState.cargo_cubic_meters
@@ -839,8 +789,6 @@ async function logout() {
     return
   }
   closeGameModal()
-  realtimeSessionActive = false
-  if (realtimeReconnectTimer !== undefined) window.clearTimeout(realtimeReconnectTimer)
   realtimeSocket?.close()
   window.removeEventListener('keydown', handleGameNavigationKeyDown)
   window.removeEventListener('keydown', handleHardpointKeyDown)
@@ -866,6 +814,14 @@ function openShipInventory() {
 
 let dockedInventory: DockedInventory | null = null
 let shipInventorySnapshot: InventoryContainer | null = null
+let refinerySnapshot: RefinerySnapshot | null = null
+let selectedRefinerySource: { id: string; kind: 'raw_ore' | 'intermediate'; name: string } | null = null
+let refineryInventoryExpanded = true
+let refineryClockTimer: number | undefined
+let refineryServerTime = 0
+let refinerySnapshotReceivedAt = 0
+let refineryClockTicks = 0
+let refineryRefreshInFlight = false
 let fittingSnapshot: FittingSnapshot | null = null
 let selectedFittingSlot: { location: string; index: number } | null = null
 let selectedStationModuleId: string | null = null
@@ -946,7 +902,7 @@ function renderInventoryContainer(container: InventoryContainer, kind: 'ship' | 
   const cargoTiles = inventoryEntries(container, inventoryFilter, inventorySort).map((entry) => {
     const selected = selectedInventoryItem?.id === entry.id && selectedInventoryItem.containerId === container.id && selectedInventoryItem.kind === entry.kind
     return `<button class="inventory-item${selected ? ' is-selected' : ''}" type="button" draggable="${showTransferAll && !inventoryLocked()}" ${inventoryLocked() ? 'disabled' : ''} data-entry-id="${escapeHtml(entry.id)}" data-entry-kind="${entry.kind}" data-inventory-source="${escapeHtml(container.id)}" aria-pressed="${selected}">
-      <span class="inventory-item-icon" aria-hidden="true">${inventoryIcon(entry.kind === 'ore' ? 'ore.raw' : entry.item.definition_id)}</span>
+      <span class="inventory-item-icon" aria-hidden="true">${entry.kind === 'ore' ? `<img class="inventory-item-icon-image" src="${rawOreIconUrl}" alt="">` : inventoryIcon(entry.item.definition_id)}</span>
       <span class="inventory-item-name">${escapeHtml(entry.name)}</span>
       <span class="inventory-item-quantity">${entry.kind === 'ore' ? 'LOT' : entry.item.quantity}</span>
       <span class="inventory-item-volume">${entry.volume.toFixed(3)} m³</span></button>`
@@ -1067,6 +1023,128 @@ function showInventoryError(message: string) {
   inventoryMessage = message
   inventoryMessageIsError = true
   renderActiveInventory()
+}
+
+function refineryOutputLabel(definitionId: string) {
+  return definitionId.replace(/^material\.(?:ore|pure)\./, '').replaceAll('_', ' ')
+}
+
+function refineryCountdown(completesAt: string | null): string {
+  if (!completesAt) return 'AWAITING LANE'
+  const remainingSeconds = Math.max(0, Math.ceil((Date.parse(completesAt) - (refineryServerTime + (Date.now() - refinerySnapshotReceivedAt))) / 1_000))
+  const minutes = Math.floor(remainingSeconds / 60)
+  return `${minutes}:${String(remainingSeconds % 60).padStart(2, '0')} REMAINING`
+}
+
+function updateRefineryCountdowns() {
+  refiningPanel?.querySelectorAll<HTMLElement>('[data-refinery-completes-at]').forEach((countdown) => {
+    countdown.textContent = refineryCountdown(countdown.dataset.refineryCompletesAt ?? null)
+  })
+}
+
+function stopRefineryClock() {
+  if (refineryClockTimer !== undefined) window.clearInterval(refineryClockTimer)
+  refineryClockTimer = undefined
+}
+
+function startRefineryClock() {
+  stopRefineryClock()
+  refineryClockTicks = 0
+  updateRefineryCountdowns()
+  if (refiningPanel?.hidden === false && refinerySnapshot?.jobs.some((job) => job.state === 'processing' || job.state === 'queued')) {
+    refineryClockTimer = window.setInterval(() => {
+      updateRefineryCountdowns()
+      refineryClockTicks += 1
+      if (refineryClockTicks % 2 === 0) void loadDockedRefinery(false)
+    }, 1_000)
+  }
+}
+
+function renderRefinery() {
+  if (!refiningPanel || !refinerySnapshot || !dockedInventory) return
+  const sources = [
+    ...dockedInventory.station.raw_ore_lots.map((lot) => ({ id: lot.id, kind: 'raw_ore' as const, definitionId: 'ore.raw', name: `${lot.composition} raw ore`, volume: lot.volume_cubic_meters, outputs: lot.mineral_assay.map((mineral) => ({ definition_id: `material.ore.${mineral.definition_id}`, quantity_cubic_meters: Math.floor(lot.volume_cubic_meters * mineral.percentage / 100 * refinerySnapshot!.service.first_pass_efficiency) })) })),
+    ...dockedInventory.station.items.filter((item) => item.definition_id.startsWith('material.ore.')).map((item) => ({ id: item.id, kind: 'intermediate' as const, definitionId: item.definition_id, name: refineryOutputLabel(item.definition_id), volume: item.quantity, outputs: [{ definition_id: item.definition_id.replace('material.ore.', 'material.pure.'), quantity_cubic_meters: Math.floor(item.quantity * refinerySnapshot!.service.second_pass_efficiency) }] })),
+  ]
+  const selected = sources.find((source) => source.id === selectedRefinerySource?.id && source.kind === selectedRefinerySource.kind)
+  const sourceTiles = sources.filter((source) => source.id !== selected?.id || source.kind !== selected.kind).map((source) => `<button class="inventory-item refinery-source" type="button" draggable="true" data-refinery-source="${escapeHtml(source.id)}" data-refinery-kind="${source.kind}"><span class="inventory-item-icon" aria-hidden="true">${source.kind === 'raw_ore' ? `<img class="inventory-item-icon-image" src="${rawOreIconUrl}" alt="">` : inventoryIcon(source.definitionId)}</span><span class="inventory-item-name">${escapeHtml(source.name)}</span><span class="inventory-item-quantity">${source.kind === 'raw_ore' ? 'LOT' : 'ORE'}</span><span class="inventory-item-volume">${source.volume.toFixed(3)} m3</span></button>`).join('') || '<p class="inventory-empty">No refinery inputs in station storage.</p>'
+  const inputTray = selected ? `<button class="inventory-item refinery-input is-selected" type="button" draggable="true" data-staged-refinery-input><span class="inventory-item-icon" aria-hidden="true">${selected.kind === 'raw_ore' ? `<img class="inventory-item-icon-image" src="${rawOreIconUrl}" alt="">` : inventoryIcon(selected.definitionId)}</span><span class="inventory-item-name">${escapeHtml(selected.name)}</span><span class="inventory-item-quantity">READY</span><span class="inventory-item-volume">${selected.volume.toFixed(3)} m3</span></button>` : '<p class="refinery-drop-copy">Drag a raw ore lot or mineral ore stack here.</p>'
+  const preview = selected ? `<p class="eyebrow">EXPECTED OUTPUT</p><ul class="refinery-output">${selected.outputs.filter((output) => output.quantity_cubic_meters > 0).map((output) => `<li>${escapeHtml(refineryOutputLabel(output.definition_id))}: ${output.quantity_cubic_meters} m3</li>`).join('') || '<li>No recoverable output at this efficiency.</li>'}</ul><p class="refinery-quote">${selected.volume.toFixed(3)} seconds · ${selected.kind === 'raw_ore' ? refinerySnapshot.service.first_pass_efficiency : refinerySnapshot.service.second_pass_efficiency} yield · ${refinerySnapshot.service.fee_credits.toFixed(0)} credits</p>` : '<p>Select a station input to preview its refinement.</p>'
+  const activeJobs = refinerySnapshot.jobs.filter((job) => job.state === 'queued' || job.state === 'processing')
+  const currentJobs = activeJobs.filter((job) => job.state === 'processing').map((job) => `<li class="refinery-job is-processing"><div><strong>PROCESSING</strong><span>${job.stage === 'crush' ? 'ORE SEPARATION' : 'PURIFICATION'}</span></div><time data-refinery-completes-at="${job.completes_at ?? ''}">${refineryCountdown(job.completes_at)}</time></li>`).join('') || '<li class="refinery-job-empty">No job is processing.</li>'
+  const queuedJobs = activeJobs.filter((job) => job.state === 'queued').map((job, index) => `<li class="refinery-job"><div><strong>QUEUED ${index + 1}</strong><span>${job.stage === 'crush' ? 'ORE SEPARATION' : 'PURIFICATION'}</span></div><time>${job.quoted_duration_seconds.toFixed(0)} SECONDS</time></li>`).join('') || '<li class="refinery-job-empty">No queued jobs.</li>'
+  refiningPanel.innerHTML = `<header class="refinery-heading"><div><p class="eyebrow">${escapeHtml(refinerySnapshot.service.display_name)}</p><h1>REFINING</h1></div><div><p class="refinery-capacity">${activeJobs.length} / ${refinerySnapshot.service.queue_capacity} JOBS</p><button id="exit-refinery" class="exit-refinery" type="button">EXIT REFINERY</button></div></header><section class="inventory-container refinery-inventory${refineryInventoryExpanded ? '' : ' is-collapsed'}" data-refinery-storage><header class="inventory-container-heading"><div><p class="eyebrow">PERSONAL STORAGE</p><h3>STATION INVENTORY</h3></div><button id="toggle-refinery-inventory" class="refinery-inventory-toggle" type="button" aria-expanded="${refineryInventoryExpanded}" aria-label="${refineryInventoryExpanded ? 'Collapse station inventory' : 'Expand station inventory'}" title="${refineryInventoryExpanded ? 'Collapse station inventory' : 'Expand station inventory'}">${refineryInventoryExpanded ? '⌃' : '⌄'}</button></header>${refineryInventoryExpanded ? `<div class="inventory-items refinery-inputs">${sourceTiles}</div>` : ''}</section><div class="refinery-stages"><section class="refinery-stage"><header><p class="eyebrow">01</p><h2>INPUT</h2></header><div class="refinery-input-tray" data-refinery-input>${inputTray}</div></section><section class="refinery-stage refinery-execution"><header><p class="eyebrow">02</p><h2>CONFIGURATION &amp; EXECUTION</h2></header><p class="refinery-quote">${selected ? `${selected.volume.toFixed(3)} seconds · ${selected.kind === 'raw_ore' ? refinerySnapshot.service.first_pass_efficiency : refinerySnapshot.service.second_pass_efficiency} yield · ${refinerySnapshot.service.fee_credits.toFixed(0)} credits` : 'Load an input to configure a refinery job.'}</p><button id="queue-refinery-job" type="button" ${selected ? '' : 'disabled'}>START REFINING</button></section><section class="refinery-stage"><header><p class="eyebrow">03</p><h2>OUTPUT</h2></header><div class="refinery-output-tray">${preview}</div></section></div><section class="refinery-current-jobs"><header><div><p class="eyebrow">REFINERY ACTIVITY</p><h2>CURRENT JOBS</h2></div></header><div class="refinery-job-columns"><section><p class="eyebrow">PROCESSING</p><ol>${currentJobs}</ol></section><section><p class="eyebrow">QUEUED</p><ol>${queuedJobs}</ol></section></div></section>`
+  refiningPanel.querySelectorAll<HTMLButtonElement>('[data-refinery-source]').forEach((button) => {
+    button.addEventListener('dragstart', (event) => {
+      event.dataTransfer?.setData('application/x-spaceconomy-refinery-source', JSON.stringify({ id: button.dataset.refinerySource, kind: button.dataset.refineryKind === 'raw_ore' ? 'ore' : 'item', containerId: dockedInventory?.station.id }))
+      if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move'
+    })
+  })
+  refiningPanel.querySelector<HTMLElement>('[data-refinery-input]')?.addEventListener('dragover', (event) => event.preventDefault())
+  refiningPanel.querySelector<HTMLElement>('[data-refinery-input]')?.addEventListener('drop', (event) => {
+    event.preventDefault()
+    const source = parseInventoryDrag(event.dataTransfer?.getData('application/x-spaceconomy-refinery-source') ?? '')
+    if (!source) return
+    const matchingSource = sources.find((candidate) => candidate.id === source.id && ((source.kind === 'ore' && candidate.kind === 'raw_ore') || (source.kind === 'item' && candidate.kind === 'intermediate')))
+    if (!matchingSource) return
+    selectedRefinerySource = { id: matchingSource.id, kind: matchingSource.kind, name: '' }
+    renderRefinery()
+  })
+  refiningPanel.querySelector<HTMLButtonElement>('[data-staged-refinery-input]')?.addEventListener('dragstart', (event) => {
+    event.dataTransfer?.setData('application/x-spaceconomy-refinery-staged', 'true')
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move'
+  })
+  refiningPanel.querySelector<HTMLElement>('[data-refinery-storage]')?.addEventListener('dragover', (event) => {
+    if (event.dataTransfer?.types.includes('application/x-spaceconomy-refinery-staged')) event.preventDefault()
+  })
+  refiningPanel.querySelector<HTMLElement>('[data-refinery-storage]')?.addEventListener('drop', (event) => {
+    if (!event.dataTransfer?.types.includes('application/x-spaceconomy-refinery-staged')) return
+    event.preventDefault()
+    selectedRefinerySource = null
+    renderRefinery()
+  })
+  refiningPanel.querySelector<HTMLButtonElement>('#queue-refinery-job')?.addEventListener('click', () => void queueRefineryJob())
+  refiningPanel.querySelector<HTMLButtonElement>('#exit-refinery')?.addEventListener('click', closeStationServices)
+  refiningPanel.querySelector<HTMLButtonElement>('#toggle-refinery-inventory')?.addEventListener('click', () => {
+    refineryInventoryExpanded = !refineryInventoryExpanded
+    renderRefinery()
+  })
+}
+
+async function loadDockedRefinery(clearSelectedSource = true) {
+  if (refineryRefreshInFlight) return
+  refineryRefreshInFlight = true
+  if (clearSelectedSource && refiningPanel) refiningPanel.innerHTML = '<p class="station-service-empty">Loading refinery...</p>'
+  try {
+    const [refineryResponse, inventoryResponse] = await Promise.all([
+      fetch(`${apiBaseUrl}/refinery/docked`, { headers: { authorization: `Bearer ${pilotAccessToken}` } }),
+      fetch(`${apiBaseUrl}/inventory/docked`, { headers: { authorization: `Bearer ${pilotAccessToken}` } }),
+    ])
+    if (!refineryResponse.ok || !inventoryResponse.ok) throw new Error('Unable to load refinery.')
+    refinerySnapshot = await refineryResponse.json() as RefinerySnapshot
+    refineryServerTime = Date.parse(refinerySnapshot.server_time)
+    refinerySnapshotReceivedAt = Date.now()
+    dockedInventory = await inventoryResponse.json() as DockedInventory
+    if (clearSelectedSource) selectedRefinerySource = null
+    renderRefinery()
+    startRefineryClock()
+  } finally {
+    refineryRefreshInFlight = false
+  }
+}
+
+async function queueRefineryJob() {
+  if (!selectedRefinerySource) return
+  const response = await fetch(`${apiBaseUrl}/refinery/jobs`, {
+    method: 'POST', headers: { authorization: `Bearer ${pilotAccessToken}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ source_kind: selectedRefinerySource.kind, source_id: selectedRefinerySource.id, idempotency_key: crypto.randomUUID() }),
+  })
+  if (!response.ok) {
+    if (refiningPanel) refiningPanel.insertAdjacentHTML('beforeend', `<p class="inventory-error">${escapeHtml(await response.text())}</p>`)
+    return
+  }
+  refinerySnapshot = await response.json() as RefinerySnapshot
+  await loadDockedRefinery()
 }
 
 async function loadDockedInventory() {
@@ -1456,11 +1534,11 @@ function positionMapMarker(marker: HTMLElement | null, x: number, z: number) {
 
 function updateTargetWindow() {
   if (!targetWindow || !targetName || !targetRange || !targetLockLabel || !targetLockProgress) return
-  if (!selectedTarget) {
+  if (!selectedTarget?.locked) {
     targetWindow.setAttribute('hidden', '')
     return
   }
-  targetLockLabel.textContent = selectedTarget.locking ? 'ACQUIRING LOCK' : selectedTarget.locked ? 'TARGET LOCK' : 'TARGET SELECTED'
+  targetLockLabel.textContent = selectedTarget.locking ? 'ACQUIRING LOCK' : 'TARGET LOCK'
   targetName.textContent = selectedTarget.name
   targetThumbnail?.classList.toggle('is-ship', selectedTarget.kind === 'pilot')
   targetThumbnail?.setAttribute('data-ship-type', selectedTarget.kind === 'pilot' ? selectedTarget.shipType ?? 'starter-corvette' : '')
@@ -1473,7 +1551,7 @@ function updateTargetWindow() {
 }
 
 clearTarget?.addEventListener('click', () => {
-  scene.clearTargetSelection?.()
+  scene.toggleTargetLock()
 })
 
 document.querySelector<HTMLButtonElement>('#pickup-jettisoned-item')?.addEventListener('click', () => {
@@ -1532,7 +1610,6 @@ function createFlightScene(
     onTargetSelectionChange(target) {
       selectedTarget = target
       updateTargetWindow()
-      renderTargetList()
       updateHardpointAvailability()
     },
     onModuleActiveChange(moduleName, isActive) {
@@ -1632,10 +1709,6 @@ function createFlightScene(
       playerMapPosition = { x: position.x, y: position.y, z: position.z }
       positionMapMarker(playerMapMarker, position.x, position.z)
       updateTargetWindow()
-      if (performance.now() - lastTargetListRenderAt >= 250) {
-        lastTargetListRenderAt = performance.now()
-        renderTargetList()
-      }
       updateSelectedPoiDetails()
       if (performance.now() - lastAsteroidSnapshotAt >= 3_000) {
         lastAsteroidSnapshotAt = performance.now()
@@ -1666,11 +1739,8 @@ let isInSystemSpace = !savedShipState.docked_station_name
 let lastAsteroidSnapshotAt = 0
 // Initialize before constructing a scene: its callbacks can reference this socket.
 const realtimeUrl = `${apiBaseUrl.replace(/^http/, 'ws').replace('/api/v1', '')}/api/v1/realtime?token=${encodeURIComponent(pilotAccessToken)}`
-let realtimeSocket: WebSocket | null = null
-let realtimeReconnectTimer: number | undefined
-let realtimeSessionActive = true
+const realtimeSocket = new WebSocket(realtimeUrl)
 let scene = createFlightScene()
-renderTargetList()
 
 const discoveredFieldMarkers: Record<string, HTMLElement | null> = {
   'ASTERION BELT': mapAsterionBelt,
@@ -1782,45 +1852,34 @@ window.addEventListener('keydown', (event) => {
   }
 })
 
-function connectRealtime() {
-  if (!realtimeSessionActive || realtimeSocket?.readyState === WebSocket.OPEN || realtimeSocket?.readyState === WebSocket.CONNECTING) return
-  const socket = new WebSocket(realtimeUrl)
-  realtimeSocket = socket
-  socket.addEventListener('open', () => {
-    if (!isInSystemSpace) socket.send(JSON.stringify({ type: 'docked', payload: {} }))
-  })
-  socket.addEventListener('message', (event) => {
-    const message = JSON.parse(event.data) as { type: string; payload: { pilots?: { pilot_id: string; display_name: string; ship_type: string; x: number; y: number; z: number; yaw: number; pitch: number; roll: number }[]; pilot_id?: string; target_pilot_id?: string; display_name?: string; ship_type?: string; x?: number; y?: number; z?: number; yaw?: number; pitch?: number; roll?: number; active?: boolean; source_x?: number; source_y?: number; source_z?: number; target_x?: number; target_y?: number; target_z?: number } }
-    if (message.type === 'snapshot') {
-      message.payload.pilots?.forEach((pilot) => scene.updateRemotePilot?.({ pilotId: pilot.pilot_id, displayName: pilot.display_name, shipType: pilot.ship_type, position: new Vector3(pilot.x, pilot.y, pilot.z), yaw: pilot.yaw, pitch: pilot.pitch, roll: pilot.roll }))
-      return
-    }
-    if (message.type === 'pilot_left' && message.payload.pilot_id) {
-      scene.removeRemotePilot?.(message.payload.pilot_id)
-      return
-    }
-    if (message.type === 'pilot_mining' && message.payload.pilot_id && message.payload.active !== undefined && message.payload.source_x !== undefined && message.payload.source_y !== undefined && message.payload.source_z !== undefined && message.payload.target_x !== undefined && message.payload.target_y !== undefined && message.payload.target_z !== undefined) {
-      scene.setRemotePilotMining?.(message.payload.pilot_id, message.payload.active, new Vector3(message.payload.source_x, message.payload.source_y, message.payload.source_z), new Vector3(message.payload.target_x, message.payload.target_y, message.payload.target_z))
-      return
-    }
-    if (message.type === 'pilot_targeting' && message.payload.target_pilot_id === selectedPilotId) {
-      scene.setHostileTargeting?.(message.payload.pilot_id ?? '', message.payload.active === true)
-      return
-    }
-    if ((message.type === 'pilot_joined' || message.type === 'pilot_moved') && message.payload.pilot_id && message.payload.display_name && message.payload.ship_type && message.payload.x !== undefined && message.payload.y !== undefined && message.payload.z !== undefined && message.payload.yaw !== undefined && message.payload.pitch !== undefined && message.payload.roll !== undefined) {
-      scene.updateRemotePilot?.({ pilotId: message.payload.pilot_id, displayName: message.payload.display_name, shipType: message.payload.ship_type, position: new Vector3(message.payload.x, message.payload.y, message.payload.z), yaw: message.payload.yaw, pitch: message.payload.pitch, roll: message.payload.roll })
-    }
-  })
-  socket.addEventListener('close', () => {
-    if (realtimeSocket !== socket) return
-    realtimeSocket = null
-    if (realtimeSessionActive) realtimeReconnectTimer = window.setTimeout(connectRealtime, 1_000)
-  })
-}
-
 void loadDiscoveryBootstrap()
 void loadShipInventory(true)
-connectRealtime()
+
+realtimeSocket.addEventListener('open', () => {
+  if (!isInSystemSpace) realtimeSocket?.send(JSON.stringify({ type: 'docked', payload: {} }))
+})
+realtimeSocket.addEventListener('message', (event) => {
+  const message = JSON.parse(event.data) as { type: string; payload: { pilots?: { pilot_id: string; display_name: string; ship_type: string; x: number; y: number; z: number; yaw: number; pitch: number; roll: number }[]; pilot_id?: string; target_pilot_id?: string; display_name?: string; ship_type?: string; x?: number; y?: number; z?: number; yaw?: number; pitch?: number; roll?: number; active?: boolean; source_x?: number; source_y?: number; source_z?: number; target_x?: number; target_y?: number; target_z?: number } }
+  if (message.type === 'snapshot') {
+    message.payload.pilots?.forEach((pilot) => scene.updateRemotePilot?.({ pilotId: pilot.pilot_id, displayName: pilot.display_name, shipType: pilot.ship_type, position: new Vector3(pilot.x, pilot.y, pilot.z), yaw: pilot.yaw, pitch: pilot.pitch, roll: pilot.roll }))
+    return
+  }
+  if (message.type === 'pilot_left' && message.payload.pilot_id) {
+    scene.removeRemotePilot?.(message.payload.pilot_id)
+    return
+  }
+  if (message.type === 'pilot_mining' && message.payload.pilot_id && message.payload.active !== undefined && message.payload.source_x !== undefined && message.payload.source_y !== undefined && message.payload.source_z !== undefined && message.payload.target_x !== undefined && message.payload.target_y !== undefined && message.payload.target_z !== undefined) {
+    scene.setRemotePilotMining?.(message.payload.pilot_id, message.payload.active, new Vector3(message.payload.source_x, message.payload.source_y, message.payload.source_z), new Vector3(message.payload.target_x, message.payload.target_y, message.payload.target_z))
+    return
+  }
+  if (message.type === 'pilot_targeting' && message.payload.target_pilot_id === selectedPilotId) {
+    scene.setHostileTargeting?.(message.payload.pilot_id ?? '', message.payload.active === true)
+    return
+  }
+  if ((message.type === 'pilot_joined' || message.type === 'pilot_moved') && message.payload.pilot_id && message.payload.display_name && message.payload.ship_type && message.payload.x !== undefined && message.payload.y !== undefined && message.payload.z !== undefined && message.payload.yaw !== undefined && message.payload.pitch !== undefined && message.payload.roll !== undefined) {
+    scene.updateRemotePilot?.({ pilotId: message.payload.pilot_id, displayName: message.payload.display_name, shipType: message.payload.ship_type, position: new Vector3(message.payload.x, message.payload.y, message.payload.z), yaw: message.payload.yaw, pitch: message.payload.pitch, roll: message.payload.roll })
+  }
+})
 
 if (savedShipState.docked_station_name) {
   scene.dispose()
@@ -1834,6 +1893,8 @@ if (savedShipState.docked_station_name) {
 
 function closeStationServices() {
   invalidateInventoryView()
+  stopRefineryClock()
+  document.querySelector('.game-shell')?.classList.remove('is-refining')
   stationServices?.setAttribute('hidden', '')
 }
 
@@ -1842,6 +1903,7 @@ function openStationServices(selectedService: string) {
   closeGameModal()
   stationServices?.removeAttribute('hidden')
   stationServicePanel?.removeAttribute('hidden')
+  document.querySelector('.game-shell')?.classList.toggle('is-refining', selectedService === 'refining')
   stationPanels.forEach((panel) => {
     panel.hidden = panel.dataset.stationPanel !== selectedService
   })
@@ -1901,7 +1963,7 @@ async function changeDockedState(docking: boolean) {
       systemStatus?.toggleAttribute('hidden', docking)
       availableActions?.setAttribute('hidden', '')
       document.querySelector('.game-shell')?.classList.toggle('is-docked', docking)
-      if (realtimeSocket?.readyState === WebSocket.OPEN) realtimeSocket.send(JSON.stringify({ type: docking ? 'docked' : 'undocked', payload: {} }))
+      if (realtimeSocket.readyState === WebSocket.OPEN) realtimeSocket.send(JSON.stringify({ type: docking ? 'docked' : 'undocked', payload: {} }))
     })
   } finally {
     finishLocationTransition()
@@ -1933,6 +1995,10 @@ stationServiceButtons.forEach((button) => {
     if (!selectedService) return
     openStationServices(selectedService)
     if (selectedService === 'inventory') void loadDockedInventory()
+    if (selectedService === 'refining') void loadDockedRefinery().catch((error: unknown) => {
+      if (refiningPanel) refiningPanel.innerHTML = '<p class="station-service-empty">Unable to load the Kepler refinery.</p>'
+      console.error(error)
+    })
     if (selectedService === 'fitting') void loadDockedFitting().catch((error: unknown) => {
       if (fittingPanel) fittingPanel.innerHTML = '<p class="station-service-empty">Unable to load docked fitting.</p>'
       console.error(error)

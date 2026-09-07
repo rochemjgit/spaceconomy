@@ -8,6 +8,7 @@ import json
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .config import settings
 from .db import session_factory
 from .fitting import (
     CAPACITOR_BANK,
@@ -24,9 +25,19 @@ from .fitting import (
 from .fitting import (
     ModuleDefinition as DomainModuleDefinition,
 )
-from .config import settings
-from .models import Asteroid, AsteroidField, HullDefinition, MineralDefinition, ModuleDefinition, ModuleEffect, SolarSystem
+from .models import (
+    Asteroid,
+    AsteroidField,
+    HullDefinition,
+    MineralDefinition,
+    ModuleDefinition,
+    ModuleEffect,
+    RefineryService,
+    SolarSystem,
+)
 from .world import mineral_assay_for_profile
+
+KEPLER_STATION_ID = "4e32a9a9-5551-4e3f-9b9b-b6b6e22a4f04"
 
 MINERAL_DEFINITIONS = (
     ("iron", "Iron", "scientific", "abundant"),
@@ -73,6 +84,7 @@ async def seed_catalog() -> None:
             await _upsert_hull(session, hull_definition)
         for module_definition in (MINING_LASER, SHIELD_BOOSTER, CAPACITOR_BANK, REACTOR_CORE):
             await _upsert_module(session, module_definition)
+        await _upsert_starter_refinery(session)
         kepler = await _upsert_system(session)
         for field in (
             ("asterion", "ASTERION BELT", 359_678, 0, 30_000, 0.82, "ferrous"),
@@ -165,6 +177,37 @@ async def _upsert_mineral(
     }
     if row is None:
         session.add(MineralDefinition(definition_id=definition_id, version=1, **values))
+    else:
+        for name, value in values.items():
+            setattr(row, name, value)
+
+
+async def _upsert_starter_refinery(session: AsyncSession) -> None:
+    row = await session.scalar(
+        select(RefineryService).where(
+            RefineryService.station_id == KEPLER_STATION_ID,
+            RefineryService.service_key == "starter_refinery",
+        )
+    )
+    values = {
+        "display_name": "Kepler Starter Refinery",
+        "first_pass_seconds_per_cubic_meter": 1.0,
+        "second_pass_seconds_per_cubic_meter": 1.0,
+        "first_pass_efficiency": 0.5,
+        "second_pass_efficiency": 0.5,
+        "fee_credits": 0.0,
+        "active_job_capacity": 1,
+        "queue_capacity": 5,
+        "active": True,
+    }
+    if row is None:
+        session.add(
+            RefineryService(
+                station_id=KEPLER_STATION_ID,
+                service_key="starter_refinery",
+                **values,
+            )
+        )
     else:
         for name, value in values.items():
             setattr(row, name, value)

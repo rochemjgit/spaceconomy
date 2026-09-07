@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     asteroid_spawn_batch_size: int = 6
     asteroid_field_maximum_active_asteroids: int = 36
     world_spawn_tick_seconds: int = 30
+    refinery_tick_seconds: float = 1
     sensor_default_range_meters: float = 1_500_000
     sensor_default_power_cost_megajoules: float = 35
     sensor_default_cooldown_seconds: float = 20

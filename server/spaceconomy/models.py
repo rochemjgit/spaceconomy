@@ -290,6 +290,83 @@ class MinedOreLot(TimestampedModel, Base):
     volume_cubic_meters: Mapped[float] = mapped_column(Float, nullable=False)
 
 
+class RefineryService(TimestampedModel, Base):
+    """A station-owned refinery configuration with durable balance settings."""
+
+    __tablename__ = "refinery_services"
+    __table_args__ = (
+        UniqueConstraint("station_id", "service_key", name="uq_refinery_service_station_key"),
+        CheckConstraint("first_pass_seconds_per_cubic_meter > 0", name="refinery_first_pass_rate_valid"),
+        CheckConstraint("second_pass_seconds_per_cubic_meter > 0", name="refinery_second_pass_rate_valid"),
+        CheckConstraint("first_pass_efficiency >= 0 AND first_pass_efficiency <= 1", name="refinery_first_pass_efficiency_valid"),
+        CheckConstraint("second_pass_efficiency >= 0 AND second_pass_efficiency <= 1", name="refinery_second_pass_efficiency_valid"),
+        CheckConstraint("fee_credits >= 0", name="refinery_fee_valid"),
+        CheckConstraint("active_job_capacity > 0", name="refinery_active_capacity_valid"),
+        CheckConstraint("queue_capacity > 0", name="refinery_queue_capacity_valid"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    station_id: Mapped[UUID] = mapped_column(Uuid, index=True, nullable=False)
+    service_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    first_pass_seconds_per_cubic_meter: Mapped[float] = mapped_column(Float, nullable=False)
+    second_pass_seconds_per_cubic_meter: Mapped[float] = mapped_column(Float, nullable=False)
+    first_pass_efficiency: Mapped[float] = mapped_column(Float, nullable=False)
+    second_pass_efficiency: Mapped[float] = mapped_column(Float, nullable=False)
+    fee_credits: Mapped[float] = mapped_column(Float, nullable=False)
+    active_job_capacity: Mapped[int] = mapped_column(Integer, nullable=False)
+    queue_capacity: Mapped[int] = mapped_column(Integer, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class RefineryJob(TimestampedModel, Base):
+    """One reserved refinery input and its immutable processing quote."""
+
+    __tablename__ = "refinery_jobs"
+    __table_args__ = (
+        CheckConstraint("stage IN ('crush', 'purify')", name="refinery_job_stage_valid"),
+        CheckConstraint("state IN ('queued', 'processing', 'completed', 'cancelled', 'failed')", name="refinery_job_state_valid"),
+        CheckConstraint("queue_sequence >= 0", name="refinery_job_sequence_valid"),
+        CheckConstraint("quoted_duration_seconds > 0", name="refinery_job_duration_valid"),
+        CheckConstraint("quoted_efficiency >= 0 AND quoted_efficiency <= 1", name="refinery_job_efficiency_valid"),
+        CheckConstraint("quoted_fee_credits >= 0", name="refinery_job_fee_valid"),
+        CheckConstraint(
+            "(state IN ('queued', 'processing') AND "
+            "((source_ore_lot_id IS NOT NULL "
+            "AND source_inventory_item_id IS NULL AND stage = 'crush') "
+            "OR (source_ore_lot_id IS NULL "
+            "AND source_inventory_item_id IS NOT NULL AND stage = 'purify'))) "
+            "OR state IN ('completed', 'cancelled', 'failed')",
+            name="refinery_job_source_valid",
+        ),
+        UniqueConstraint("pilot_id", "idempotency_key", name="uq_refinery_job_pilot_idempotency"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    pilot_id: Mapped[UUID] = mapped_column(ForeignKey("pilots.id"), index=True, nullable=False)
+    refinery_service_id: Mapped[UUID] = mapped_column(
+        ForeignKey("refinery_services.id"), index=True, nullable=False
+    )
+    source_ore_lot_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("mined_ore_lots.id"), unique=True
+    )
+    source_inventory_item_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("inventory_items.id"), unique=True
+    )
+    stage: Mapped[str] = mapped_column(String(16), nullable=False)
+    state: Mapped[str] = mapped_column(String(16), index=True, nullable=False)
+    queue_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    quoted_duration_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    quoted_efficiency: Mapped[float] = mapped_column(Float, nullable=False)
+    quoted_fee_credits: Mapped[float] = mapped_column(Float, nullable=False)
+    expected_outputs: Mapped[str] = mapped_column(Text, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completes_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failure_reason: Mapped[str | None] = mapped_column(String(256))
+
+
 class JettisonedItem(TimestampedModel, Base):
     """A public, expiring in-space snapshot of an inventory item stack."""
 

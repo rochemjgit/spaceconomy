@@ -15,9 +15,10 @@ from .db import close_database
 from .fitting_api import router as fitting_router
 from .inventory import router as inventory_router
 from .mining import router as mining_router
+from .refinery_api import router as refinery_router
 from .redis import close_redis
 from .realtime import router as realtime_router
-from .world import run_system_world
+from .world import run_refinery_worker, run_system_world
 
 API_VERSION: Final = "v1"
 
@@ -35,11 +36,13 @@ class HealthResponse(BaseModel):
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     """Release lazy infrastructure clients without making startup depend on a request."""
     world_task = asyncio.create_task(run_system_world())
+    refinery_task = asyncio.create_task(run_refinery_worker())
     try:
         yield
     finally:
         world_task.cancel()
-        await asyncio.gather(world_task, return_exceptions=True)
+        refinery_task.cancel()
+        await asyncio.gather(world_task, refinery_task, return_exceptions=True)
         await close_redis()
         await close_database()
 
@@ -56,6 +59,7 @@ app.include_router(auth_router)
 app.include_router(fitting_router)
 app.include_router(inventory_router)
 app.include_router(mining_router)
+app.include_router(refinery_router)
 app.include_router(realtime_router)
 
 

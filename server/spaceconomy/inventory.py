@@ -23,6 +23,7 @@ from .models import (
     JettisonedItem,
     MinedOreLot,
     ModuleDefinition,
+    RefineryJob,
     Ship,
     ShipState,
 )
@@ -255,7 +256,15 @@ async def _items_for_container(session: AsyncSession, container_id: UUID) -> lis
     return list(
         await session.scalars(
             select(InventoryItem)
-            .where(InventoryItem.container_id == container_id)
+            .where(
+                InventoryItem.container_id == container_id,
+                ~select(RefineryJob.id)
+                .where(
+                    RefineryJob.source_inventory_item_id == InventoryItem.id,
+                    RefineryJob.state.in_(("queued", "processing")),
+                )
+                .exists(),
+            )
             .order_by(InventoryItem.definition_id, InventoryItem.created_at)
         )
     )
@@ -265,7 +274,15 @@ async def _ore_for_container(session: AsyncSession, container_id: UUID) -> list[
     return list(
         await session.scalars(
             select(MinedOreLot)
-            .where(MinedOreLot.container_id == container_id)
+            .where(
+                MinedOreLot.container_id == container_id,
+                ~select(RefineryJob.id)
+                .where(
+                    RefineryJob.source_ore_lot_id == MinedOreLot.id,
+                    RefineryJob.state.in_(("queued", "processing")),
+                )
+                .exists(),
+            )
             .order_by(MinedOreLot.created_at, MinedOreLot.id)
         )
     )
