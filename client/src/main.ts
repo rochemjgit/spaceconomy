@@ -64,6 +64,9 @@ type RefinerySnapshot = {
   jobs: { id: string; stage: string; state: string; queue_sequence: number; quoted_duration_seconds: number; quoted_efficiency: number; quoted_fee_credits: number; expected_outputs: { definition_id: string; definition_version: number; quantity_cubic_meters: number }[]; started_at: string | null; completes_at: string | null }[]
 }
 
+type MarketListing = { id: string; inventory_item_id: string; definition_id: string; quantity: number; unit_price_credits: number; volume_per_unit: number }
+type MarketSnapshot = { wallet_balance_credits: number; listings: MarketListing[]; my_listings: MarketListing[] }
+
 function renderAuthentication() {
   appRoot.innerHTML = `
     <main class="auth-launch" aria-labelledby="auth-title">
@@ -507,7 +510,7 @@ appRoot.innerHTML = `
       <header class="station-services-heading"><div><p class="eyebrow">STATION SERVICES</p><h1>KEPLER STATION</h1></div><button id="exit-services-action" type="button">EXIT SERVICES</button></header>
       <div id="station-service-panel" class="station-service-panel">
         <button id="station-service-back" class="station-service-back" type="button">BACK TO SERVICES</button>
-        <section data-station-panel="market" hidden><p class="eyebrow">MARKET EXCHANGE</p><h2>MARKET</h2><p class="station-service-empty">Buy and sell orders will load from the Kepler market. Purchases and sales settle through your Kepler station inventory.</p></section>
+        <section id="market-panel" class="market-panel" data-station-panel="market" hidden aria-live="polite"></section>
         <section data-station-panel="maintenance" hidden><p class="eyebrow">SHIPYARD SERVICES</p><h2>MAINTENANCE</h2><p class="station-service-empty">Repair prices, fuel, reload supplies, and crafted consumables require an authoritative docked-state snapshot.</p></section>
         <section id="fitting-panel" data-station-panel="fitting" hidden aria-live="polite"></section>
         <section id="refining-panel" class="refining-panel" data-station-panel="refining" style="--refinery-image: url('${refineryUrl}')" hidden aria-live="polite"></section>
@@ -580,6 +583,7 @@ const stationServices = document.querySelector<HTMLElement>('#station-services')
 const undockAction = document.querySelector<HTMLButtonElement>('#undock-action')
 const systemStatus = document.querySelector<HTMLElement>('#system-status')
 const stationServicePanel = document.querySelector<HTMLElement>('#station-service-panel')
+const marketPanel = document.querySelector<HTMLElement>('#market-panel')
 const inventoryPanel = document.querySelector<HTMLElement>('#inventory-panel')
 const stationServiceButtons = document.querySelectorAll<HTMLButtonElement>('[data-station-service]')
 const stationPanels = document.querySelectorAll<HTMLElement>('[data-station-panel]')
@@ -813,6 +817,14 @@ function openShipInventory() {
 }
 
 let dockedInventory: DockedInventory | null = null
+let marketSnapshot: MarketSnapshot | null = null
+let marketTab: 'buy' | 'sell' = 'buy'
+let marketFilter = ''
+let marketSort: 'name' | 'price' = 'name'
+let marketCatalogFilter = ''
+let expandedMarketCatalogs = new Set(['extracted', 'refined'])
+let selectedMarketItemId: string | null = null
+let marketBusy = false
 let shipInventorySnapshot: InventoryContainer | null = null
 let refinerySnapshot: RefinerySnapshot | null = null
 let selectedRefinerySource: { id: string; kind: 'raw_ore' | 'intermediate'; name: string } | null = null
@@ -1025,6 +1037,61 @@ function showInventoryError(message: string) {
   renderActiveInventory()
 }
 
+function marketItemName(definitionId: string) { return definitionId.replace(/^(?:module|material)\./, '').replaceAll('_', ' ') }
+
+function renderMarket() {
+  if (!marketPanel || !marketSnapshot || !dockedInventory) return
+  const listings = marketSnapshot.listings.filter((listing) => marketItemName(listing.definition_id).includes(marketFilter.toLowerCase()) && listing.definition_id.includes(marketCatalogFilter)).sort((left, right) => (marketSort === 'price' ? left.unit_price_credits - right.unit_price_credits : marketItemName(left.definition_id).localeCompare(marketItemName(right.definition_id))))
+  const selected = dockedInventory.station.items.find((item) => item.id === selectedMarketItemId)
+  const rows = listings.map((listing) => `<article class="market-row"><div><strong>${escapeHtml(marketItemName(listing.definition_id))}</strong><small>${listing.quantity} available · ${listing.volume_per_unit.toFixed(2)} m³</small></div><div><strong>${listing.unit_price_credits} CR</strong><input data-market-quantity="${listing.id}" type="number" min="1" max="${listing.quantity}" value="1"><button data-market-buy="${listing.id}" type="button" ${marketBusy ? 'disabled' : ''}>BUY</button></div></article>`).join('') || '<p class="inventory-empty">No listings match this search.</p>'
+  const sources = dockedInventory.station.items.map((item) => `<button class="inventory-item" data-market-item="${item.id}" type="button" draggable="true"><span class="inventory-item-icon">${inventoryIcon(item.definition_id)}</span><span class="inventory-item-name">${escapeHtml(marketItemName(item.definition_id))}</span><span class="inventory-item-quantity">${item.quantity}</span></button>`).join('') || '<p class="inventory-empty">No station items available.</p>'
+  const mine = marketSnapshot.my_listings.map((listing) => `<article class="market-row"><strong>${escapeHtml(marketItemName(listing.definition_id))}</strong><span>${listing.quantity} at ${listing.unit_price_credits} CR</span></article>`).join('') || '<p class="inventory-empty">No active listings.</p>'
+  const expanded = (category: string) => expandedMarketCatalogs.has(category)
+  const treeItem = (label: string, filter: string) => `<li><button data-market-catalog-filter="${filter}" type="button" aria-pressed="${marketCatalogFilter === filter}">${label}</button></li>`
+  const treeBranch = (label: string, category: string, filter: string, children: string) => `<li><button class="market-tree-branch" data-market-catalog-filter="${filter}" data-market-catalog-toggle="${category}" type="button" aria-expanded="${expanded(category)}" aria-pressed="${marketCatalogFilter === filter}"><span>${label}</span><span aria-hidden="true">${expanded(category) ? '−' : '+'}</span></button>${expanded(category) ? `<ul>${children}</ul>` : ''}</li>`
+  const tree = `<ul>${treeItem('RAW ORE', 'ore.raw')}${treeBranch('EXTRACTED ORE', 'extracted', 'material.ore.', `${treeItem('Iron Ore', 'material.ore.iron')}${treeItem('Copper Ore', 'material.ore.copper')}${treeItem('Nickel Ore', 'material.ore.nickel')}${treeItem('Silicate Ore', 'material.ore.silicate')}`)}${treeBranch('REFINED ORE', 'refined', 'material.pure.', `${treeItem('Pure Iron', 'material.pure.iron')}${treeItem('Pure Copper', 'material.pure.copper')}${treeItem('Pure Nickel', 'material.pure.nickel')}${treeItem('Pure Silicate', 'material.pure.silicate')}`)}</ul>`
+  marketPanel.innerHTML = `<header class="market-heading"><div><p class="eyebrow">KEPLER EXCHANGE</p><h1>MARKET</h1></div><div><strong>${marketSnapshot.wallet_balance_credits.toLocaleString()} CR</strong><button id="exit-market" type="button">EXIT MARKET</button></div></header><div class="market-layout"><aside class="market-item-tree" aria-label="Item categories"><p class="eyebrow">ITEM CATALOG</p>${tree}</aside><div class="market-content"><nav class="market-tabs"><button data-market-tab="buy" aria-pressed="${marketTab === 'buy'}" type="button">BUY</button><button data-market-tab="sell" aria-pressed="${marketTab === 'sell'}" type="button">SELL</button></nav>${marketTab === 'buy' ? `<div class="market-tools"><input data-market-filter type="search" value="${escapeHtml(marketFilter)}" placeholder="SEARCH ITEMS"><button data-market-sort type="button">SORT: ${marketSort.toUpperCase()}</button></div><section class="market-list">${rows}</section>` : `<div class="market-sell-layout"><section class="inventory-items">${sources}</section><section class="market-listing-tray" data-market-drop>${selected ? `<strong>${escapeHtml(marketItemName(selected.definition_id))}</strong><label>QUANTITY <input id="market-list-quantity" type="number" min="1" max="${selected.quantity}" value="${selected.quantity}"></label><label>PRICE / UNIT <input id="market-list-price" type="number" min="1" value="100"></label><button id="market-list" type="button">LIST FOR SALE</button>` : '<p>Drag a station item here to list it.</p>'}</section></div><section class="market-list">${mine}</section>`}</div></div>`
+  marketPanel.querySelectorAll<HTMLButtonElement>('[data-market-tab]').forEach((button) => button.addEventListener('click', () => { marketTab = button.dataset.marketTab as 'buy' | 'sell'; renderMarket() }))
+  marketPanel.querySelector<HTMLInputElement>('[data-market-filter]')?.addEventListener('input', (event) => { marketFilter = (event.target as HTMLInputElement).value; marketCatalogFilter = ''; renderMarket() })
+  marketPanel.querySelector<HTMLButtonElement>('[data-market-sort]')?.addEventListener('click', () => { marketSort = marketSort === 'name' ? 'price' : 'name'; renderMarket() })
+  marketPanel.querySelectorAll<HTMLButtonElement>('[data-market-catalog-filter]').forEach((button) => button.addEventListener('click', () => {
+    const category = button.dataset.marketCatalogToggle
+    if (category) expandedMarketCatalogs.has(category) ? expandedMarketCatalogs.delete(category) : expandedMarketCatalogs.add(category)
+    marketCatalogFilter = button.dataset.marketCatalogFilter ?? ''
+    marketFilter = ''
+    renderMarket()
+  }))
+  marketPanel.querySelectorAll<HTMLButtonElement>('[data-market-buy]').forEach((button) => button.addEventListener('click', () => void mutateMarket(`/listings/${button.dataset.marketBuy}/buy`, { quantity: Number(marketPanel.querySelector<HTMLInputElement>(`[data-market-quantity="${button.dataset.marketBuy}"]`)?.value) })))
+  marketPanel.querySelectorAll<HTMLButtonElement>('[data-market-item]').forEach((button) => { button.addEventListener('click', () => { selectedMarketItemId = button.dataset.marketItem!; renderMarket() }); button.addEventListener('dragstart', (event) => event.dataTransfer?.setData('application/x-spaceconomy-market-item', button.dataset.marketItem!)) })
+  const tray = marketPanel.querySelector<HTMLElement>('[data-market-drop]')
+  tray?.addEventListener('dragover', (event) => event.preventDefault())
+  tray?.addEventListener('drop', (event) => { event.preventDefault(); selectedMarketItemId = event.dataTransfer?.getData('application/x-spaceconomy-market-item') || null; renderMarket() })
+  marketPanel.querySelector<HTMLButtonElement>('#exit-market')?.addEventListener('click', closeStationServices)
+}
+
+async function loadDockedMarket() {
+  if (!marketPanel) return
+  marketPanel.innerHTML = '<p class="station-service-empty">Loading market...</p>'
+  const [marketResponse, inventoryResponse] = await Promise.all([fetch(`${apiBaseUrl}/market/docked`, { headers: { authorization: `Bearer ${pilotAccessToken}` } }), fetch(`${apiBaseUrl}/inventory/docked`, { headers: { authorization: `Bearer ${pilotAccessToken}` } })])
+  if (!marketResponse.ok || !inventoryResponse.ok) throw new Error('Unable to load market.')
+  marketSnapshot = await marketResponse.json() as MarketSnapshot
+  dockedInventory = await inventoryResponse.json() as DockedInventory
+  renderMarket()
+}
+
+async function mutateMarket(endpoint: string, body: object) {
+  if (marketBusy) return
+  marketBusy = true
+  try {
+    const response = await fetch(`${apiBaseUrl}/market${endpoint}`, { method: 'POST', headers: { authorization: `Bearer ${pilotAccessToken}`, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    if (!response.ok) throw new Error(await response.text())
+    const payload = await response.json() as MarketSnapshot & { inventory: InventorySnapshot }
+    marketSnapshot = payload
+    applyInventorySnapshot(payload.inventory)
+    selectedMarketItemId = null
+  } finally { marketBusy = false; renderMarket() }
+}
+
 function refineryOutputLabel(definitionId: string) {
   return definitionId.replace(/^material\.(?:ore|pure)\./, '').replaceAll('_', ' ')
 }
@@ -1062,6 +1129,7 @@ function startRefineryClock() {
 
 function renderRefinery() {
   if (!refiningPanel || !refinerySnapshot || !dockedInventory) return
+  const materialTree = '<style>.refinery-content { grid-column: 1 / -1; }</style>'
   const sources = [
     ...dockedInventory.station.raw_ore_lots.map((lot) => ({ id: lot.id, kind: 'raw_ore' as const, definitionId: 'ore.raw', name: `${lot.composition} raw ore`, volume: lot.volume_cubic_meters, outputs: lot.mineral_assay.map((mineral) => ({ definition_id: `material.ore.${mineral.definition_id}`, quantity_cubic_meters: Math.floor(lot.volume_cubic_meters * mineral.percentage / 100 * refinerySnapshot!.service.first_pass_efficiency) })) })),
     ...dockedInventory.station.items.filter((item) => item.definition_id.startsWith('material.ore.')).map((item) => ({ id: item.id, kind: 'intermediate' as const, definitionId: item.definition_id, name: refineryOutputLabel(item.definition_id), volume: item.quantity, outputs: [{ definition_id: item.definition_id.replace('material.ore.', 'material.pure.'), quantity_cubic_meters: Math.floor(item.quantity * refinerySnapshot!.service.second_pass_efficiency) }] })),
@@ -1073,7 +1141,7 @@ function renderRefinery() {
   const activeJobs = refinerySnapshot.jobs.filter((job) => job.state === 'queued' || job.state === 'processing')
   const currentJobs = activeJobs.filter((job) => job.state === 'processing').map((job) => `<li class="refinery-job is-processing"><div><strong>PROCESSING</strong><span>${job.stage === 'crush' ? 'ORE SEPARATION' : 'PURIFICATION'}</span></div><time data-refinery-completes-at="${job.completes_at ?? ''}">${refineryCountdown(job.completes_at)}</time></li>`).join('') || '<li class="refinery-job-empty">No job is processing.</li>'
   const queuedJobs = activeJobs.filter((job) => job.state === 'queued').map((job, index) => `<li class="refinery-job"><div><strong>QUEUED ${index + 1}</strong><span>${job.stage === 'crush' ? 'ORE SEPARATION' : 'PURIFICATION'}</span></div><time>${job.quoted_duration_seconds.toFixed(0)} SECONDS</time></li>`).join('') || '<li class="refinery-job-empty">No queued jobs.</li>'
-  refiningPanel.innerHTML = `<header class="refinery-heading"><div><p class="eyebrow">${escapeHtml(refinerySnapshot.service.display_name)}</p><h1>REFINING</h1></div><div><p class="refinery-capacity">${activeJobs.length} / ${refinerySnapshot.service.queue_capacity} JOBS</p><button id="exit-refinery" class="exit-refinery" type="button">EXIT REFINERY</button></div></header><section class="inventory-container refinery-inventory${refineryInventoryExpanded ? '' : ' is-collapsed'}" data-refinery-storage><header class="inventory-container-heading"><div><p class="eyebrow">PERSONAL STORAGE</p><h3>STATION INVENTORY</h3></div><button id="toggle-refinery-inventory" class="refinery-inventory-toggle" type="button" aria-expanded="${refineryInventoryExpanded}" aria-label="${refineryInventoryExpanded ? 'Collapse station inventory' : 'Expand station inventory'}" title="${refineryInventoryExpanded ? 'Collapse station inventory' : 'Expand station inventory'}">${refineryInventoryExpanded ? '⌃' : '⌄'}</button></header>${refineryInventoryExpanded ? `<div class="inventory-items refinery-inputs">${sourceTiles}</div>` : ''}</section><div class="refinery-stages"><section class="refinery-stage"><header><p class="eyebrow">01</p><h2>INPUT</h2></header><div class="refinery-input-tray" data-refinery-input>${inputTray}</div></section><section class="refinery-stage refinery-execution"><header><p class="eyebrow">02</p><h2>CONFIGURATION &amp; EXECUTION</h2></header><p class="refinery-quote">${selected ? `${selected.volume.toFixed(3)} seconds · ${selected.kind === 'raw_ore' ? refinerySnapshot.service.first_pass_efficiency : refinerySnapshot.service.second_pass_efficiency} yield · ${refinerySnapshot.service.fee_credits.toFixed(0)} credits` : 'Load an input to configure a refinery job.'}</p><button id="queue-refinery-job" type="button" ${selected ? '' : 'disabled'}>START REFINING</button></section><section class="refinery-stage"><header><p class="eyebrow">03</p><h2>OUTPUT</h2></header><div class="refinery-output-tray">${preview}</div></section></div><section class="refinery-current-jobs"><header><div><p class="eyebrow">REFINERY ACTIVITY</p><h2>CURRENT JOBS</h2></div></header><div class="refinery-job-columns"><section><p class="eyebrow">PROCESSING</p><ol>${currentJobs}</ol></section><section><p class="eyebrow">QUEUED</p><ol>${queuedJobs}</ol></section></div></section>`
+  refiningPanel.innerHTML = `<div class="refinery-layout">${materialTree}<div class="refinery-content"><header class="refinery-heading"><div><p class="eyebrow">${escapeHtml(refinerySnapshot.service.display_name)}</p><h1>REFINING</h1></div><div><p class="refinery-capacity">${activeJobs.length} / ${refinerySnapshot.service.queue_capacity} JOBS</p><button id="exit-refinery" class="exit-refinery" type="button">EXIT REFINERY</button></div></header><section class="inventory-container refinery-inventory${refineryInventoryExpanded ? '' : ' is-collapsed'}" data-refinery-storage><header class="inventory-container-heading"><div><p class="eyebrow">PERSONAL STORAGE</p><h3>STATION INVENTORY</h3></div><button id="toggle-refinery-inventory" class="refinery-inventory-toggle" type="button" aria-expanded="${refineryInventoryExpanded}" aria-label="${refineryInventoryExpanded ? 'Collapse station inventory' : 'Expand station inventory'}" title="${refineryInventoryExpanded ? 'Collapse station inventory' : 'Expand station inventory'}">${refineryInventoryExpanded ? '⌃' : '⌄'}</button></header>${refineryInventoryExpanded ? `<div class="inventory-items refinery-inputs">${sourceTiles}</div>` : ''}</section><div class="refinery-stages"><section class="refinery-stage"><header><p class="eyebrow">01</p><h2>INPUT</h2></header><div class="refinery-input-tray" data-refinery-input>${inputTray}</div></section><section class="refinery-stage refinery-execution"><header><p class="eyebrow">02</p><h2>CONFIGURATION &amp; EXECUTION</h2></header><p class="refinery-quote">${selected ? `${selected.volume.toFixed(3)} seconds · ${selected.kind === 'raw_ore' ? refinerySnapshot.service.first_pass_efficiency : refinerySnapshot.service.second_pass_efficiency} yield · ${refinerySnapshot.service.fee_credits.toFixed(0)} credits` : 'Load an input to configure a refinery job.'}</p><button id="queue-refinery-job" type="button" ${selected ? '' : 'disabled'}>START REFINING</button></section><section class="refinery-stage"><header><p class="eyebrow">03</p><h2>OUTPUT</h2></header><div class="refinery-output-tray">${preview}</div></section></div><section class="refinery-current-jobs"><header><div><p class="eyebrow">REFINERY ACTIVITY</p><h2>CURRENT JOBS</h2></div></header><div class="refinery-job-columns"><section><p class="eyebrow">PROCESSING</p><ol>${currentJobs}</ol></section><section><p class="eyebrow">QUEUED</p><ol>${queuedJobs}</ol></section></div></section></div></div>`
   refiningPanel.querySelectorAll<HTMLButtonElement>('[data-refinery-source]').forEach((button) => {
     button.addEventListener('dragstart', (event) => {
       event.dataTransfer?.setData('application/x-spaceconomy-refinery-source', JSON.stringify({ id: button.dataset.refinerySource, kind: button.dataset.refineryKind === 'raw_ore' ? 'ore' : 'item', containerId: dockedInventory?.station.id }))
@@ -1894,7 +1962,7 @@ if (savedShipState.docked_station_name) {
 function closeStationServices() {
   invalidateInventoryView()
   stopRefineryClock()
-  document.querySelector('.game-shell')?.classList.remove('is-refining')
+  document.querySelector('.game-shell')?.classList.remove('is-refining', 'is-market')
   stationServices?.setAttribute('hidden', '')
 }
 
@@ -1904,6 +1972,7 @@ function openStationServices(selectedService: string) {
   stationServices?.removeAttribute('hidden')
   stationServicePanel?.removeAttribute('hidden')
   document.querySelector('.game-shell')?.classList.toggle('is-refining', selectedService === 'refining')
+    document.querySelector('.game-shell')?.classList.toggle('is-market', selectedService === 'market')
   stationPanels.forEach((panel) => {
     panel.hidden = panel.dataset.stationPanel !== selectedService
   })
@@ -1995,6 +2064,7 @@ stationServiceButtons.forEach((button) => {
     if (!selectedService) return
     openStationServices(selectedService)
     if (selectedService === 'inventory') void loadDockedInventory()
+    if (selectedService === 'market') void loadDockedMarket().catch((error: unknown) => { if (marketPanel) marketPanel.innerHTML = '<p class="station-service-empty">Unable to load the Kepler market.</p>'; console.error(error) })
     if (selectedService === 'refining') void loadDockedRefinery().catch((error: unknown) => {
       if (refiningPanel) refiningPanel.innerHTML = '<p class="station-service-empty">Unable to load the Kepler refinery.</p>'
       console.error(error)

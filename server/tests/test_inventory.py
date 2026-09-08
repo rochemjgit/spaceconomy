@@ -21,7 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.schema import CreateSchema, DropSchema
 
-from spaceconomy import auth, inventory, mining, world
+from spaceconomy import auth, inventory, market, mining, world
 from spaceconomy.db import Base, get_session
 from spaceconomy.models import (
     Account,
@@ -37,6 +37,7 @@ from spaceconomy.models import (
     PilotDiscovery,
     ShipState,
     SolarSystem,
+    WalletTransaction,
 )
 
 ASSAY = '[{"definition_id":"iron","version":2,"percentage":100}]'
@@ -246,6 +247,7 @@ async def game(inventory_engine):
         )
     app = FastAPI()
     app.include_router(inventory.router)
+    app.include_router(market.router)
     app.include_router(mining.router)
     app.include_router(auth.router)
 
@@ -819,6 +821,43 @@ async def test_mining_capacity_counts_items_and_ore_not_station(game):
     assert response.status_code == 409
     ship = await game.client.get(PREFIX + "/ship")
     assert ship.json()["used_volume_cubic_meters"] == 23.75
+
+
+async def test_market_listing_reserves_inventory_and_settles_wallets(game):
+    item_id = await game.item(
+        game.station, quantity=3, volume=1, definition="material.ore.iron"
+    )
+    listing = await game.client.post(
+        "/api/v1/market/listings",
+        json={"inventory_item_id": str(item_id), "quantity": 2, "unit_price_credits": 50},
+    )
+    assert listing.status_code == 200
+    listing_id = listing.json()["my_listings"][0]["id"]
+    inventory_snapshot = listing.json()["inventory"]
+    assert {item["quantity"] for item in inventory_snapshot["station"]["items"] if item["definition_id"] == "material.ore.iron"} == {1}
+
+    buyer_id = uuid4()
+    async with game.sessions.begin() as session:
+        session.add(Pilot(id=buyer_id, account_id=game.account, display_name="Market Buyer"))
+        session.add(ShipState(pilot_id=buyer_id, docked_station_name="KEPLER STATION", **POSITION))
+    game.client.headers["Authorization"] = f"Bearer {auth._access_token(game.account, buyer_id)}"
+    purchase = await game.client.post(
+        f"/api/v1/market/listings/{listing_id}/buy", json={"quantity": 1}
+    )
+    assert purchase.status_code == 200
+    assert purchase.json()["wallet_balance_credits"] == 9_950
+    assert any(
+        item["definition_id"] == "material.ore.iron"
+        and item["quantity"] == 1
+        for item in purchase.json()["inventory"]["station"]["items"]
+    )
+    assert purchase.json()["listings"][0]["quantity"] == 1
+
+    game.client.headers["Authorization"] = f"Bearer {auth._access_token(game.account, game.pilot)}"
+    seller_market = await game.client.get("/api/v1/market/docked")
+    assert seller_market.json()["wallet_balance_credits"] == 10_050
+    async with game.sessions() as session:
+        assert len(list(await session.scalars(select(WalletTransaction)))) == 2
 
 
 async def test_replenish_preserves_public_ore_source_and_prunes_unreferenced(game, monkeypatch):

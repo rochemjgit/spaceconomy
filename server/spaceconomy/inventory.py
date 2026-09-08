@@ -21,6 +21,7 @@ from .models import (
     InventoryContainer,
     InventoryItem,
     JettisonedItem,
+    MarketListing,
     MinedOreLot,
     ModuleDefinition,
     RefineryJob,
@@ -262,6 +263,12 @@ async def _items_for_container(session: AsyncSession, container_id: UUID) -> lis
                 .where(
                     RefineryJob.source_inventory_item_id == InventoryItem.id,
                     RefineryJob.state.in_(("queued", "processing")),
+                )
+                .exists(),
+                ~select(MarketListing.id)
+                .where(
+                    MarketListing.inventory_item_id == InventoryItem.id,
+                    MarketListing.state == "active",
                 )
                 .exists(),
             )

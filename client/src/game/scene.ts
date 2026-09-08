@@ -866,6 +866,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   }
   const clearTargetSelection = () => {
     if (targetedAsteroid && lockingTarget?.asteroid === targetedAsteroid) unlockTarget(targetedAsteroid)
+    if (activeModules.has('Mining Laser')) setModuleActive('Mining Laser', false)
     clearTarget()
     reportTargetLock()
   }

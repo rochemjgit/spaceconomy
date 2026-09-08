@@ -6,6 +6,7 @@ from datetime import datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -81,6 +82,36 @@ class Pilot(TimestampedModel, Base):
     account_id: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), index=True, nullable=False)
     display_name: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
     home_station_id: Mapped[UUID | None] = mapped_column(Uuid)
+
+
+class PilotWallet(TimestampedModel, Base):
+    """A pilot's spendable market credits."""
+
+    __tablename__ = "pilot_wallets"
+    __table_args__ = (CheckConstraint("balance_credits >= 0", name="wallet_balance_valid"),)
+
+    pilot_id: Mapped[UUID] = mapped_column(ForeignKey("pilots.id"), primary_key=True)
+    balance_credits: Mapped[int] = mapped_column(BigInteger, nullable=False, default=10_000)
+
+
+class WalletTransaction(TimestampedModel, Base):
+    """An immutable credit movement created when a market trade settles."""
+
+    __tablename__ = "wallet_transactions"
+    __table_args__ = (
+        CheckConstraint("amount_credits <> 0", name="wallet_transaction_amount_valid"),
+        CheckConstraint(
+            "transaction_kind IN ('market_purchase', 'market_sale')",
+            name="wallet_transaction_kind_valid",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    pilot_id: Mapped[UUID] = mapped_column(ForeignKey("pilots.id"), index=True, nullable=False)
+    counterparty_pilot_id: Mapped[UUID] = mapped_column(ForeignKey("pilots.id"), nullable=False)
+    amount_credits: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    transaction_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    market_listing_id: Mapped[UUID] = mapped_column(Uuid, index=True, nullable=False)
 
 
 class HullDefinition(TimestampedModel, Base):
@@ -208,7 +239,9 @@ class AsteroidField(TimestampedModel, Base):
     __table_args__ = (UniqueConstraint("system_id", "field_key"),)
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
-    system_id: Mapped[UUID] = mapped_column(ForeignKey("solar_systems.id"), index=True, nullable=False)
+    system_id: Mapped[UUID] = mapped_column(
+        ForeignKey("solar_systems.id"), index=True, nullable=False
+    )
     field_key: Mapped[str] = mapped_column(String(64), nullable=False)
     display_name: Mapped[str] = mapped_column(String(128), nullable=False)
     position_x: Mapped[float] = mapped_column(Float, nullable=False)
@@ -449,6 +482,31 @@ class InventoryItem(TimestampedModel, Base):
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     durability: Mapped[float] = mapped_column(Float, nullable=False)
     volume_per_unit: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class MarketListing(TimestampedModel, Base):
+    """A station-held inventory stack offered for sale by its owning pilot."""
+
+    __tablename__ = "market_listings"
+    __table_args__ = (
+        CheckConstraint("quantity > 0", name="market_listing_quantity_valid"),
+        CheckConstraint("unit_price_credits > 0", name="market_listing_price_valid"),
+        CheckConstraint(
+            "state IN ('active', 'sold', 'cancelled')", name="market_listing_state_valid"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    station_id: Mapped[UUID] = mapped_column(Uuid, index=True, nullable=False)
+    seller_pilot_id: Mapped[UUID] = mapped_column(
+        ForeignKey("pilots.id"), index=True, nullable=False
+    )
+    inventory_item_id: Mapped[UUID] = mapped_column(
+        ForeignKey("inventory_items.id"), unique=True, nullable=False
+    )
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    unit_price_credits: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
 
 
 class FittedModule(TimestampedModel, Base):

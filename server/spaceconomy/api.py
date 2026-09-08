@@ -1,7 +1,7 @@
 """FastAPI application entrypoint for HTTP and realtime endpoints."""
 
-from collections.abc import AsyncIterator
 import asyncio
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Final
 
@@ -14,10 +14,11 @@ from .config import settings
 from .db import close_database
 from .fitting_api import router as fitting_router
 from .inventory import router as inventory_router
+from .market import router as market_router
 from .mining import router as mining_router
-from .refinery_api import router as refinery_router
-from .redis import close_redis
 from .realtime import router as realtime_router
+from .redis import close_redis
+from .refinery_api import router as refinery_router
 from .world import run_refinery_worker, run_system_world
 
 API_VERSION: Final = "v1"
@@ -58,6 +59,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(fitting_router)
 app.include_router(inventory_router)
+app.include_router(market_router)
 app.include_router(mining_router)
 app.include_router(refinery_router)
 app.include_router(realtime_router)
