@@ -49,12 +49,17 @@ type DockedInventory = {
   station: InventoryContainer
 }
 
+type DockedEntityList = {
+  station_name: string
+  entities: { pilot_id: string; display_name: string; entity_type: string }[]
+}
+
 type FittingSnapshot = {
   ship_id: string
   hull_definition_id: string
   universal_hardpoint_count: number
   core_system_slot_count: number
-  fitted_modules: { item_id: string; definition_id: string; display_name: string; family: string; slot_location: string; slot_index: number; durability: number; mass_kg: number }[]
+  fitted_modules: { item_id: string; definition_id: string; display_name: string; family: string; slot_location: string; slot_index: number; durability: number; mass_kg: number; effective_range_meters: number }[]
   statistics: Record<string, number>
 }
 
@@ -64,8 +69,11 @@ type RefinerySnapshot = {
   jobs: { id: string; stage: string; state: string; queue_sequence: number; quoted_duration_seconds: number; quoted_efficiency: number; quoted_fee_credits: number; expected_outputs: { definition_id: string; definition_version: number; quantity_cubic_meters: number }[]; started_at: string | null; completes_at: string | null }[]
 }
 
-type MarketListing = { id: string; inventory_item_id: string; definition_id: string; quantity: number; unit_price_credits: number; volume_per_unit: number }
-type MarketSnapshot = { wallet_balance_credits: number; listings: MarketListing[]; my_listings: MarketListing[] }
+type MarketListing = { id: string; seller_display_name: string; inventory_item_id: string; definition_id: string; quantity: number; unit_price_credits: number; volume_per_unit: number; duration_days: number; listing_fee_credits: number; expires_at: string }
+type MarketBuyOrder = { id: string; buyer_display_name: string; definition_id: string; definition_version: number; quantity: number; unit_price_credits: number; duration_days: number; listing_fee_credits: number; expires_at: string }
+type MarketSnapshot = { wallet_balance_credits: number; listings: MarketListing[]; my_listings: MarketListing[]; buy_orders?: MarketBuyOrder[]; my_buy_orders?: MarketBuyOrder[] }
+type PilotSummary = { id: string; display_name: string; balance_credits: number }
+type WalletSnapshot = { wallet_balance_credits: number }
 
 function renderAuthentication() {
   appRoot.innerHTML = `
@@ -118,7 +126,7 @@ function renderAuthentication() {
         const payload = await response.json() as {
           access_token?: string
           detail?: string
-          pilots?: { id: string; display_name: string }[]
+          pilots?: PilotSummary[]
           refresh_token?: string
         }
         if (!response.ok || !payload.access_token || !payload.refresh_token || !payload.pilots) {
@@ -282,11 +290,11 @@ function renderPilotCreation(accountAccessToken: string) {
           },
           body: JSON.stringify({ display_name: name.value }),
         })
-        const payload = await response.json() as { id?: string; display_name?: string; detail?: string }
-        if (!response.ok || !payload.id || !payload.display_name) {
+        const payload = await response.json() as Partial<PilotSummary> & { detail?: string }
+        if (!response.ok || !payload.id || !payload.display_name || payload.balance_credits === undefined) {
           throw new Error(payload.detail ?? 'Unable to create this pilot.')
         }
-        renderPilotSelection(accountAccessToken, [{ id: payload.id, display_name: payload.display_name }])
+        renderPilotSelection(accountAccessToken, [{ id: payload.id, display_name: payload.display_name, balance_credits: payload.balance_credits }])
       } catch (reason) {
         submit.disabled = false
         if (error) {
@@ -301,7 +309,7 @@ function renderPilotCreation(accountAccessToken: string) {
 
 function renderPilotSelection(
   accountAccessToken: string,
-  pilots: { id: string; display_name: string }[],
+  pilots: PilotSummary[],
 ) {
   let selectedPilot = pilots[0]
   if (!selectedPilot) {
@@ -330,6 +338,7 @@ function renderPilotSelection(
               <div><dt>SHIELD CAPACITY</dt><dd>100 / 100</dd></div>
               <div><dt>FUEL RESERVE</dt><dd>80.00 L</dd></div>
               <div><dt>CARGO CAPACITY</dt><dd>0.00 / 24.00 M3</dd></div>
+              <div><dt>WALLET BALANCE</dt><dd id="loading-pilot-wallet">${selectedPilot.balance_credits.toLocaleString()} CR</dd></div>
               <div><dt>LOCATION</dt><dd>KEPLER STATION</dd></div>
             </dl>
           </section>
@@ -345,12 +354,14 @@ function renderPilotSelection(
   const error = document.querySelector<HTMLElement>('#pilot-select-error')
   const launch = document.querySelector<HTMLButtonElement>('#pilot-select-launch')
   const name = document.querySelector<HTMLElement>('#loading-pilot-name')
+  const wallet = document.querySelector<HTMLElement>('#loading-pilot-wallet')
   document.querySelectorAll<HTMLButtonElement>('[data-pilot-id]').forEach((button) => {
     button.addEventListener('click', () => {
       const pilot = pilots.find((candidate) => candidate.id === button.dataset.pilotId)
       if (!pilot) return
       selectedPilot = pilot
       if (name) name.textContent = selectedPilot.display_name
+      if (wallet) wallet.textContent = `${selectedPilot.balance_credits.toLocaleString()} CR`
       document.querySelectorAll<HTMLButtonElement>('[data-pilot-id]').forEach((candidate) => {
         candidate.classList.toggle('is-selected', candidate === button)
       })
@@ -400,7 +411,7 @@ function launchGame(
   pilotAccessToken: string,
   savedShipState: SavedShipState,
   accountAccessToken: string,
-  pilots: { id: string; display_name: string }[],
+  pilots: PilotSummary[],
   selectedPilotId: string,
 ) {
 let lastRealtimeUpdateAt = 0
@@ -418,14 +429,14 @@ appRoot.innerHTML = `
   <main class="game-shell">
     <canvas id="game-canvas" aria-label="Spaceconomy game world"></canvas>
     <div id="station-backdrop" class="station-backdrop" style="--station-scene-image: url('${stationInteriorUrl}')" hidden aria-hidden="true"></div>
-    <section id="station-hotspots" class="station-hotspots" aria-label="Kepler Station services" hidden>
-      <button class="station-service-button hotspot-market" type="button" data-station-service="market"><strong>MARKET</strong><span>BUY / SELL</span></button>
-      <button class="station-service-button hotspot-maintenance" type="button" data-station-service="maintenance"><strong>MAINTENANCE</strong><span>REPAIR / RELOAD</span></button>
-      <button class="station-service-button hotspot-fitting" type="button" data-station-service="fitting"><strong>FITTING</strong><span>MODULE SYSTEMS</span></button>
-      <button class="station-service-button hotspot-refining" type="button" data-station-service="refining"><strong>REFINING</strong><span>ORE PROCESSING</span></button>
-      <button class="station-service-button hotspot-crafting" type="button" data-station-service="crafting"><strong>CRAFTING</strong><span>WORKSTATIONS</span></button>
-      <button class="station-service-button hotspot-inventory" type="button" data-station-service="inventory"><strong>INVENTORY</strong><span>SHIP / STATION</span></button>
-      <button class="station-service-button hotspot-hangar" type="button" data-station-service="hangar"><strong>HANGAR</strong><span>STORED SHIPS</span></button>
+    <section id="station-hotspots" class="station-service-strip" aria-label="Kepler Station services" hidden>
+      <button class="station-service-button service-market" type="button" data-station-service="market" aria-label="Market" data-tooltip="Market: buy and sell station goods"><span aria-hidden="true">&#x25C6;</span></button>
+      <button class="station-service-button service-maintenance" type="button" data-station-service="maintenance" aria-label="Maintenance" data-tooltip="Maintenance: repair and resupply your ship"><span aria-hidden="true">&#x2699;</span></button>
+      <button class="station-service-button service-fitting" type="button" data-station-service="fitting" aria-label="Fitting" data-tooltip="Fitting: install and manage ship modules"><span aria-hidden="true">&#x229E;</span></button>
+      <button class="station-service-button service-refining" type="button" data-station-service="refining" aria-label="Refining" data-tooltip="Refining: process raw ore into minerals"><span aria-hidden="true">&#x25C9;</span></button>
+      <button class="station-service-button service-crafting" type="button" data-station-service="crafting" aria-label="Crafting" data-tooltip="Crafting: access manufacturing workstations"><span aria-hidden="true">&#x2692;</span></button>
+      <button class="station-service-button service-inventory" type="button" data-station-service="inventory" aria-label="Inventory" data-tooltip="Inventory: transfer cargo and station storage"><span aria-hidden="true">&#x25A4;</span></button>
+      <button class="station-service-button service-hangar" type="button" data-station-service="hangar" aria-label="Hangar" data-tooltip="Hangar: view ships stored at Kepler"><span aria-hidden="true">&#x2302;</span></button>
     </section>
     <div class="ship-reticle" aria-hidden="true"></div>
     <header class="topbar">
@@ -442,7 +453,12 @@ appRoot.innerHTML = `
         <div class="brand"><span class="brand-mark">◈</span> SPACECONOMY</div>
       </div>
       <div id="system-status" class="status"><span class="status-dot"></span> LOCAL SYSTEM · PROTOTYPE</div>
+      <nav class="topbar-actions" aria-label="Major functions">
+        <button id="topbar-map" type="button" title="Open system map">MAP</button>
+        <button id="topbar-wallet" type="button" title="View wallet">WALLET</button>
+      </nav>
     </header>
+    <p id="game-toast" class="game-toast" role="status" aria-live="polite" hidden></p>
     <section class="module-rack" aria-label="Ship hardpoints">
       <p class="eyebrow">HARDPOINTS</p>
       <div class="module-slots" style="--hardpoint-count: ${starterHardpoints.length}">
@@ -451,7 +467,7 @@ appRoot.innerHTML = `
       <div class="core-systems" aria-label="Installed core systems">
         <p class="eyebrow">CORE SYSTEMS</p>
         <div class="core-system-icons">
-          <button class="core-system-icon" type="button" aria-label="Warp Drive: Class I core with 100 warp capacity, 2 capacity per second recharge, 10 kilometer per second maximum speed, and a calculated 450 kilometer range." data-core-system="warp" data-tooltip="ALT+1 WARP DRIVE: Start or exit free-flight warp."><span aria-hidden="true">WD</span></button>
+          <button class="core-system-icon" type="button" aria-label="Warp Drive: Class I core with 100 warp capacity, 2 capacity per second recharge, 10 kilometer per second maximum speed, a calculated 450 kilometer range, and a 30 second manual activation cooldown." data-core-system="warp" data-tooltip="ALT+1 WARP DRIVE: Warp along your heading. Press again to exit. 30 second cooldown."><span aria-hidden="true">WD</span></button>
           <button class="core-system-icon" type="button" aria-label="Sensors: active spherical scan for nearby asteroid fields." data-core-system="sensors" data-tooltip="ALT+2 SENSORS: Scan all directions for asteroid fields. Uses capacitor power."><span aria-hidden="true">SN</span></button>
           <button class="core-system-icon" type="button" aria-label="Reactor: Compact Fission Plant. Output 120 megawatts with 76 percent heat tolerance." data-tooltip="REACTOR: Compact Fission Plant. 120 MW output, 76% heat tolerance."><span aria-hidden="true">RP</span></button>
           <button class="core-system-icon" type="button" aria-label="Shield Generator: capacity 100, recharge 6 per second." data-tooltip="SHIELD GENERATOR: Capacity 100, recharge 6.0/s."><span aria-hidden="true">SG</span></button>
@@ -482,30 +498,37 @@ appRoot.innerHTML = `
         <span id="map-primary-star" class="map-poi map-star" title="Primary Star"></span>
         <span id="map-starter-world" class="map-poi map-planet" title="Starter World"></span>
         <span id="map-kepler-station" class="map-poi map-station" title="Kepler Station"></span>
-        <span id="map-asterion-belt" class="map-poi map-asteroid-belt" title="Asterion Belt - 240.0 km beyond Starter World" hidden></span>
-        <span id="map-vesper-belt" class="map-poi map-asteroid-belt map-vesper-belt" title="Vesper Belt - remote cold-rock field" hidden></span>
-        <span id="map-nadir-belt" class="map-poi map-asteroid-belt map-nadir-belt" title="Nadir Belt - outer trailing field" hidden></span>
         <span id="player-map-marker" class="player-map-marker" title="Your ship"></span>
       </div>
-      <div class="map-legend"><span class="legend-star">STAR</span><span class="legend-planet">WORLD</span><span class="legend-station">STATION</span><span class="legend-belt">BELT</span><span class="legend-player">YOU</span></div>
+      <div class="map-legend"><span class="legend-star">STAR</span><span class="legend-planet">WORLD</span><span class="legend-station">STATION</span><span class="legend-player">YOU</span></div>
     </section>
     <section id="target-window" class="target-window" aria-label="Selected target" hidden>
-      <div class="target-window-heading"><p id="target-lock-label" class="eyebrow">TARGET LOCK</p><button id="clear-target" type="button" aria-label="Unlock target">×</button></div>
+      <div class="target-window-heading"><p id="target-lock-label" class="eyebrow">TARGET LOCK</p><div id="target-active-modules" class="target-active-modules" aria-label="Active modules on target"></div><button id="clear-target" type="button" aria-label="Unlock target">×</button></div>
       <div id="target-thumbnail" class="target-thumbnail" aria-hidden="true"><span></span></div><div><p id="target-name" class="target-name"></p><p id="target-range" class="target-range"></p><button id="pickup-jettisoned-item" type="button" hidden>COLLECT CARGO</button></div></div>
+      <div class="target-actions"><button id="approach-target" type="button">APPROACH</button><button id="view-target-details" type="button">DETAILS</button></div>
       <p id="cargo-pickup-feedback" class="inventory-feedback" role="status"></p>
       <span id="target-lock-progress" class="target-lock-progress"><span></span></span>
+    </section>
+    <dialog id="target-details" class="target-details-dialog" aria-labelledby="target-details-title"><header><div><p class="eyebrow">TARGET INTEL</p><h2 id="target-details-title"></h2></div><button id="close-target-details" type="button" aria-label="Close target details">×</button></header><dl id="target-details-content"></dl></dialog>
+    <section id="target-list" class="target-list" aria-label="Nearby targets">
+      <div class="target-list-heading"><p class="eyebrow">TARGETS</p></div>
+      <div class="target-list-filters" role="group" aria-label="Target filters"><button type="button" data-target-filter="all" aria-pressed="true">ALL</button><button type="button" data-target-filter="asteroid" aria-pressed="false">ORES</button><button type="button" data-target-filter="player" aria-pressed="false">SHIPS</button></div>
+      <div id="target-list-items" class="target-list-items"></div>
     </section>
     <section id="available-actions" class="available-actions" aria-label="Available actions" hidden>
       <p class="eyebrow">AVAILABLE ACTIONS</p>
       <button id="dock-action" type="button">DOCK AT KEPLER STATION</button>
     </section>
-    <section id="docked-status" class="docked-status" aria-label="Station status" hidden>
-      <p class="eyebrow">KEPLER STATION</p>
-      <p>DOCKING BAY 04</p>
-      <p class="docked-terminal-hint">SELECT A MARKED STATION SERVICE</p>
+    <section id="docked-status" class="docked-controls" aria-label="Docked controls" hidden>
+      <div class="docked-utility-actions" aria-label="Station information">
+        <button id="docked-entities-action" class="docked-icon-button docked-entities-icon" type="button" aria-label="View docked entities" title="Docked entities"><span aria-hidden="true"></span></button>
+        <button id="station-information-action" class="docked-icon-button station-information-icon" type="button" aria-label="View station information" title="Station information"><span aria-hidden="true">i</span></button>
+      </div>
+      <button id="undock-action" class="undock-icon-button" type="button" aria-label="Undock from Kepler Station" title="Undock"><span aria-hidden="true"></span></button>
       <p id="docked-transition-error" class="inventory-error" role="alert" hidden></p>
-      <button id="undock-action" type="button">UNDOCK</button>
     </section>
+    <dialog id="docked-entities" class="docked-dialog" aria-labelledby="docked-entities-title"><header><div><p class="eyebrow">DOCKED ENTITIES</p><h2 id="docked-entities-title">KEPLER STATION</h2></div><button id="close-docked-entities" type="button" aria-label="Close docked entities">×</button></header><div id="docked-entities-content" class="docked-dialog-content"></div></dialog>
+    <dialog id="station-information" class="docked-dialog" aria-labelledby="station-information-title"><header><div><p class="eyebrow">STATION INFORMATION</p><h2 id="station-information-title">KEPLER STATION</h2></div><button id="close-station-information" type="button" aria-label="Close station information">×</button></header><dl class="docked-dialog-details"><div><dt>LOCATION</dt><dd>KEPLER ORBIT</dd></div><div><dt>DOCKING</dt><dd>BAY 04</dd></div><div><dt>SERVICES</dt><dd>MARKET, FITTING, REFINING</dd></div></dl></dialog>
     <section id="station-services" class="station-services" aria-label="Kepler Station services" hidden>
       <header class="station-services-heading"><div><p class="eyebrow">STATION SERVICES</p><h1>KEPLER STATION</h1></div><button id="exit-services-action" type="button">EXIT SERVICES</button></header>
       <div id="station-service-panel" class="station-service-panel">
@@ -533,16 +556,16 @@ appRoot.innerHTML = `
     <div id="system-map-modal" class="system-map-modal" role="dialog" aria-modal="true" aria-labelledby="system-map-title" hidden>
       <div class="system-map-backdrop" data-system-map-close></div>
       <section class="system-map-panel">
-        <header class="system-map-heading"><div><p class="eyebrow">NAVIGATION OVERLAY</p><h1 id="system-map-title">LOCAL SYSTEM</h1></div><button id="system-map-close" class="game-modal-close" type="button" aria-label="Close system map">×</button></header>
+        <header class="system-map-heading"><div><p class="eyebrow">NAVIGATION OVERLAY</p><h1 id="system-map-title">LOCAL SYSTEM</h1></div><div class="system-map-actions"><button id="system-map-refresh" class="system-map-refresh" type="button" aria-label="Refresh system map" title="Refresh system map">&#x21bb;</button><button id="system-map-close" class="game-modal-close" type="button" aria-label="Close system map">×</button></div></header>
         <div class="system-map-layout">
           <div class="system-map-display" aria-label="System map POIs">
             <div id="system-map-world" class="system-map-world">
               <button class="system-poi system-poi-star is-selected" type="button" data-poi="primary-star" aria-pressed="true"><span>PRIMARY STAR</span></button>
               <button class="system-poi system-poi-world" type="button" data-poi="starter-world" aria-pressed="false"><span>STARTER WORLD</span></button>
               <button class="system-poi system-poi-station" type="button" data-poi="kepler-station" aria-pressed="false"><span>KEPLER STATION</span></button>
-              <button class="system-poi system-poi-belt" type="button" data-poi="asterion-belt" aria-pressed="false"><span>ASTERION BELT</span></button>
-              <button class="system-poi system-poi-belt system-poi-vesper-belt" type="button" data-poi="vesper-belt" aria-pressed="false"><span>VESPER BELT</span></button>
-              <button class="system-poi system-poi-belt system-poi-nadir-belt" type="button" data-poi="nadir-belt" aria-pressed="false"><span>NADIR BELT</span></button>
+              <div id="system-map-discoveries" class="system-map-discoveries" aria-label="Scanned asteroid fields"></div>
+              <span id="system-map-player" class="system-map-player" title="Your ship"></span>
+              <div id="system-map-contacts" class="system-map-contacts" aria-label="Live contacts"></div>
             </div>
           </div>
           <aside class="poi-details" aria-live="polite"><p id="poi-type" class="eyebrow">STAR</p><h2 id="poi-name">PRIMARY STAR</h2><p id="poi-distance" class="poi-distance">0.0 km</p><p id="poi-description" class="modal-copy">The system's primary stellar body and central navigation reference.</p><button id="warp-action" class="warp-action" type="button" hidden>WARP TO SELECTED POI</button></aside>
@@ -571,9 +594,6 @@ const minimapField = document.querySelector<HTMLElement>('.minimap-field')
 const mapPrimaryStar = document.querySelector<HTMLElement>('#map-primary-star')
 const mapStarterWorld = document.querySelector<HTMLElement>('#map-starter-world')
 const mapKeplerStation = document.querySelector<HTMLElement>('#map-kepler-station')
-const mapAsterionBelt = document.querySelector<HTMLElement>('#map-asterion-belt')
-const mapVesperBelt = document.querySelector<HTMLElement>('#map-vesper-belt')
-const mapNadirBelt = document.querySelector<HTMLElement>('#map-nadir-belt')
 const availableActions = document.querySelector<HTMLElement>('#available-actions')
 const dockAction = document.querySelector<HTMLButtonElement>('#dock-action')
 const dockedStatus = document.querySelector<HTMLElement>('#docked-status')
@@ -581,6 +601,12 @@ const stationBackdrop = document.querySelector<HTMLElement>('#station-backdrop')
 const stationHotspots = document.querySelector<HTMLElement>('#station-hotspots')
 const stationServices = document.querySelector<HTMLElement>('#station-services')
 const undockAction = document.querySelector<HTMLButtonElement>('#undock-action')
+const dockedEntitiesAction = document.querySelector<HTMLButtonElement>('#docked-entities-action')
+const stationInformationAction = document.querySelector<HTMLButtonElement>('#station-information-action')
+const dockedEntities = document.querySelector<HTMLDialogElement>('#docked-entities')
+const dockedEntitiesTitle = document.querySelector<HTMLElement>('#docked-entities-title')
+const dockedEntitiesContent = document.querySelector<HTMLElement>('#docked-entities-content')
+const stationInformation = document.querySelector<HTMLDialogElement>('#station-information')
 const systemStatus = document.querySelector<HTMLElement>('#system-status')
 const stationServicePanel = document.querySelector<HTMLElement>('#station-service-panel')
 const marketPanel = document.querySelector<HTMLElement>('#market-panel')
@@ -593,6 +619,8 @@ const fittingPanel = document.querySelector<HTMLElement>('#fitting-panel')
 const refiningPanel = document.querySelector<HTMLElement>('#refining-panel')
 const gameMenuToggle = document.querySelector<HTMLButtonElement>('#game-menu-toggle')
 const gameMenuActions = document.querySelector<HTMLElement>('#game-menu-actions')
+const topbarMap = document.querySelector<HTMLButtonElement>('#topbar-map')
+const topbarWallet = document.querySelector<HTMLButtonElement>('#topbar-wallet')
 const gameModal = document.querySelector<HTMLElement>('#game-modal')
 const gameModalEyebrow = document.querySelector<HTMLElement>('#game-modal-eyebrow')
 const gameModalTitle = document.querySelector<HTMLElement>('#game-modal-title')
@@ -603,8 +631,12 @@ const moduleSlots = document.querySelectorAll<HTMLButtonElement>('[data-module]'
 const coreSystemButtons = document.querySelectorAll<HTMLButtonElement>('[data-core-system]')
 const systemMapModal = document.querySelector<HTMLElement>('#system-map-modal')
 const systemMapClose = document.querySelector<HTMLButtonElement>('#system-map-close')
+const systemMapRefresh = document.querySelector<HTMLButtonElement>('#system-map-refresh')
 const systemMapDisplay = document.querySelector<HTMLElement>('.system-map-display')
 const systemMapWorld = document.querySelector<HTMLElement>('#system-map-world')
+const systemMapPlayer = document.querySelector<HTMLElement>('#system-map-player')
+const systemMapContacts = document.querySelector<HTMLElement>('#system-map-contacts')
+const systemMapDiscoveries = document.querySelector<HTMLElement>('#system-map-discoveries')
 const poiType = document.querySelector<HTMLElement>('#poi-type')
 const poiName = document.querySelector<HTMLElement>('#poi-name')
 const poiDistance = document.querySelector<HTMLElement>('#poi-distance')
@@ -619,7 +651,15 @@ const targetName = document.querySelector<HTMLElement>('#target-name')
 const targetRange = document.querySelector<HTMLElement>('#target-range')
 const targetLockLabel = document.querySelector<HTMLElement>('#target-lock-label')
 const targetLockProgress = document.querySelector<HTMLElement>('#target-lock-progress')
+const targetActiveModules = document.querySelector<HTMLElement>('#target-active-modules')
 const clearTarget = document.querySelector<HTMLButtonElement>('#clear-target')
+const approachTarget = document.querySelector<HTMLButtonElement>('#approach-target')
+const viewTargetDetails = document.querySelector<HTMLButtonElement>('#view-target-details')
+const targetDetails = document.querySelector<HTMLDialogElement>('#target-details')
+const targetDetailsTitle = document.querySelector<HTMLElement>('#target-details-title')
+const targetDetailsContent = document.querySelector<HTMLElement>('#target-details-content')
+const targetListItems = document.querySelector<HTMLElement>('#target-list-items')
+const targetFilterButtons = document.querySelectorAll<HTMLButtonElement>('[data-target-filter]')
 const powerDisplay = document.querySelector<HTMLElement>('#ship-power')
 const powerBar = document.querySelector<HTMLElement>('#ship-power-bar')
 const warpCapacityDisplay = document.querySelector<HTMLElement>('#ship-warp-capacity')
@@ -633,13 +673,37 @@ const fuelBar = document.querySelector<HTMLElement>('#ship-fuel-bar')
 const cargoDisplay = document.querySelector<HTMLElement>('#ship-cargo')
 const cargoBar = document.querySelector<HTMLElement>('#ship-cargo-bar')
 const collisionAlert = document.querySelector<HTMLElement>('#collision-alert')
+const gameToast = document.querySelector<HTMLElement>('#game-toast')
+let gameToastTimer: number | undefined
+
+function showGameToast(message: string) {
+  if (!gameToast) return
+  if (gameToastTimer !== undefined) window.clearTimeout(gameToastTimer)
+  gameToast.textContent = message
+  gameToast.hidden = false
+  gameToast.classList.remove('is-fading')
+  const wordCount = message.trim().split(/\s+/).length
+  const displayDuration = Math.max(2_000, wordCount * 250)
+  gameToastTimer = window.setTimeout(() => {
+    gameToast.classList.add('is-fading')
+    gameToastTimer = window.setTimeout(() => {
+      gameToast.hidden = true
+      gameToast.classList.remove('is-fading')
+      gameToastTimer = undefined
+    }, 250)
+  }, displayDuration)
+}
 const shipDestroyedOverlay = document.querySelector<HTMLElement>('#ship-destroyed-overlay')
 const destructionCause = document.querySelector<HTMLElement>('#destruction-cause')
 const minimumMinimapRadius = 20_000
 const maximumMinimapRadius = 400_000
 let minimapRadius = 140_000
 let playerMapPosition = { x: 123_078, y: 480, z: -2_691 }
-let selectedTarget: { name: string; kind: 'asteroid' | 'pilot' | 'cargo' | 'warpable' | 'station' | 'planet'; shipType?: string; jettisonedItemId?: string; position: Vector3; oreRemainingCubicMeters: number; initialOreCubicMeters: number; locked: boolean; locking: boolean; lockProgress: number } | undefined
+let selectedTarget: { id?: string; name: string; kind: 'asteroid' | 'pilot' | 'cargo' | 'warpable' | 'station' | 'planet'; shipType?: string; jettisonedItemId?: string; position: Vector3; oreRemainingCubicMeters: number; initialOreCubicMeters: number; locked: boolean; locking: boolean; lockProgress: number } | undefined
+let lockedTarget: typeof selectedTarget
+const activeModuleTargetIds = new Map<string, string>()
+let targetListFilter: 'all' | 'asteroid' | 'player' = 'all'
+let lastTargetListUpdateAt = 0
 let cargoCubicMeters = 0
 let cargoCapacityCubicMeters = 24
 let shipPowerMegajoules = savedShipState.power_megajoules
@@ -679,7 +743,9 @@ for (let index = 0; index < 240; index += 1) {
 }
 
 type ModalName = 'codex' | 'help' | 'controls' | 'logout'
-type PoiName = 'primary-star' | 'starter-world' | 'kepler-station' | 'asterion-belt' | 'vesper-belt' | 'nadir-belt'
+type PoiName = string
+type PoiDetails = { type: string; name: string; description: string; position: { x: number; y: number; z: number } }
+type DiscoveredField = { id: string; display_name: string; position_x: number; position_y: number; position_z: number; distance_meters: number; scan_quality: number }
 
 const modalContent: Record<ModalName, { eyebrow: string; title: string; content: string; actions?: string }> = {
   codex: { eyebrow: 'REFERENCE ARCHIVE', title: 'CODEX', content: '<dl class="codex-list"><div><dt>Flight Assist</dt><dd>Automatic braking engages when no thrust input is active.</dd></div><div><dt>Kepler Station</dt><dd>A protected orbital outpost with docking access inside its shield boundary.</dd></div><div><dt>System Map</dt><dd>Your position is shown in green. Stellar bodies and stations appear at their known coordinates.</dd></div></dl>' },
@@ -695,15 +761,13 @@ function closeGameModal() {
   gameModalActions?.replaceChildren()
 }
 
-const poiDetails: Record<PoiName, { type: string; name: string; description: string; position: { x: number; y: number; z: number } }> = {
+const poiDetails: Record<PoiName, PoiDetails> = {
   'primary-star': { type: 'STAR', name: 'PRIMARY STAR', description: 'The system primary and central navigation reference.', position: { x: 0, y: 0, z: 0 } },
   'starter-world': { type: 'TERRESTRIAL WORLD', name: 'STARTER WORLD', description: 'A temperate starter world supporting Kepler Station operations.', position: { x: 119_678, y: 0, z: 0 } },
   'kepler-station': { type: 'ORBITAL STATION', name: 'KEPLER STATION', description: 'A protected orbital outpost. Docking is available inside the station shield.', position: { x: 123_078, y: 480, z: -3_400 } },
-  'asterion-belt': { type: 'ASTEROID BELT', name: 'ASTERION BELT', description: 'A mineral-rich belt beyond Starter World. Survey information is incomplete.', position: { x: 359_678, y: 0, z: 30_000 } },
-  'vesper-belt': { type: 'ASTEROID BELT', name: 'VESPER BELT', description: 'A remote cold-rock field on the far anti-spinward arc.', position: { x: -210_000, y: 0, z: 145_000 } },
-  'nadir-belt': { type: 'ASTEROID BELT', name: 'NADIR BELT', description: 'A dense outer field along the trailing orbital route. Survey information is incomplete.', position: { x: 85_000, y: 0, z: -295_000 } },
 }
 let selectedPoi: PoiName = 'primary-star'
+const discoveredFields = new Map<string, DiscoveredField>()
 
 function distanceToPoi(name: PoiName): number {
   const destination = poiDetails[name].position
@@ -727,6 +791,7 @@ function closeSystemMap() {
 
 function openSystemMap() {
   if (locationTransitionPending || !systemMapModal || gameModal?.hasAttribute('hidden') === false) return
+  updateSystemMapMarkers()
   systemMapModal.removeAttribute('hidden')
   systemMapClose?.focus()
 }
@@ -734,6 +799,54 @@ function openSystemMap() {
 function updateSystemMapView() {
   if (!systemMapWorld) return
   systemMapWorld.style.transform = `translate(${systemMapPanX}px, ${systemMapPanY}px) rotateX(${systemMapTilt}deg) rotateZ(${systemMapRotation}deg) scale(${systemMapZoom})`
+}
+
+const systemMapHalfSpanMeters = 450_000
+function systemMapCoordinate(value: number): string {
+  return `${Math.min(95, Math.max(5, 50 + (value / systemMapHalfSpanMeters) * 45)).toFixed(2)}%`
+}
+
+function positionSystemMapMarker(marker: HTMLElement | null, position: { x: number; z: number }) {
+  if (!marker) return
+  marker.style.left = systemMapCoordinate(position.x)
+  marker.style.top = systemMapCoordinate(-position.z)
+}
+
+function updateSystemMapMarkers() {
+  systemPois.forEach((poi) => {
+    const name = poi.dataset.poi as PoiName
+    positionSystemMapMarker(poi, poiDetails[name].position)
+  })
+  if (systemMapDiscoveries) {
+    systemMapDiscoveries.innerHTML = [...discoveredFields.values()].map((field) => {
+      const poiId = `discovered-field-${field.id}`
+      return `<button class="system-poi system-poi-discovery${selectedPoi === poiId ? ' is-selected' : ''}" type="button" data-poi="${escapeHtml(poiId)}" aria-pressed="${selectedPoi === poiId}"><span>${escapeHtml(field.display_name)}</span></button>`
+    }).join('')
+    systemMapDiscoveries.querySelectorAll<HTMLButtonElement>('[data-poi]').forEach((poi) => {
+      const field = discoveredFields.get((poi.dataset.poi ?? '').replace('discovered-field-', ''))
+      if (field) positionSystemMapMarker(poi, { x: field.position_x, z: field.position_z })
+      poi.addEventListener('click', () => selectPoi(poi.dataset.poi ?? 'primary-star'))
+    })
+  }
+  positionSystemMapMarker(systemMapPlayer, playerMapPosition)
+  if (!systemMapContacts) return
+  const contacts = (scene.getTargetables?.() ?? []).filter((target) => (
+    target.kind === 'asteroid' || target.kind === 'player'
+  ))
+  systemMapContacts.innerHTML = contacts.map((target) => (
+    `<span class="system-map-contact system-map-contact-${target.kind}" title="${escapeHtml(target.name)}" style="left: ${systemMapCoordinate(target.position.x)}; top: ${systemMapCoordinate(-target.position.z)}"></span>`
+  )).join('')
+}
+
+async function refreshSystemMap() {
+  if (systemMapRefresh?.disabled) return
+  systemMapRefresh?.setAttribute('aria-busy', 'true')
+  try {
+    await Promise.all([refreshNearbyAsteroids(), refreshNearbyJettisonedItems()])
+    updateSystemMapMarkers()
+  } finally {
+    systemMapRefresh?.removeAttribute('aria-busy')
+  }
 }
 
 function selectPoi(name: PoiName) {
@@ -762,6 +875,84 @@ function openGameModal(name: ModalName) {
   document.querySelector<HTMLButtonElement>('#logout-confirm')?.addEventListener('click', () => void logout())
 }
 
+async function openWallet() {
+  if (locationTransitionPending || !gameModal || !gameModalEyebrow || !gameModalTitle || !gameModalContent || !gameModalActions) return
+  closeSystemMap()
+  invalidateInventoryView()
+  gameModal.dataset.view = 'wallet'
+  gameModalEyebrow.textContent = 'PERSONAL FINANCE'
+  gameModalTitle.textContent = 'WALLET'
+  gameModalContent.innerHTML = '<p class="modal-copy">Loading wallet...</p>'
+  gameModalActions.replaceChildren()
+  gameModal.removeAttribute('hidden')
+  gameModalClose?.focus()
+  try {
+    const response = await fetch(`${apiBaseUrl}/market/wallet`, { headers: { authorization: `Bearer ${pilotAccessToken}` } })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    const wallet = await response.json() as WalletSnapshot
+    if (gameModal?.dataset.view === 'wallet') {
+      gameModalContent.innerHTML = `<dl class="docked-dialog-details"><div><dt>AVAILABLE CREDITS</dt><dd>${wallet.wallet_balance_credits.toLocaleString()} CR</dd></div></dl>`
+    }
+  } catch {
+    if (gameModal?.dataset.view === 'wallet') gameModalContent.innerHTML = '<p class="modal-copy">Unable to load wallet balance.</p>'
+  }
+}
+
+/*
+function renderAdminSettings(configuration: AdminConfiguration) {
+  if (!gameModalContent || !gameModalActions) return
+  const fields: { key: keyof AdminConfiguration; label: string; step?: string }[] = [
+    { key: 'simulation_tick_hz', label: 'SIMULATION TICK RATE', step: '1' },
+    { key: 'snapshot_tick_hz', label: 'SNAPSHOT TICK RATE', step: '1' },
+    { key: 'asteroid_spawn_interval_seconds', label: 'ASTEROID SPAWN INTERVAL', step: '1' },
+    { key: 'asteroid_field_maximum_active_asteroids', label: 'MAXIMUM ACTIVE ASTEROIDS', step: '1' },
+    { key: 'refinery_tick_seconds', label: 'REFINERY WORKER INTERVAL', step: '0.1' },
+    { key: 'ollama_model', label: 'LOCAL MODEL' },
+    { key: 'ollama_timeout_seconds', label: 'LOCAL MODEL TIMEOUT', step: '0.1' },
+  ]
+  gameModalContent.innerHTML = `<form id="admin-settings-form" class="admin-settings-form">${fields.map(({ key, label, step }) => `<label>${label}<input name="${key}" type="${typeof configuration[key] === 'number' ? 'number' : 'text'}" value="${String(configuration[key])}"${step ? ` step="${step}" min="0"` : ''} required></label>`).join('')}<p id="admin-settings-feedback" class="admin-settings-feedback" role="status"></p></form>`
+  gameModalActions.innerHTML = '<button id="admin-settings-reload" class="modal-button" type="button">RELOAD</button><button id="admin-settings-save" class="modal-button modal-button-primary" type="submit" form="admin-settings-form">SAVE SETTINGS</button>'
+  document.querySelector<HTMLButtonElement>('#admin-settings-reload')?.addEventListener('click', () => void loadAdminSettings())
+  document.querySelector<HTMLFormElement>('#admin-settings-form')?.addEventListener('submit', (event) => {
+    event.preventDefault()
+    void saveAdminSettings(configuration)
+  })
+}
+
+async function loadAdminSettings() {
+  if (!gameModalContent || gameModal?.dataset.view !== 'admin') return
+  gameModalContent.innerHTML = '<p class="modal-copy">Loading configuration...</p>'
+  gameModalActions?.replaceChildren()
+  try {
+    const response = await fetch(`${apiBaseUrl}/admin/configuration`)
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    renderAdminSettings(await response.json() as AdminConfiguration)
+  } catch (error) {
+    gameModalContent.innerHTML = `<p class="admin-settings-feedback">Unable to load system settings: ${error instanceof Error ? error.message : 'Network error'}.</p>`
+  }
+}
+
+async function saveAdminSettings(configuration: AdminConfiguration) {
+  const form = document.querySelector<HTMLFormElement>('#admin-settings-form')
+  const feedback = document.querySelector<HTMLElement>('#admin-settings-feedback')
+  const save = document.querySelector<HTMLButtonElement>('#admin-settings-save')
+  if (!form || !feedback || !save) return
+  const values = new FormData(form)
+  const payload = Object.fromEntries(Object.entries(configuration).map(([key, value]) => [key, typeof value === 'number' ? Number(values.get(key)) : values.get(key)]))
+  save.disabled = true
+  feedback.textContent = 'Saving configuration...'
+  try {
+    const response = await fetch(`${apiBaseUrl}/admin/configuration`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    feedback.textContent = 'System settings saved.'
+  } catch (error) {
+    feedback.textContent = `Unable to save system settings: ${error instanceof Error ? error.message : 'Network error'}.`
+  } finally {
+    save.disabled = false
+  }
+}
+
+*/
 async function saveShipState(dockedStationName: string | null, position = playerMapPosition) {
   const response = await fetch(`${apiBaseUrl}/auth/ship-state`, {
       method: 'PUT',
@@ -793,6 +984,8 @@ async function logout() {
     return
   }
   closeGameModal()
+  realtimeReconnectEnabled = false
+  if (realtimeReconnectTimer !== undefined) window.clearTimeout(realtimeReconnectTimer)
   realtimeSocket?.close()
   window.removeEventListener('keydown', handleGameNavigationKeyDown)
   window.removeEventListener('keydown', handleHardpointKeyDown)
@@ -818,7 +1011,8 @@ function openShipInventory() {
 
 let dockedInventory: DockedInventory | null = null
 let marketSnapshot: MarketSnapshot | null = null
-let marketTab: 'buy' | 'sell' = 'buy'
+let marketTab: 'buy' | 'sell' | 'orders' = 'buy'
+let marketDurationDays = 1
 let marketFilter = ''
 let marketSort: 'name' | 'price' = 'name'
 let marketCatalogFilter = ''
@@ -1038,34 +1232,98 @@ function showInventoryError(message: string) {
 }
 
 function marketItemName(definitionId: string) { return definitionId.replace(/^(?:module|material)\./, '').replaceAll('_', ' ') }
+function marketFeeCredits(quantity: number, unitPriceCredits: number, durationDays: number) { return Math.max(1, Math.ceil(quantity * unitPriceCredits * durationDays * 0.001)) }
+function marketDurationLabel(durationDays: number) { return durationDays === 1 ? '1 DAY' : durationDays === 7 ? '1 WEEK' : '1 MONTH' }
+function marketExpiryLabel(expiresAt: string) { return new Date(expiresAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }).toUpperCase() }
+
+function confirmMarketPurchase(listing: MarketListing, quantity: number, buyAll: boolean) {
+  if (!gameModal || !gameModalEyebrow || !gameModalTitle || !gameModalContent || !gameModalActions) return
+  const commission = marketFeeCredits(quantity, listing.unit_price_credits, listing.duration_days)
+  const total = quantity * listing.unit_price_credits + commission
+  gameModal.dataset.view = 'market-buy-all'
+  gameModalEyebrow.textContent = 'MARKET CONFIRMATION'
+  gameModalTitle.textContent = buyAll ? 'BUY ALL UNITS' : 'BUY UNITS'
+  gameModalContent.innerHTML = `<p class="modal-copy">Purchase ${buyAll ? 'all ' : ''}${quantity.toLocaleString()} units of ${escapeHtml(marketItemName(listing.definition_id))} from ${escapeHtml(listing.seller_display_name)}?</p><dl class="docked-dialog-details"><div><dt>UNIT PRICE</dt><dd>${listing.unit_price_credits.toLocaleString()} CR</dd></div><div><dt>COMMISSION</dt><dd>${commission.toLocaleString()} CR</dd></div><div><dt>TOTAL</dt><dd>${total.toLocaleString()} CR</dd></div></dl>`
+  gameModalActions.innerHTML = `<button id="market-purchase-cancel" class="modal-button" type="button">CANCEL</button><button id="market-purchase-confirm" class="modal-button modal-button-primary" type="button">${buyAll ? 'BUY ALL' : 'BUY'}</button>`
+  gameModal.removeAttribute('hidden')
+  document.querySelector<HTMLButtonElement>('#market-purchase-cancel')?.addEventListener('click', closeGameModal)
+  document.querySelector<HTMLButtonElement>('#market-purchase-confirm')?.addEventListener('click', () => {
+    closeGameModal()
+    void mutateMarket(`/listings/${listing.id}/buy`, { quantity, idempotency_key: crypto.randomUUID() })
+  })
+}
 
 function renderMarket() {
   if (!marketPanel || !marketSnapshot || !dockedInventory) return
   const listings = marketSnapshot.listings.filter((listing) => marketItemName(listing.definition_id).includes(marketFilter.toLowerCase()) && listing.definition_id.includes(marketCatalogFilter)).sort((left, right) => (marketSort === 'price' ? left.unit_price_credits - right.unit_price_credits : marketItemName(left.definition_id).localeCompare(marketItemName(right.definition_id))))
   const selected = dockedInventory.station.items.find((item) => item.id === selectedMarketItemId)
-  const rows = listings.map((listing) => `<article class="market-row"><div><strong>${escapeHtml(marketItemName(listing.definition_id))}</strong><small>${listing.quantity} available · ${listing.volume_per_unit.toFixed(2)} m³</small></div><div><strong>${listing.unit_price_credits} CR</strong><input data-market-quantity="${listing.id}" type="number" min="1" max="${listing.quantity}" value="1"><button data-market-buy="${listing.id}" type="button" ${marketBusy ? 'disabled' : ''}>BUY</button></div></article>`).join('') || '<p class="inventory-empty">No listings match this search.</p>'
+  const buyOrders = marketSnapshot.buy_orders ?? []
+  const rows = listings.map((listing) => `<article class="market-row"><div><strong>${escapeHtml(marketItemName(listing.definition_id))}</strong><small>SELLER: ${escapeHtml(listing.seller_display_name)} · ${listing.quantity} available · EXPIRES ${marketExpiryLabel(listing.expires_at)}</small></div><div><strong>${listing.unit_price_credits} CR</strong><small data-market-commission="${listing.id}">+ ${marketFeeCredits(1, listing.unit_price_credits, listing.duration_days)} CR ${marketDurationLabel(listing.duration_days)} COMMISSION</small><input data-market-quantity="${listing.id}" type="number" min="1" max="${listing.quantity}" value="1"><button data-market-buy="${listing.id}" type="button" ${marketBusy ? 'disabled' : ''}>BUY</button><button data-market-buy-all="${listing.id}" type="button" ${marketBusy ? 'disabled' : ''}>BUY ALL</button></div></article>`).join('') || '<p class="inventory-empty">No listings match this search.</p>'
   const sources = dockedInventory.station.items.map((item) => `<button class="inventory-item" data-market-item="${item.id}" type="button" draggable="true"><span class="inventory-item-icon">${inventoryIcon(item.definition_id)}</span><span class="inventory-item-name">${escapeHtml(marketItemName(item.definition_id))}</span><span class="inventory-item-quantity">${item.quantity}</span></button>`).join('') || '<p class="inventory-empty">No station items available.</p>'
-  const mine = marketSnapshot.my_listings.map((listing) => `<article class="market-row"><strong>${escapeHtml(marketItemName(listing.definition_id))}</strong><span>${listing.quantity} at ${listing.unit_price_credits} CR</span></article>`).join('') || '<p class="inventory-empty">No active listings.</p>'
+  const mine = marketSnapshot.my_listings.map((listing) => `<article class="market-row"><strong>${escapeHtml(marketItemName(listing.definition_id))}</strong><span>${listing.quantity} at ${listing.unit_price_credits} CR · ${marketDurationLabel(listing.duration_days)} · EXPIRES ${marketExpiryLabel(listing.expires_at)}</span><button data-market-cancel="${listing.id}" type="button" ${marketBusy ? 'disabled' : ''}>CANCEL</button></article>`).join('') || '<p class="inventory-empty">No active listings.</p>'
   const expanded = (category: string) => expandedMarketCatalogs.has(category)
   const treeItem = (label: string, filter: string) => `<li><button data-market-catalog-filter="${filter}" type="button" aria-pressed="${marketCatalogFilter === filter}">${label}</button></li>`
-  const treeBranch = (label: string, category: string, filter: string, children: string) => `<li><button class="market-tree-branch" data-market-catalog-filter="${filter}" data-market-catalog-toggle="${category}" type="button" aria-expanded="${expanded(category)}" aria-pressed="${marketCatalogFilter === filter}"><span>${label}</span><span aria-hidden="true">${expanded(category) ? '−' : '+'}</span></button>${expanded(category) ? `<ul>${children}</ul>` : ''}</li>`
+  const treeBranch = (label: string, category: string, filter: string, children: string) => `<li><div class="market-tree-branch"><button data-market-catalog-filter="${filter}" type="button" aria-pressed="${marketCatalogFilter === filter}">${label}</button><button class="market-tree-toggle" data-market-catalog-toggle="${category}" type="button" aria-label="${expanded(category) ? 'Collapse' : 'Expand'} ${label}" aria-expanded="${expanded(category)}"><span aria-hidden="true">${expanded(category) ? '−' : '+'}</span></button></div>${expanded(category) ? `<ul>${children}</ul>` : ''}</li>`
   const tree = `<ul>${treeItem('RAW ORE', 'ore.raw')}${treeBranch('EXTRACTED ORE', 'extracted', 'material.ore.', `${treeItem('Iron Ore', 'material.ore.iron')}${treeItem('Copper Ore', 'material.ore.copper')}${treeItem('Nickel Ore', 'material.ore.nickel')}${treeItem('Silicate Ore', 'material.ore.silicate')}`)}${treeBranch('REFINED ORE', 'refined', 'material.pure.', `${treeItem('Pure Iron', 'material.pure.iron')}${treeItem('Pure Copper', 'material.pure.copper')}${treeItem('Pure Nickel', 'material.pure.nickel')}${treeItem('Pure Silicate', 'material.pure.silicate')}`)}</ul>`
-  marketPanel.innerHTML = `<header class="market-heading"><div><p class="eyebrow">KEPLER EXCHANGE</p><h1>MARKET</h1></div><div><strong>${marketSnapshot.wallet_balance_credits.toLocaleString()} CR</strong><button id="exit-market" type="button">EXIT MARKET</button></div></header><div class="market-layout"><aside class="market-item-tree" aria-label="Item categories"><p class="eyebrow">ITEM CATALOG</p>${tree}</aside><div class="market-content"><nav class="market-tabs"><button data-market-tab="buy" aria-pressed="${marketTab === 'buy'}" type="button">BUY</button><button data-market-tab="sell" aria-pressed="${marketTab === 'sell'}" type="button">SELL</button></nav>${marketTab === 'buy' ? `<div class="market-tools"><input data-market-filter type="search" value="${escapeHtml(marketFilter)}" placeholder="SEARCH ITEMS"><button data-market-sort type="button">SORT: ${marketSort.toUpperCase()}</button></div><section class="market-list">${rows}</section>` : `<div class="market-sell-layout"><section class="inventory-items">${sources}</section><section class="market-listing-tray" data-market-drop>${selected ? `<strong>${escapeHtml(marketItemName(selected.definition_id))}</strong><label>QUANTITY <input id="market-list-quantity" type="number" min="1" max="${selected.quantity}" value="${selected.quantity}"></label><label>PRICE / UNIT <input id="market-list-price" type="number" min="1" value="100"></label><button id="market-list" type="button">LIST FOR SALE</button>` : '<p>Drag a station item here to list it.</p>'}</section></div><section class="market-list">${mine}</section>`}</div></div>`
-  marketPanel.querySelectorAll<HTMLButtonElement>('[data-market-tab]').forEach((button) => button.addEventListener('click', () => { marketTab = button.dataset.marketTab as 'buy' | 'sell'; renderMarket() }))
+  const orders = buyOrders.map((order) => `<article class="market-row"><div><strong>${escapeHtml(marketItemName(order.definition_id))}</strong><small>BUYER: ${escapeHtml(order.buyer_display_name)} · ${order.quantity} wanted · EXPIRES ${marketExpiryLabel(order.expires_at)}</small></div><div><strong>${order.unit_price_credits} CR</strong><input data-buy-order-quantity="${order.id}" type="number" min="1" max="${order.quantity}" value="1"><button data-buy-order-fill="${order.id}" type="button">FILL</button></div></article>`).join('') || '<p class="inventory-empty">No active buy orders.</p>'
+  const orderForm = `<section class="market-listing-tray"><strong>PLACE BUY ORDER</strong><label>ITEM <select id="market-buy-order-item"><option value="material.ore.iron">IRON ORE</option><option value="material.ore.copper">COPPER ORE</option><option value="material.ore.nickel">NICKEL ORE</option><option value="material.ore.silicate">SILICATE ORE</option></select></label><label>QUANTITY <input id="market-buy-order-quantity" type="number" min="1" value="1"></label><label>PRICE / UNIT <input id="market-buy-order-price" type="number" min="1" value="100"></label><label>DURATION <select id="market-buy-order-duration"><option value="1">1 DAY</option><option value="7">1 WEEK</option><option value="30">1 MONTH</option></select></label><button id="market-buy-order-place" type="button">PLACE BUY ORDER</button></section>`
+  marketPanel.innerHTML = `<header class="market-heading"><div><p class="eyebrow">KEPLER EXCHANGE</p><h1>MARKET</h1></div><div><strong>${marketSnapshot.wallet_balance_credits.toLocaleString()} CR</strong><button id="exit-market" type="button">EXIT MARKET</button></div></header><div class="market-layout"><aside class="market-item-tree" aria-label="Item categories"><p class="eyebrow">ITEM CATALOG</p>${tree}</aside><div class="market-content"><nav class="market-tabs"><button data-market-tab="buy" aria-pressed="${marketTab === 'buy'}" type="button">BUY</button><button data-market-tab="sell" aria-pressed="${marketTab === 'sell'}" type="button">SELL</button><button data-market-tab="orders" aria-pressed="${marketTab === 'orders'}" type="button">ORDERS</button></nav>${marketTab === 'buy' ? `<div class="market-tools"><input data-market-filter type="search" value="${escapeHtml(marketFilter)}" placeholder="SEARCH ITEMS"><button data-market-sort type="button">SORT: ${marketSort.toUpperCase()}</button></div><section class="market-list">${rows}</section>` : marketTab === 'orders' ? `<div class="market-sell-layout">${orderForm}<section class="market-list">${orders}</section></div>` : `<div class="market-sell-layout"><section class="inventory-items">${sources}</section><section class="market-listing-tray" data-market-drop>${selected ? `<strong>${escapeHtml(marketItemName(selected.definition_id))}</strong><label>QUANTITY <input id="market-list-quantity" type="number" min="1" max="${selected.quantity}" value="${selected.quantity}"></label><label>PRICE / UNIT <input id="market-list-price" type="number" min="1" value="100"></label><label>DURATION <select id="market-list-duration"><option value="1">1 DAY</option><option value="7">1 WEEK</option><option value="30">1 MONTH</option></select></label><button id="market-list" type="button">LIST FOR SALE</button>` : '<p>Drag a station item here to list it.</p>'}</section></div><section class="market-list">${mine}</section>`}</div></div>`
+  marketPanel.querySelectorAll<HTMLButtonElement>('[data-market-tab]').forEach((button) => button.addEventListener('click', () => { marketTab = button.dataset.marketTab as 'buy' | 'sell' | 'orders'; renderMarket() }))
+  marketPanel.querySelector<HTMLButtonElement>('#market-buy-order-place')?.addEventListener('click', () => void mutateMarket('/buy-orders', { definition_id: marketPanel.querySelector<HTMLSelectElement>('#market-buy-order-item')?.value, definition_version: 1, quantity: Number(marketPanel.querySelector<HTMLInputElement>('#market-buy-order-quantity')?.value), unit_price_credits: Number(marketPanel.querySelector<HTMLInputElement>('#market-buy-order-price')?.value), duration_days: Number(marketPanel.querySelector<HTMLSelectElement>('#market-buy-order-duration')?.value), idempotency_key: crypto.randomUUID() }))
+  marketPanel.querySelectorAll<HTMLButtonElement>('[data-buy-order-fill]').forEach((button) => button.addEventListener('click', () => void mutateMarket(`/buy-orders/${button.dataset.buyOrderFill}/fill`, { quantity: Number(marketPanel.querySelector<HTMLInputElement>(`[data-buy-order-quantity="${button.dataset.buyOrderFill}"]`)?.value), idempotency_key: crypto.randomUUID() })))
   marketPanel.querySelector<HTMLInputElement>('[data-market-filter]')?.addEventListener('input', (event) => { marketFilter = (event.target as HTMLInputElement).value; marketCatalogFilter = ''; renderMarket() })
   marketPanel.querySelector<HTMLButtonElement>('[data-market-sort]')?.addEventListener('click', () => { marketSort = marketSort === 'name' ? 'price' : 'name'; renderMarket() })
   marketPanel.querySelectorAll<HTMLButtonElement>('[data-market-catalog-filter]').forEach((button) => button.addEventListener('click', () => {
-    const category = button.dataset.marketCatalogToggle
-    if (category) expandedMarketCatalogs.has(category) ? expandedMarketCatalogs.delete(category) : expandedMarketCatalogs.add(category)
     marketCatalogFilter = button.dataset.marketCatalogFilter ?? ''
     marketFilter = ''
     renderMarket()
   }))
-  marketPanel.querySelectorAll<HTMLButtonElement>('[data-market-buy]').forEach((button) => button.addEventListener('click', () => void mutateMarket(`/listings/${button.dataset.marketBuy}/buy`, { quantity: Number(marketPanel.querySelector<HTMLInputElement>(`[data-market-quantity="${button.dataset.marketBuy}"]`)?.value) })))
+  marketPanel.querySelectorAll<HTMLButtonElement>('[data-market-catalog-toggle]').forEach((button) => button.addEventListener('click', () => {
+    const category = button.dataset.marketCatalogToggle
+    if (!category) return
+    expandedMarketCatalogs.has(category) ? expandedMarketCatalogs.delete(category) : expandedMarketCatalogs.add(category)
+    renderMarket()
+  }))
+  marketPanel.querySelectorAll<HTMLButtonElement>('[data-market-buy]').forEach((button) => button.addEventListener('click', () => {
+    const listing = listings.find((candidate) => candidate.id === button.dataset.marketBuy)
+    const quantity = Number(marketPanel.querySelector<HTMLInputElement>(`[data-market-quantity="${button.dataset.marketBuy}"]`)?.value)
+    if (!listing || !Number.isInteger(quantity) || quantity < 1 || quantity > listing.quantity) return
+    confirmMarketPurchase(listing, quantity, false)
+  }))
+  marketPanel.querySelectorAll<HTMLButtonElement>('[data-market-buy-all]').forEach((button) => button.addEventListener('click', () => {
+    const listing = listings.find((candidate) => candidate.id === button.dataset.marketBuyAll)
+    if (!listing) return
+    confirmMarketPurchase(listing, listing.quantity, true)
+  }))
+  marketPanel.querySelectorAll<HTMLInputElement>('[data-market-quantity]').forEach((input) => input.addEventListener('input', () => {
+    const listing = listings.find((candidate) => candidate.id === input.dataset.marketQuantity)
+    const commission = marketPanel.querySelector<HTMLElement>(`[data-market-commission="${input.dataset.marketQuantity}"]`)
+    if (listing && commission) commission.textContent = `+ ${marketFeeCredits(Number(input.value), listing.unit_price_credits, listing.duration_days)} CR ${marketDurationLabel(listing.duration_days)} COMMISSION`
+  }))
+  marketPanel.querySelectorAll<HTMLButtonElement>('[data-market-cancel]').forEach((button) => button.addEventListener('click', () => void mutateMarket(`/listings/${button.dataset.marketCancel}/cancel`, {})))
   marketPanel.querySelectorAll<HTMLButtonElement>('[data-market-item]').forEach((button) => { button.addEventListener('click', () => { selectedMarketItemId = button.dataset.marketItem!; renderMarket() }); button.addEventListener('dragstart', (event) => event.dataTransfer?.setData('application/x-spaceconomy-market-item', button.dataset.marketItem!)) })
   const tray = marketPanel.querySelector<HTMLElement>('[data-market-drop]')
   tray?.addEventListener('dragover', (event) => event.preventDefault())
   tray?.addEventListener('drop', (event) => { event.preventDefault(); selectedMarketItemId = event.dataTransfer?.getData('application/x-spaceconomy-market-item') || null; renderMarket() })
+  const updateListingFee = () => {
+    const quantity = Number(marketPanel.querySelector<HTMLInputElement>('#market-list-quantity')?.value)
+    const unitPrice = Number(marketPanel.querySelector<HTMLInputElement>('#market-list-price')?.value)
+    const fee = marketPanel.querySelector<HTMLElement>('#market-list-fee')
+    if (fee) fee.textContent = `${marketFeeCredits(quantity, unitPrice, marketDurationDays).toLocaleString()} CR`
+  }
+  marketPanel.querySelector<HTMLInputElement>('#market-list-quantity')?.addEventListener('input', updateListingFee)
+  marketPanel.querySelector<HTMLInputElement>('#market-list-price')?.addEventListener('input', updateListingFee)
+  marketPanel.querySelector<HTMLSelectElement>('#market-list-duration')?.addEventListener('change', (event) => { marketDurationDays = Number((event.target as HTMLSelectElement).value); updateListingFee() })
+  marketPanel.querySelector<HTMLButtonElement>('#market-list')?.addEventListener('click', () => {
+    if (!selectedMarketItemId) return
+    void mutateMarket('/listings', {
+      inventory_item_id: selectedMarketItemId,
+      quantity: Number(marketPanel.querySelector<HTMLInputElement>('#market-list-quantity')?.value),
+      unit_price_credits: Number(marketPanel.querySelector<HTMLInputElement>('#market-list-price')?.value),
+      duration_days: marketDurationDays,
+      idempotency_key: crypto.randomUUID(),
+    })
+  })
   marketPanel.querySelector<HTMLButtonElement>('#exit-market')?.addEventListener('click', closeStationServices)
 }
 
@@ -1475,6 +1733,8 @@ gameMenuToggle?.addEventListener('click', () => {
   gameMenuActions?.toggleAttribute('hidden', isOpen)
   gameMenuToggle.setAttribute('aria-expanded', String(!isOpen))
 })
+topbarMap?.addEventListener('click', openSystemMap)
+topbarWallet?.addEventListener('click', () => void openWallet())
 document.querySelectorAll<HTMLButtonElement>('[data-modal]').forEach((button) => {
   button.addEventListener('click', () => {
     gameMenuActions?.setAttribute('hidden', '')
@@ -1504,6 +1764,7 @@ const handleGameNavigationKeyDown = (event: KeyboardEvent) => {
 window.addEventListener('keydown', handleGameNavigationKeyDown)
 systemMapClose?.addEventListener('click', closeSystemMap)
 document.querySelector<HTMLElement>('[data-system-map-close]')?.addEventListener('click', closeSystemMap)
+systemMapRefresh?.addEventListener('click', () => void refreshSystemMap())
 systemPois.forEach((poi) => poi.addEventListener('click', () => selectPoi(poi.dataset.poi as PoiName)))
 warpAction?.addEventListener('click', () => {
   if (locationTransitionPending) return
@@ -1557,6 +1818,16 @@ function toggleHardpoint(slot: HTMLButtonElement) {
   }
   const isActive = slot.getAttribute('aria-pressed') === 'true'
   const nextIsActive = !isActive
+  const fittedModule = fittingSnapshot?.fitted_modules.find((module) => module.family === 'mining_laser')
+  const effectiveRange = fittedModule?.effective_range_meters ?? 500
+  const targetDistance = Vector3.Distance(
+    new Vector3(playerMapPosition.x, playerMapPosition.y, playerMapPosition.z),
+    selectedTarget.position,
+  )
+  if (nextIsActive && targetDistance > effectiveRange) {
+    showGameToast(`MINING LASER: OUT OF RANGE (${targetDistance.toFixed(0)} M / ${effectiveRange.toFixed(0)} M)`)
+    return
+  }
   slot.setAttribute('aria-pressed', String(nextIsActive))
   slot.classList.toggle('is-active', nextIsActive)
   scene.setModuleActive(slot.dataset.module ?? '', nextIsActive)
@@ -1602,25 +1873,105 @@ function positionMapMarker(marker: HTMLElement | null, x: number, z: number) {
 
 function updateTargetWindow() {
   if (!targetWindow || !targetName || !targetRange || !targetLockLabel || !targetLockProgress) return
-  if (!selectedTarget?.locked) {
+  if (!lockedTarget) {
     targetWindow.setAttribute('hidden', '')
     return
   }
-  targetLockLabel.textContent = selectedTarget.locking ? 'ACQUIRING LOCK' : 'TARGET LOCK'
-  targetName.textContent = selectedTarget.name
-  targetThumbnail?.classList.toggle('is-ship', selectedTarget.kind === 'pilot')
-  targetThumbnail?.setAttribute('data-ship-type', selectedTarget.kind === 'pilot' ? selectedTarget.shipType ?? 'starter-corvette' : '')
-  const distance = Vector3.Distance(new Vector3(playerMapPosition.x, playerMapPosition.y, playerMapPosition.z), selectedTarget.position)
+  targetLockLabel.textContent = lockedTarget.locking ? 'ACQUIRING LOCK' : 'TARGET LOCK'
+  targetName.textContent = lockedTarget.name
+  targetThumbnail?.classList.toggle('is-ship', lockedTarget.kind === 'pilot')
+  targetThumbnail?.setAttribute('data-ship-type', lockedTarget.kind === 'pilot' ? lockedTarget.shipType ?? 'starter-corvette' : '')
+  const distance = Vector3.Distance(new Vector3(playerMapPosition.x, playerMapPosition.y, playerMapPosition.z), lockedTarget.position)
   targetRange.textContent = distance >= 1_000 ? `${(distance / 1_000).toFixed(1)} km` : `${distance.toFixed(0)} m`
-  targetLockProgress.toggleAttribute('hidden', !selectedTarget.locking)
-  targetLockProgress.firstElementChild?.setAttribute('style', `width: ${(selectedTarget.lockProgress * 100).toFixed(1)}%`)
-  document.querySelector<HTMLButtonElement>('#pickup-jettisoned-item')?.toggleAttribute('hidden', selectedTarget.kind !== 'cargo')
+  targetLockProgress.toggleAttribute('hidden', !lockedTarget.locking)
+  targetLockProgress.firstElementChild?.setAttribute('style', `width: ${(lockedTarget.lockProgress * 100).toFixed(1)}%`)
+  if (targetActiveModules) {
+    const moduleIcons = [...activeModuleTargetIds]
+      .filter(([, targetId]) => targetId === lockedTarget?.id)
+      .map(([moduleName]) => starterHardpoints.find((module) => module.moduleName === moduleName)?.icon)
+      .filter((icon): icon is string => Boolean(icon))
+    targetActiveModules.innerHTML = moduleIcons.map((icon) => `<span class="target-module-icon">${icon}</span>`).join('')
+  }
+  document.querySelector<HTMLButtonElement>('#pickup-jettisoned-item')?.toggleAttribute('hidden', lockedTarget.kind !== 'cargo')
   targetWindow.removeAttribute('hidden')
 }
+
+function updateTargetList() {
+  if (!targetListItems) return
+  const configuredSensorRange = fittingSnapshot?.statistics.sensor_range_meters
+  const sensorRangeMeters = typeof configuredSensorRange === 'number'
+    && Number.isFinite(configuredSensorRange) && configuredSensorRange >= 0
+    ? configuredSensorRange
+    : 50_000
+  const targets = (scene.getTargetables?.() ?? [])
+    .filter((target) => targetListFilter === 'all' || target.kind === targetListFilter)
+    .filter((target) => Vector3.Distance(new Vector3(playerMapPosition.x, playerMapPosition.y, playerMapPosition.z), target.position) <= sensorRangeMeters)
+    .sort((left, right) => Vector3.Distance(new Vector3(playerMapPosition.x, playerMapPosition.y, playerMapPosition.z), left.position) - Vector3.Distance(new Vector3(playerMapPosition.x, playerMapPosition.y, playerMapPosition.z), right.position))
+  targetListItems.innerHTML = targets.map((target) => {
+    const distance = Vector3.Distance(new Vector3(playerMapPosition.x, playerMapPosition.y, playerMapPosition.z), target.position)
+    const range = distance >= 1_000 ? `${(distance / 1_000).toFixed(1)} km` : `${distance.toFixed(0)} m`
+    const selected = selectedTarget?.id === target.id
+    return `<button class="target-list-item target-list-item-${target.kind}${selected ? ' is-selected' : ''}${target.locked ? ' is-locked' : ''}" type="button" data-target-id="${escapeHtml(target.id)}"><span class="target-list-type">${target.kind.toUpperCase()}</span><span class="target-list-name">${escapeHtml(target.name)}</span><span class="target-list-state">${target.locking ? 'LOCKING' : target.locked ? 'LOCKED' : 'SELECT'}</span><span class="target-list-range">${range}</span></button>`
+  }).join('') || '<p class="target-list-empty">NO TARGETS IN RANGE</p>'
+  targetListItems.querySelectorAll<HTMLButtonElement>('[data-target-id]').forEach((button) => {
+    button.addEventListener('click', () => scene.selectTarget?.(button.dataset.targetId ?? ''))
+  })
+}
+
+targetFilterButtons.forEach((button) => {
+  button.addEventListener('click', () => {
+    targetListFilter = button.dataset.targetFilter as typeof targetListFilter
+    targetFilterButtons.forEach((filter) => filter.setAttribute('aria-pressed', String(filter === button)))
+    updateTargetList()
+  })
+})
 
 clearTarget?.addEventListener('click', () => {
   scene.toggleTargetLock()
 })
+
+approachTarget?.addEventListener('click', () => {
+  if (scene.approachTarget?.() && collisionAlert) collisionAlert.textContent = 'APPROACHING TARGET'
+})
+
+function openTargetDetails() {
+  if (!selectedTarget || !targetDetails || !targetDetailsTitle || !targetDetailsContent) return
+  const distance = Vector3.Distance(new Vector3(playerMapPosition.x, playerMapPosition.y, playerMapPosition.z), selectedTarget.position)
+  const range = distance >= 1_000 ? `${(distance / 1_000).toFixed(1)} km` : `${distance.toFixed(0)} m`
+  const rows = [['Type', selectedTarget.kind], ['Range', range]]
+  if (selectedTarget.kind === 'asteroid') rows.push(['Ore remaining', `${selectedTarget.oreRemainingCubicMeters.toFixed(1)} m3`])
+  targetDetailsTitle.textContent = selectedTarget.name
+  targetDetailsContent.innerHTML = rows.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('')
+  targetDetails.showModal()
+}
+
+viewTargetDetails?.addEventListener('click', openTargetDetails)
+document.querySelector<HTMLButtonElement>('#close-target-details')?.addEventListener('click', () => targetDetails?.close())
+
+async function openDockedEntities() {
+  if (isInSystemSpace || !dockedEntities || !dockedEntitiesTitle || !dockedEntitiesContent) return
+  dockedEntitiesContent.innerHTML = '<p class="docked-dialog-empty">Loading docked entities...</p>'
+  dockedEntities.showModal()
+  try {
+    const response = await fetch(`${apiBaseUrl}/inventory/docked-entities`, {
+      headers: { authorization: `Bearer ${pilotAccessToken}` },
+    })
+    if (!response.ok) throw new Error(`Unable to load docked entities (${response.status})`)
+    const payload = await response.json() as DockedEntityList
+    dockedEntitiesTitle.textContent = payload.station_name
+    dockedEntitiesContent.innerHTML = payload.entities.map((entity) => `
+      <div class="docked-entity"><span class="docked-entity-icon" aria-hidden="true"></span><strong>${escapeHtml(entity.display_name)}</strong><small>${escapeHtml(entity.entity_type)}</small></div>
+    `).join('') || '<p class="docked-dialog-empty">No other entities are docked here.</p>'
+  } catch (error) {
+    console.error(error)
+    dockedEntitiesContent.innerHTML = '<p class="docked-dialog-empty">Unable to load docked entities.</p>'
+  }
+}
+
+dockedEntitiesAction?.addEventListener('click', () => void openDockedEntities())
+stationInformationAction?.addEventListener('click', () => stationInformation?.showModal())
+document.querySelector<HTMLButtonElement>('#close-docked-entities')?.addEventListener('click', () => dockedEntities?.close())
+document.querySelector<HTMLButtonElement>('#close-station-information')?.addEventListener('click', () => stationInformation?.close())
 
 document.querySelector<HTMLButtonElement>('#pickup-jettisoned-item')?.addEventListener('click', () => {
   if (inventoryLocked()) return
@@ -1635,9 +1986,6 @@ function updateMinimapMarkers() {
   positionMapMarker(mapPrimaryStar, 0, 0)
   positionMapMarker(mapStarterWorld, 119_678, 0)
   positionMapMarker(mapKeplerStation, 123_078, -3_400)
-  positionMapMarker(mapAsterionBelt, 359_678, 30_000)
-  positionMapMarker(mapVesperBelt, -210_000, 145_000)
-  positionMapMarker(mapNadirBelt, 85_000, -295_000)
   positionMapMarker(playerMapMarker, playerMapPosition.x, playerMapPosition.z)
 }
 
@@ -1677,14 +2025,21 @@ function createFlightScene(
     },
     onTargetSelectionChange(target) {
       selectedTarget = target
+      if (target?.locked || target?.locking) lockedTarget = target
+      else if (lockedTarget?.id === target?.id) lockedTarget = undefined
       updateTargetWindow()
+      updateTargetList()
       updateHardpointAvailability()
     },
-    onModuleActiveChange(moduleName, isActive) {
+    onModuleActiveChange(moduleName, isActive, targetId) {
       const moduleSlot = Array.from(moduleSlots).find((slot) => slot.dataset.module === moduleName)
-      if (!moduleSlot) return
-      moduleSlot.setAttribute('aria-pressed', String(isActive))
-      moduleSlot.classList.toggle('is-active', isActive)
+      if (isActive && targetId) activeModuleTargetIds.set(moduleName, targetId)
+      else if (!isActive) activeModuleTargetIds.delete(moduleName)
+      if (moduleSlot) {
+        moduleSlot.setAttribute('aria-pressed', String(isActive))
+        moduleSlot.classList.toggle('is-active', isActive)
+      }
+      updateTargetWindow()
     },
     onMiningLaserUpdate(active, source, target) {
       if (realtimeSocket?.readyState === WebSocket.OPEN && ((source && target) || !active)) {
@@ -1776,7 +2131,12 @@ function createFlightScene(
       if (coordinateZDisplay) coordinateZDisplay.textContent = position.z.toFixed(0)
       playerMapPosition = { x: position.x, y: position.y, z: position.z }
       positionMapMarker(playerMapMarker, position.x, position.z)
+      positionSystemMapMarker(systemMapPlayer, playerMapPosition)
       updateTargetWindow()
+      if (performance.now() - lastTargetListUpdateAt >= 250) {
+        lastTargetListUpdateAt = performance.now()
+        updateTargetList()
+      }
       updateSelectedPoiDetails()
       if (performance.now() - lastAsteroidSnapshotAt >= 3_000) {
         lastAsteroidSnapshotAt = performance.now()
@@ -1807,17 +2167,36 @@ let isInSystemSpace = !savedShipState.docked_station_name
 let lastAsteroidSnapshotAt = 0
 // Initialize before constructing a scene: its callbacks can reference this socket.
 const realtimeUrl = `${apiBaseUrl.replace(/^http/, 'ws').replace('/api/v1', '')}/api/v1/realtime?token=${encodeURIComponent(pilotAccessToken)}`
-const realtimeSocket = new WebSocket(realtimeUrl)
+let realtimeSocket: WebSocket | undefined
+let realtimeReconnectTimer: number | undefined
+let realtimeReconnectEnabled = true
 let scene = createFlightScene()
+updateTargetList()
 
-const discoveredFieldMarkers: Record<string, HTMLElement | null> = {
-  'ASTERION BELT': mapAsterionBelt,
-  'VESPER BELT': mapVesperBelt,
-  'NADIR DEBRIS FIELD': mapNadirBelt,
+async function loadActiveFitting() {
+  const response = await fetch(`${apiBaseUrl}/fitting/active`, {
+    headers: { authorization: `Bearer ${pilotAccessToken}` },
+  })
+  if (!response.ok) return
+  const snapshot = await response.json() as FittingSnapshot
+  if (!snapshot.statistics) return
+  fittingSnapshot = snapshot
+  updateTargetList()
 }
 
-function revealDiscoveredFields(fields: { display_name: string }[]) {
-  fields.forEach((field) => discoveredFieldMarkers[field.display_name]?.removeAttribute('hidden'))
+void loadActiveFitting().catch((error: unknown) => console.error('Unable to load active fitting.', error))
+
+function revealDiscoveredFields(fields: DiscoveredField[]) {
+  fields.forEach((field) => {
+    discoveredFields.set(field.id, field)
+    poiDetails[`discovered-field-${field.id}`] = {
+      type: 'SCANNED ASTEROID FIELD',
+      name: field.display_name,
+      description: `Sensor contact resolved at ${(field.scan_quality * 100).toFixed(0)}% quality.`,
+      position: { x: field.position_x, y: field.position_y, z: field.position_z },
+    }
+  })
+  updateSystemMapMarkers()
 }
 
 async function loadDiscoveryBootstrap() {
@@ -1825,7 +2204,7 @@ async function loadDiscoveryBootstrap() {
     headers: { authorization: `Bearer ${pilotAccessToken}` },
   })
   if (!response.ok) return
-  const payload = await response.json() as { discovered_fields: { display_name: string }[] }
+  const payload = await response.json() as { discovered_fields: DiscoveredField[] }
   revealDiscoveredFields(payload.discovered_fields)
 }
 
@@ -1885,14 +2264,24 @@ async function runSensorScan() {
   if (sensorButton?.disabled || !isInSystemSpace) return
   sensorButton?.setAttribute('aria-busy', 'true')
   try {
+    await saveShipState(null)
     const response = await fetch(`${apiBaseUrl}/mining/scan`, {
       method: 'POST',
       headers: { authorization: `Bearer ${pilotAccessToken}` },
     })
-    if (!response.ok) return
-    const payload = await response.json() as { newly_discovered_fields: { display_name: string }[] }
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({})) as { detail?: string }
+      showGameToast(response.status === 429 ? 'SENSORS RECHARGING' : body.detail?.toUpperCase() ?? `SENSOR SCAN FAILED (${response.status})`)
+      return
+    }
+    const payload = await response.json() as { newly_discovered_fields: DiscoveredField[]; power_megajoules: number; cooldown_seconds: number }
+    shipPowerMegajoules = payload.power_megajoules
+    renderSavedShipState()
     scene.emitSensorPing?.()
     revealDiscoveredFields(payload.newly_discovered_fields)
+    showGameToast(payload.newly_discovered_fields.length > 0
+      ? `SCAN COMPLETE: ${payload.newly_discovered_fields.length} FIELD${payload.newly_discovered_fields.length === 1 ? '' : 'S'} DISCOVERED`
+      : 'SCAN COMPLETE: NO NEW SIGNALS')
     void refreshNearbyAsteroids()
   } finally {
     sensorButton?.removeAttribute('aria-busy')
@@ -1923,11 +2312,8 @@ window.addEventListener('keydown', (event) => {
 void loadDiscoveryBootstrap()
 void loadShipInventory(true)
 
-realtimeSocket.addEventListener('open', () => {
-  if (!isInSystemSpace) realtimeSocket?.send(JSON.stringify({ type: 'docked', payload: {} }))
-})
-realtimeSocket.addEventListener('message', (event) => {
-  const message = JSON.parse(event.data) as { type: string; payload: { pilots?: { pilot_id: string; display_name: string; ship_type: string; x: number; y: number; z: number; yaw: number; pitch: number; roll: number }[]; pilot_id?: string; target_pilot_id?: string; display_name?: string; ship_type?: string; x?: number; y?: number; z?: number; yaw?: number; pitch?: number; roll?: number; active?: boolean; source_x?: number; source_y?: number; source_z?: number; target_x?: number; target_y?: number; target_z?: number } }
+function handleRealtimeMessage(event: MessageEvent<string>) {
+  const message = JSON.parse(event.data) as { type: string; payload: { pilots?: { pilot_id: string; display_name: string; ship_type: string; x: number; y: number; z: number; yaw: number; pitch: number; roll: number }[]; pilot_id?: string; target_pilot_id?: string; display_name?: string; ship_type?: string; x?: number; y?: number; z?: number; yaw?: number; pitch?: number; roll?: number; active?: boolean; source_x?: number; source_y?: number; source_z?: number; target_x?: number; target_y?: number; target_z?: number; behavior_state?: string; warp_phase?: 'aligning' | 'accelerating' | 'warping' | 'cruising' | 'decelerating'; docked?: boolean } }
   if (message.type === 'snapshot') {
     message.payload.pilots?.forEach((pilot) => scene.updateRemotePilot?.({ pilotId: pilot.pilot_id, displayName: pilot.display_name, shipType: pilot.ship_type, position: new Vector3(pilot.x, pilot.y, pilot.z), yaw: pilot.yaw, pitch: pilot.pitch, roll: pilot.roll }))
     return
@@ -1940,6 +2326,15 @@ realtimeSocket.addEventListener('message', (event) => {
     scene.setRemotePilotMining?.(message.payload.pilot_id, message.payload.active, new Vector3(message.payload.source_x, message.payload.source_y, message.payload.source_z), new Vector3(message.payload.target_x, message.payload.target_y, message.payload.target_z))
     return
   }
+  if (message.type === 'pilot_activity' && message.payload.pilot_id && message.payload.behavior_state && message.payload.docked !== undefined && message.payload.target_x !== undefined && message.payload.target_y !== undefined && message.payload.target_z !== undefined) {
+    scene.setRemotePilotActivity?.(message.payload.pilot_id, {
+      behaviorState: message.payload.behavior_state,
+      warpPhase: message.payload.warp_phase,
+      docked: message.payload.docked,
+      target: new Vector3(message.payload.target_x, message.payload.target_y, message.payload.target_z),
+    })
+    return
+  }
   if (message.type === 'pilot_targeting' && message.payload.target_pilot_id === selectedPilotId) {
     scene.setHostileTargeting?.(message.payload.pilot_id ?? '', message.payload.active === true)
     return
@@ -1947,7 +2342,22 @@ realtimeSocket.addEventListener('message', (event) => {
   if ((message.type === 'pilot_joined' || message.type === 'pilot_moved') && message.payload.pilot_id && message.payload.display_name && message.payload.ship_type && message.payload.x !== undefined && message.payload.y !== undefined && message.payload.z !== undefined && message.payload.yaw !== undefined && message.payload.pitch !== undefined && message.payload.roll !== undefined) {
     scene.updateRemotePilot?.({ pilotId: message.payload.pilot_id, displayName: message.payload.display_name, shipType: message.payload.ship_type, position: new Vector3(message.payload.x, message.payload.y, message.payload.z), yaw: message.payload.yaw, pitch: message.payload.pitch, roll: message.payload.roll })
   }
-})
+}
+
+function connectRealtime() {
+  const socket = new WebSocket(realtimeUrl)
+  realtimeSocket = socket
+  socket.addEventListener('open', () => {
+    if (!isInSystemSpace) socket.send(JSON.stringify({ type: 'docked', payload: {} }))
+  })
+  socket.addEventListener('message', handleRealtimeMessage)
+  socket.addEventListener('close', () => {
+    if (!realtimeReconnectEnabled || realtimeSocket !== socket) return
+    realtimeReconnectTimer = window.setTimeout(connectRealtime, 1_000)
+  })
+}
+
+connectRealtime()
 
 if (savedShipState.docked_station_name) {
   scene.dispose()
@@ -2023,7 +2433,6 @@ async function changeDockedState(docking: boolean) {
       isInSystemSpace = !docking
       playerMapPosition = position
       dockedInventory = null
-      fittingSnapshot = null
       selectedInventoryItem = null
       scene = docking ? createStationInteriorScene(gameCanvas) : createFlightScene(25, false, new Vector3(position.x, position.y, position.z))
       stationBackdrop?.toggleAttribute('hidden', !docking)
@@ -2032,7 +2441,7 @@ async function changeDockedState(docking: boolean) {
       systemStatus?.toggleAttribute('hidden', docking)
       availableActions?.setAttribute('hidden', '')
       document.querySelector('.game-shell')?.classList.toggle('is-docked', docking)
-      if (realtimeSocket.readyState === WebSocket.OPEN) realtimeSocket.send(JSON.stringify({ type: docking ? 'docked' : 'undocked', payload: {} }))
+      if (realtimeSocket?.readyState === WebSocket.OPEN) realtimeSocket.send(JSON.stringify({ type: docking ? 'docked' : 'undocked', payload: {} }))
     })
   } finally {
     finishLocationTransition()

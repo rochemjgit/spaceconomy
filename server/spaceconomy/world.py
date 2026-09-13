@@ -8,20 +8,39 @@ import math
 import random
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 
 from .config import settings
 from .db import session_factory
 from .inventory import expire_jettisoned_items
+from .market import expire_market_listings
 from .models import (
     Asteroid,
     AsteroidField,
     InventoryItem,
-    JettisonedItem,
+    InventoryLedgerEntry,
+    ManufacturingJob,
+    ManufacturingJobInput,
+    ManufacturingService,
     MinedOreLot,
+    NpcProfile,
+    NpcRuntime,
+    Pilot,
     RefineryJob,
     RefineryService,
+    ShipState,
+    SolarSystem,
 )
+from .npc import NpcController, NpcMotion, ensure_miner_equipment, run_economic_miner
+from .redis import publish_event, remove_system_presence, set_system_presence
+
+SYSTEM_ID = "kepler"
+DEFAULT_FIELD_PROFILE = {
+    "composition": "ferrous",
+    "variants": [
+        {"weight": 1, "minerals": (("iron", 55, 75), ("nickel", 15, 30))},
+    ],
+}
 
 
 def mineral_assay_for_profile(profile: dict[str, object], spawn_seed: int) -> str:
@@ -68,94 +87,100 @@ def mineral_assay_for_profile(profile: dict[str, object], spawn_seed: int) -> st
 
 
 async def replenish_asteroid_fields(now: datetime | None = None) -> int:
-    """Spawn one configured batch per due field without exceeding its active limit."""
+    """Retire exhausted fields and create finite random fields up to the system limit."""
     now = now or datetime.now(UTC)
     created = 0
     async with session_factory.begin() as session:
         await expire_jettisoned_items(session, now)
+        await expire_market_listings(session, now)
+        system = await session.scalar(
+            select(SolarSystem).where(SolarSystem.system_key == SYSTEM_ID)
+        )
+        if system is None:
+            return 0
         fields = list(
             await session.scalars(
                 select(AsteroidField)
                 .where(
+                    AsteroidField.system_id == system.id,
                     AsteroidField.active.is_(True),
-                    (AsteroidField.next_spawn_at.is_(None)) | (AsteroidField.next_spawn_at <= now),
                 )
                 .with_for_update(skip_locked=True)
             )
         )
+        active_profiles = []
         for field in fields:
-            profile = json.loads(field.spawn_profile)
-            existing_asteroids = list(
-                await session.scalars(select(Asteroid).where(Asteroid.field_id == field.id))
+            has_mineable_asteroid = await session.scalar(
+                select(Asteroid.id).where(
+                    Asteroid.field_id == field.id,
+                    Asteroid.depleted_at.is_(None),
+                    Asteroid.remaining_volume_cubic_meters >= 1,
+                )
             )
-            for asteroid in existing_asteroids:
-                if asteroid.mineral_assay == "[]":
-                    asteroid.mineral_assay = mineral_assay_for_profile(profile, asteroid.spawn_seed)
-            maximum_active = min(
-                int(
-                    profile.get("maximum_active", settings.asteroid_field_maximum_active_asteroids)
+            if has_mineable_asteroid is None:
+                field.active = False
+                field.next_spawn_at = None
+                continue
+            active_profiles.append(json.loads(field.spawn_profile))
+        active_count = len(active_profiles)
+        for _ in range(max(0, settings.asteroid_system_maximum_active_fields - active_count)):
+            profile = random.choice(active_profiles) if active_profiles else DEFAULT_FIELD_PROFILE
+            seed = random.randrange(2**31)
+            generator = random.Random(seed)
+            direction = generator.uniform(-1, 1)
+            angle = generator.uniform(0, math.tau)
+            radius = generator.uniform(
+                settings.sensor_default_range_meters,
+                system.radius_meters * 0.9,
+            )
+            horizontal_radius = math.sqrt(1 - direction**2)
+            field = AsteroidField(
+                system_id=system.id,
+                field_key=f"dynamic-{seed:08x}",
+                display_name=f"UNSURVEYED ASTEROID FIELD {seed:08X}",
+                position_x=radius * horizontal_radius * math.cos(angle),
+                position_y=radius * direction,
+                position_z=radius * horizontal_radius * math.sin(angle),
+                discovery_signature=generator.uniform(0.6, 1),
+                spawn_profile=json.dumps(profile, sort_keys=True),
+            )
+            session.add(field)
+            await session.flush()
+            asteroid_count = min(
+                max(
+                    1,
+                    int(
+                        profile.get(
+                            "maximum_active", settings.asteroid_field_maximum_active_asteroids
+                        )
+                    ),
                 ),
                 settings.asteroid_field_maximum_active_asteroids,
             )
-            active_count = await session.scalar(
-                select(func.count())
-                .select_from(Asteroid)
-                .where(
-                    Asteroid.field_id == field.id,
-                    Asteroid.depleted_at.is_(None),
-                )
-            )
-            excess_count = max(0, int(active_count or 0) - maximum_active)
-            if excess_count:
-                removable_ids = list(
-                    await session.scalars(
-                        select(Asteroid.id)
-                        .where(
-                            Asteroid.field_id == field.id,
-                            Asteroid.depleted_at.is_(None),
-                            ~Asteroid.id.in_(select(MinedOreLot.asteroid_id)),
-                            ~select(JettisonedItem.id)
-                            .where(JettisonedItem.ore_asteroid_id == Asteroid.id)
-                            .exists(),
-                        )
-                        .order_by(Asteroid.created_at)
-                        .limit(excess_count)
-                    )
-                )
-                if removable_ids:
-                    await session.execute(delete(Asteroid).where(Asteroid.id.in_(removable_ids)))
-                    active_count = int(active_count or 0) - len(removable_ids)
-            batch_size = min(
-                int(profile.get("batch_size", settings.asteroid_spawn_batch_size)),
-                maximum_active - int(active_count or 0),
-            )
-            for _ in range(max(0, batch_size)):
-                seed = random.randrange(2**31)
-                generator = random.Random(seed)
-                angle = generator.uniform(0, math.tau)
-                radius = generator.uniform(
-                    float(profile.get("spawn_radius_minimum_meters", 800)),
-                    float(profile.get("spawn_radius_maximum_meters", 6_000)),
-                )
-                vertical_offset = generator.uniform(-900, 900)
-                asteroid_radius = generator.uniform(18, 95)
-                volume = round(asteroid_radius * generator.uniform(1.8, 3.2), 2)
+            for _ in range(asteroid_count):
+                asteroid_seed = random.randrange(2**31)
+                asteroid_generator = random.Random(asteroid_seed)
+                asteroid_angle = asteroid_generator.uniform(0, math.tau)
+                asteroid_distance = asteroid_generator.uniform(800, 6_000)
+                asteroid_radius = asteroid_generator.uniform(18, 95)
+                volume = round(asteroid_radius * asteroid_generator.uniform(1.8, 3.2), 2)
                 session.add(
                     Asteroid(
                         field_id=field.id,
-                        spawn_seed=seed,
-                        position_x=field.position_x + math.cos(angle) * radius,
-                        position_y=field.position_y + vertical_offset,
-                        position_z=field.position_z + math.sin(angle) * radius,
+                        spawn_seed=asteroid_seed,
+                        position_x=(
+                            field.position_x + math.cos(asteroid_angle) * asteroid_distance
+                        ),
+                        position_y=field.position_y + asteroid_generator.uniform(-900, 900),
+                        position_z=field.position_z + math.sin(asteroid_angle) * asteroid_distance,
                         radius_meters=asteroid_radius,
                         composition=str(profile.get("composition", "ferrous")),
-                        mineral_assay=mineral_assay_for_profile(profile, seed),
+                        mineral_assay=mineral_assay_for_profile(profile, asteroid_seed),
                         initial_volume_cubic_meters=volume,
                         remaining_volume_cubic_meters=volume,
                     )
                 )
                 created += 1
-            field.next_spawn_at = now + timedelta(seconds=settings.asteroid_spawn_interval_seconds)
     return created
 
 
@@ -278,8 +303,139 @@ async def run_system_world() -> None:
         await asyncio.sleep(settings.world_spawn_tick_seconds)
 
 
+async def tick_npc_simulation(now: datetime | None = None) -> int:
+    """Advance each active NPC through its own deterministic controller."""
+    now = now or datetime.now(UTC)
+    active_npcs: list[tuple[Pilot, ShipState, NpcMotion, str | None]] = []
+    async with session_factory.begin() as session:
+        rows = await session.execute(
+            select(Pilot, NpcProfile, NpcRuntime, ShipState)
+            .join(NpcProfile, NpcProfile.pilot_id == Pilot.id)
+            .join(NpcRuntime, NpcRuntime.pilot_id == Pilot.id)
+            .join(ShipState, ShipState.pilot_id == Pilot.id)
+            .where(NpcProfile.lifecycle_state == "active")
+        )
+        for pilot, profile, runtime, ship_state in rows.all():
+            if "mine" in json.loads(profile.capabilities):
+                await ensure_miner_equipment(session, pilot.id)
+                motion = await run_economic_miner(session, pilot.id, runtime, ship_state, now)
+            else:
+                controller = NpcController(pilot.id, tuple(json.loads(profile.capabilities)))
+                motion = controller.advance(
+                    now,
+                    (ship_state.position_x, ship_state.position_y, ship_state.position_z),
+                    runtime,
+                )
+            ship_state.position_x, ship_state.position_y, ship_state.position_z = motion.position
+            active_npcs.append((pilot, ship_state, motion, runtime.warp_phase))
+    for pilot, ship_state, motion, warp_phase in active_npcs:
+        if ship_state.docked_station_name is not None:
+            if await remove_system_presence(SYSTEM_ID, str(pilot.id)):
+                await publish_event("system", SYSTEM_ID, "pilot_left", {"pilot_id": str(pilot.id)})
+            continue
+        presence = {
+            "pilot_id": str(pilot.id),
+            "display_name": pilot.display_name,
+            "ship_type": "starter-corvette",
+            "x": ship_state.position_x,
+            "y": ship_state.position_y,
+            "z": ship_state.position_z,
+            "yaw": motion.yaw,
+            "pitch": 0,
+            "roll": 0,
+        }
+        if await set_system_presence(SYSTEM_ID, str(pilot.id), presence):
+            await publish_event("system", SYSTEM_ID, "pilot_moved", presence)
+            await publish_event(
+                "system",
+                SYSTEM_ID,
+                "pilot_mining",
+                {
+                    "pilot_id": str(pilot.id),
+                    "active": motion.behavior_state in ("mining", "mining_cycle_wait"),
+                    "source_x": ship_state.position_x,
+                    "source_y": ship_state.position_y,
+                    "source_z": ship_state.position_z,
+                    "target_x": motion.target[0],
+                    "target_y": motion.target[1],
+                    "target_z": motion.target[2],
+                },
+            )
+            await publish_event(
+                "system",
+                SYSTEM_ID,
+                "pilot_activity",
+                {
+                    "pilot_id": str(pilot.id),
+                    "behavior_state": motion.behavior_state,
+                    "warp_phase": warp_phase,
+                    "docked": ship_state.docked_station_name is not None,
+                    "target_x": motion.target[0],
+                    "target_y": motion.target[1],
+                    "target_z": motion.target[2],
+                },
+            )
+    return len(active_npcs)
+
+
+async def run_npc_simulation() -> None:
+    """Run NPC simulation independently from slower asteroid replenishment."""
+    while True:
+        await tick_npc_simulation()
+        await asyncio.sleep(1)
+
+
 async def run_refinery_worker() -> None:
     """Run durable refinery completion independently of the slower world tick."""
     while True:
         await complete_refinery_jobs()
+        await asyncio.sleep(settings.refinery_tick_seconds)
+
+
+async def complete_manufacturing_jobs(now: datetime | None = None) -> int:
+    """Consume reserved inputs and deliver each completed module exactly once."""
+    now = now or datetime.now(UTC)
+    completed = 0
+    async with session_factory.begin() as session:
+        jobs = list(await session.scalars(select(ManufacturingJob).where(
+            ManufacturingJob.state == "processing", ManufacturingJob.completes_at <= now
+        ).with_for_update(skip_locked=True)))
+        for job in jobs:
+            inputs = list(await session.scalars(select(ManufacturingJobInput).where(
+                ManufacturingJobInput.manufacturing_job_id == job.id
+            ).with_for_update()))
+            reserved = [await session.get(InventoryItem, row.inventory_item_id, with_for_update=True)
+                        if row.inventory_item_id else None for row in inputs]
+            if any(item is None or item.container_id is not None for item in reserved):
+                job.state, job.failure_reason, job.completed_at = "failed", "reserved manufacturing input was unavailable", now
+                continue
+            output = json.loads(job.expected_output)
+            item = InventoryItem(
+                pilot_id=job.pilot_id, container_id=job.destination_container_id,
+                module_definition_id=UUID(output["module_definition_id"]),
+                definition_id=output["definition_id"], definition_version=output["definition_version"],
+                quantity=output["quantity"], durability=output["durability"],
+                volume_per_unit=output["volume_per_unit"],
+            )
+            session.add(item)
+            await session.flush()
+            for row, reserved_item in zip(inputs, reserved, strict=True):
+                row.inventory_item_id = None
+                await session.delete(reserved_item)
+            session.add(InventoryLedgerEntry(
+                pilot_id=job.pilot_id, manufacturing_job_id=job.id, inventory_item_id=item.id,
+                event_kind="manufacturing_completed", definition_id=item.definition_id,
+                definition_version=item.definition_version, quantity=item.quantity,
+                source_container_id=None, destination_container_id=job.destination_container_id,
+                command_id=f"manufacturing:{job.id}:completion",
+            ))
+            job.state, job.completed_at = "completed", now
+            completed += 1
+    return completed
+
+
+async def run_manufacturing_worker() -> None:
+    """Run manufacturing completions alongside the refinery worker."""
+    while True:
+        await complete_manufacturing_jobs()
         await asyncio.sleep(settings.refinery_tick_seconds)

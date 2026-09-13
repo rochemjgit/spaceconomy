@@ -24,8 +24,11 @@ from .models import (
     MarketListing,
     MinedOreLot,
     ModuleDefinition,
+    NpcProfile,
+    Pilot,
     RefineryJob,
     Ship,
+    ShipLocation,
     ShipState,
 )
 
@@ -66,6 +69,17 @@ class InventoryContainerResponse(BaseModel):
 class DockedInventoryResponse(BaseModel):
     ship: InventoryContainerResponse
     station: InventoryContainerResponse | None
+
+
+class DockedEntityResponse(BaseModel):
+    pilot_id: UUID
+    display_name: str
+    entity_type: str
+
+
+class DockedEntityListResponse(BaseModel):
+    station_name: str
+    entities: list[DockedEntityResponse]
 
 
 class BulkInventoryResponse(DockedInventoryResponse):
@@ -179,7 +193,7 @@ async def _require_docked_pilot(
 async def _ensure_containers(
     session: AsyncSession, pilot_id: UUID
 ) -> tuple[InventoryContainer, InventoryContainer]:
-    await _lock_pilot_state(session, pilot_id)
+    ship_state = await _lock_pilot_state(session, pilot_id)
     ship = await session.scalar(
         select(Ship).where(Ship.pilot_id == pilot_id, Ship.status == "active").with_for_update()
     )
@@ -198,6 +212,23 @@ async def _ensure_containers(
         ship = Ship(pilot_id=pilot_id, hull_definition_id=hull.id, name="STARTER CORVETTE")
         session.add(ship)
         await session.flush()
+    location = await session.get(ShipLocation, ship.id, with_for_update=True)
+    if location is None:
+        session.add(
+            ShipLocation(
+                ship_id=ship.id,
+                position_x=ship_state.position_x,
+                position_y=ship_state.position_y,
+                position_z=ship_state.position_z,
+                heading_x=0,
+                heading_y=0,
+                heading_z=1,
+                velocity_x=0,
+                velocity_y=0,
+                velocity_z=0,
+                checkpointed_at=datetime.now(UTC),
+            )
+        )
 
     containers = list(
         await session.scalars(
@@ -234,7 +265,12 @@ async def _ensure_containers(
     await session.flush()
     if station_created:
         module_definitions = list(
-            await session.scalars(select(ModuleDefinition).where(ModuleDefinition.active.is_(True)))
+            await session.scalars(
+                select(ModuleDefinition).where(
+                    ModuleDefinition.active.is_(True),
+                    ModuleDefinition.starter_grant.is_(True),
+                )
+            )
         )
         for definition in module_definitions:
             session.add(
@@ -436,7 +472,16 @@ async def _transfer(
 
 async def _merge_container_stacks(session: AsyncSession, container_id: UUID) -> None:
     items = await _items_for_container(session, container_id)
-    merged: dict[tuple[str, int, float, float, UUID | None], InventoryItem] = {}
+    listed_item_ids = set(
+        (
+            await session.scalars(
+                select(MarketListing.inventory_item_id).where(
+                    MarketListing.inventory_item_id.in_([item.id for item in items]),
+                )
+            )
+        ).all()
+    )
+    merged: dict[tuple[str, int, float, float, UUID | None, UUID | None], InventoryItem] = {}
     for item in items:
         if item.module_definition_id is not None:
             continue
@@ -446,6 +491,7 @@ async def _merge_container_stacks(session: AsyncSession, container_id: UUID) -> 
             item.durability,
             item.volume_per_unit,
             item.module_definition_id,
+            item.id if item.id in listed_item_ids else None,
         )
         existing = merged.get(key)
         if existing is None:
@@ -495,6 +541,33 @@ async def docked_inventory(
         pilot_id, _ = await _require_docked_pilot(session, authorization)
         ship_container, station_container = await _ensure_containers(session, pilot_id)
         return await _snapshot(session, ship_container, station_container)
+
+
+@router.get("/docked-entities", response_model=DockedEntityListResponse)
+async def docked_entities(
+    session: SessionDependency, authorization: Annotated[str | None, Header()] = None
+) -> DockedEntityListResponse:
+    """List pilots and NPCs sharing the caller's current docking station."""
+    async with session.begin():
+        pilot_id, state = await _require_docked_pilot(session, authorization)
+        rows = await session.execute(
+            select(Pilot, NpcProfile)
+            .join(ShipState, ShipState.pilot_id == Pilot.id)
+            .outerjoin(NpcProfile, NpcProfile.pilot_id == Pilot.id)
+            .where(ShipState.docked_station_name == state.docked_station_name)
+            .order_by(Pilot.display_name)
+        )
+        return DockedEntityListResponse(
+            station_name=state.docked_station_name,
+            entities=[
+                DockedEntityResponse(
+                    pilot_id=pilot.id,
+                    display_name=pilot.display_name,
+                    entity_type="NPC" if profile is not None else "PILOT",
+                )
+                for pilot, profile in rows.all()
+            ],
+        )
 
 
 @router.get("/ship", response_model=InventoryContainerResponse)

@@ -38,6 +38,48 @@ def event_channel(channel_type: str, entity_id: str) -> str:
     return _key("events", channel_type, entity_id)
 
 
+def presence_key(system_id: str) -> str:
+    """Return the namespaced presence hash for a solar system."""
+    return _key("presence", system_id)
+
+
+async def set_system_presence(system_id: str, pilot_id: str, payload: Mapping[str, Any]) -> bool:
+    """Upsert a simulation-controlled pilot in the system presence hash."""
+    try:
+        await client.hset(
+            presence_key(system_id), pilot_id, json.dumps(payload, separators=(",", ":"))
+        )
+    except RedisError:
+        return False
+    return True
+
+
+async def remove_system_presence(system_id: str, pilot_id: str) -> bool:
+    """Remove a pilot that has docked from the in-space presence hash."""
+    try:
+        await client.hdel(presence_key(system_id), pilot_id)
+    except RedisError:
+        return False
+    return True
+
+
+async def get_system_presence(system_id: str) -> dict[str, dict[str, Any]]:
+    """Read the transient in-space presence records, treating Redis failures as empty."""
+    try:
+        values = await client.hgetall(presence_key(system_id))
+    except RedisError:
+        return {}
+    presence: dict[str, dict[str, Any]] = {}
+    for pilot_id, value in values.items():
+        try:
+            decoded = json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(decoded, dict):
+            presence[pilot_id.decode() if isinstance(pilot_id, bytes) else str(pilot_id)] = decoded
+    return presence
+
+
 async def get_session(pilot_id: str) -> dict[str, Any] | None:
     """Read a session payload, treating Redis failures as a cache miss."""
     try:

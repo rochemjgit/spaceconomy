@@ -9,17 +9,19 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from .admin import router as admin_router
 from .auth import router as auth_router
 from .config import settings
 from .db import close_database
 from .fitting_api import router as fitting_router
 from .inventory import router as inventory_router
 from .market import router as market_router
+from .manufacturing_api import router as manufacturing_router
 from .mining import router as mining_router
 from .realtime import router as realtime_router
 from .redis import close_redis
 from .refinery_api import router as refinery_router
-from .world import run_refinery_worker, run_system_world
+from .world import run_manufacturing_worker, run_npc_simulation, run_refinery_worker, run_system_world
 
 API_VERSION: Final = "v1"
 
@@ -38,12 +40,16 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     """Release lazy infrastructure clients without making startup depend on a request."""
     world_task = asyncio.create_task(run_system_world())
     refinery_task = asyncio.create_task(run_refinery_worker())
+    manufacturing_task = asyncio.create_task(run_manufacturing_worker())
+    npc_task = asyncio.create_task(run_npc_simulation())
     try:
         yield
     finally:
         world_task.cancel()
         refinery_task.cancel()
-        await asyncio.gather(world_task, refinery_task, return_exceptions=True)
+        manufacturing_task.cancel()
+        npc_task.cancel()
+        await asyncio.gather(world_task, refinery_task, manufacturing_task, npc_task, return_exceptions=True)
         await close_redis()
         await close_database()
 
@@ -57,9 +63,11 @@ app.add_middleware(
     allow_headers=["authorization", "content-type"],
 )
 app.include_router(auth_router)
+app.include_router(admin_router)
 app.include_router(fitting_router)
 app.include_router(inventory_router)
 app.include_router(market_router)
+app.include_router(manufacturing_router)
 app.include_router(mining_router)
 app.include_router(refinery_router)
 app.include_router(realtime_router)

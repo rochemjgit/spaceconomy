@@ -21,7 +21,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import settings
 from .db import get_session
-from .models import Account, AccountActivation, InventoryContainer, Pilot, RefreshSession, ShipState
+from .models import (
+    Account,
+    AccountActivation,
+    InventoryContainer,
+    Pilot,
+    PilotWallet,
+    RefreshSession,
+    ShipState,
+    WalletTransaction,
+)
 from .redis import delete_session, set_session
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
@@ -75,6 +84,7 @@ class PilotSummary(BaseModel):
 
     id: UUID
     display_name: str
+    balance_credits: int
 
 
 class PilotCreationRequest(BaseModel):
@@ -181,8 +191,18 @@ async def _create_tokens(
         access_token=_access_token(account.id),
         refresh_token=refresh_token,
         pilots=[
-            PilotSummary(id=pilot.id, display_name=pilot.display_name)
-            for pilot in await session.scalars(select(Pilot).where(Pilot.account_id == account.id))
+            PilotSummary(
+                id=pilot.id,
+                display_name=pilot.display_name,
+                balance_credits=balance_credits or 0,
+            )
+            for pilot, balance_credits in (
+                await session.execute(
+                    select(Pilot, PilotWallet.balance_credits)
+                    .outerjoin(PilotWallet, PilotWallet.pilot_id == Pilot.id)
+                    .where(Pilot.account_id == account.id)
+                )
+            )
         ],
     )
 
@@ -350,7 +370,23 @@ async def create_pilot(
         session.add(pilot)
         await session.flush()
         session.add(ShipState(pilot_id=pilot.id, docked_station_name="KEPLER STATION"))
-        return PilotSummary(id=pilot.id, display_name=pilot.display_name)
+        wallet = PilotWallet(pilot_id=pilot.id)
+        session.add(wallet)
+        session.add(
+            WalletTransaction(
+                pilot_id=pilot.id,
+                counterparty_pilot_id=None,
+                amount_credits=10_000,
+                transaction_kind="initial_grant",
+                command_id=f"initial-grant:{pilot.id}",
+                settlement_id=pilot.id,
+            )
+        )
+        return PilotSummary(
+            id=pilot.id,
+            display_name=pilot.display_name,
+            balance_credits=wallet.balance_credits,
+        )
 
 
 @router.post("/select-pilot", response_model=PilotSelectionResponse)

@@ -14,6 +14,8 @@ import {
   StandardMaterial,
   TransformNode,
   Vector3,
+  VertexBuffer,
+  VertexData,
 } from '@babylonjs/core'
 import type { ArcRotateCameraPointersInput } from '@babylonjs/core/Cameras/Inputs/arcRotateCameraPointersInput'
 import { isEditingText } from './input'
@@ -29,12 +31,14 @@ export interface SceneController {
   setCargoCubicMeters?(cargoCubicMeters: number, maximumCargoCubicMeters?: number): void
   setModuleActive(moduleName: string, isActive: boolean): void
   toggleTargetLock(): void
+  approachTarget?(): boolean
   clearTargetSelection?(): void
   getTargetables?(): TargetableObject[]
   selectTarget?(targetId: string): void
   updateRemotePilot?(pilot: RemotePilot): void
   removeRemotePilot?(pilotId: string): void
   setRemotePilotMining?(pilotId: string, active: boolean, source: Vector3, target: Vector3): void
+  setRemotePilotActivity?(pilotId: string, activity: RemotePilotActivity): void
   setHostileTargeting?(pilotId: string, active: boolean): void
 }
 
@@ -46,6 +50,13 @@ export interface RemotePilot {
   yaw: number
   pitch: number
   roll: number
+}
+
+export interface RemotePilotActivity {
+  behaviorState: string
+  warpPhase?: WarpPhase
+  docked: boolean
+  target: Vector3
 }
 
 export interface MiningExtractionResult {
@@ -88,7 +99,7 @@ export interface SceneOptions {
   onWarpUpdate?: (isWarping: boolean, phase: WarpPhase, progress: number) => void
   onTargetSelectionChange?: (target?: { id?: string; name: string; kind: 'asteroid' | 'pilot' | 'cargo' | 'warpable' | 'station' | 'planet'; shipType?: string; jettisonedItemId?: string; position: Vector3; oreRemainingCubicMeters: number; initialOreCubicMeters: number; locked: boolean; locking: boolean; lockProgress: number }) => void
   onShipStatusChange?: (status: ShipStatus) => void
-  onModuleActiveChange?: (moduleName: string, isActive: boolean) => void
+  onModuleActiveChange?: (moduleName: string, isActive: boolean, targetId?: string) => void
   onMiningLaserUpdate?: (active: boolean, source?: Vector3, target?: Vector3) => void
   onAsteroidExtraction?: (asteroidId: string, position: Vector3) => Promise<MiningExtractionResult | undefined>
   onInventoryChanged?: () => void
@@ -267,6 +278,67 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   const asteroidMaterial = new StandardMaterial('server-asteroid-material', scene)
   asteroidMaterial.diffuseColor = new Color3(0.38, 0.28, 0.17)
   asteroidMaterial.emissiveColor = new Color3(0.05, 0.025, 0.008)
+  asteroidMaterial.specularColor = new Color3(0.08, 0.06, 0.04)
+  const asteroidMaterials = new Map<string, StandardMaterial>()
+  const hashString = (value: string) => {
+    let hash = 2_166_136_261
+    for (const character of value) {
+      hash ^= character.charCodeAt(0)
+      hash = Math.imul(hash, 16_777_619)
+    }
+    return hash >>> 0
+  }
+  const createSeededRandom = (seed: number) => () => {
+    seed += 0x6D2B79F5
+    let value = seed
+    value = Math.imul(value ^ (value >>> 15), value | 1)
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61)
+    return ((value ^ (value >>> 14)) >>> 0) / 4_294_967_296
+  }
+  const asteroidMaterialFor = (composition: string) => {
+    const key = composition.toLowerCase()
+    const existingMaterial = asteroidMaterials.get(key)
+    if (existingMaterial) return existingMaterial
+    const material = asteroidMaterial.clone(`asteroid-material-${key}`)
+    if (!material) return asteroidMaterial
+    if (key.includes('iron') || key.includes('metal')) {
+      material.diffuseColor = new Color3(0.23, 0.25, 0.27)
+      material.emissiveColor = new Color3(0.012, 0.016, 0.018)
+      material.specularColor = new Color3(0.28, 0.3, 0.32)
+    } else if (key.includes('ice')) {
+      material.diffuseColor = new Color3(0.3, 0.43, 0.48)
+      material.emissiveColor = new Color3(0.018, 0.04, 0.055)
+      material.specularColor = new Color3(0.32, 0.42, 0.48)
+    } else if (key.includes('silicate') || key.includes('quartz')) {
+      material.diffuseColor = new Color3(0.4, 0.31, 0.21)
+      material.emissiveColor = new Color3(0.045, 0.025, 0.01)
+    }
+    asteroidMaterials.set(key, material)
+    return material
+  }
+  const createAsteroidMesh = (asteroid: ServerAsteroid) => {
+    const mesh = MeshBuilder.CreateIcoSphere(`asteroid-${asteroid.id}`, { radius: asteroid.radius, subdivisions: 2, flat: true }, scene)
+    const positions = mesh.getVerticesData(VertexBuffer.PositionKind)
+    const indices = mesh.getIndices()
+    if (positions && indices) {
+      const random = createSeededRandom(hashString(asteroid.id))
+      for (let index = 0; index < positions.length; index += 3) {
+        const direction = new Vector3(positions[index], positions[index + 1], positions[index + 2]).normalize()
+        const ridge = Math.sin(direction.x * 7.1 + direction.z * 4.3) * 0.055
+        const crater = Math.max(0, Math.sin(direction.y * 11.7 - direction.x * 5.4)) * -0.08
+        const variation = 0.78 + random() * 0.27 + ridge + crater
+        positions[index] *= variation
+        positions[index + 1] *= variation
+        positions[index + 2] *= variation
+      }
+      const normals: number[] = []
+      VertexData.ComputeNormals(positions, indices, normals)
+      mesh.updateVerticesData(VertexBuffer.PositionKind, positions)
+      mesh.updateVerticesData(VertexBuffer.NormalKind, normals)
+    }
+    mesh.material = asteroidMaterialFor(asteroid.composition)
+    return mesh
+  }
 
   const stationMaterial = new StandardMaterial('station-marker-material', scene)
   stationMaterial.diffuseColor = new Color3(0.16, 0.4, 0.5)
@@ -307,14 +379,50 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
 
   const ship = new TransformNode('starter-ship', scene)
   ship.position = options.initialPosition?.clone() ?? launchPosition.clone()
-  const hull = MeshBuilder.CreateBox('starter-ship-hull', { width: 1.7, height: 0.6, depth: 3.2 }, scene)
-  hull.parent = ship
   const shipMaterial = new StandardMaterial('starter-ship-material', scene)
-  shipMaterial.emissiveColor = new Color3(0.32, 0.04, 0.04)
-  shipMaterial.diffuseColor = new Color3(0.45, 0.03, 0.03)
-  hull.material = shipMaterial
-  const remotePilots = new Map<string, { ship: TransformNode; targetMesh: Mesh; destination: Vector3; yaw: number; pitch: number; roll: number; miningBeam?: Mesh; miningSource?: Vector3; miningTarget?: Vector3 }>()
+  shipMaterial.diffuseColor = new Color3(0.34, 0.06, 0.05)
+  shipMaterial.emissiveColor = new Color3(0.09, 0.008, 0.006)
+  shipMaterial.specularColor = new Color3(0.55, 0.38, 0.32)
+  const shipTrimMaterial = new StandardMaterial('starter-ship-trim-material', scene)
+  shipTrimMaterial.diffuseColor = new Color3(0.12, 0.13, 0.16)
+  shipTrimMaterial.specularColor = new Color3(0.45, 0.48, 0.52)
+  const canopyMaterial = new StandardMaterial('starter-ship-canopy-material', scene)
+  canopyMaterial.diffuseColor = new Color3(0.03, 0.22, 0.3)
+  canopyMaterial.emissiveColor = new Color3(0.01, 0.08, 0.12)
+  canopyMaterial.specularColor = new Color3(0.7, 0.9, 1)
+  const engineMaterial = new StandardMaterial('starter-ship-engine-material', scene)
+  engineMaterial.diffuseColor = new Color3(0.03, 0.18, 0.24)
+  engineMaterial.emissiveColor = new Color3(0.04, 0.72, 1)
+  engineMaterial.disableLighting = true
+  const attachShipPart = (part: Mesh, material: StandardMaterial, x: number, y: number, z: number) => {
+    part.parent = ship
+    part.position.set(x, y, z)
+    part.material = material
+    part.isPickable = false
+    return part
+  }
+  attachShipPart(MeshBuilder.CreateBox('starter-ship-fuselage', { width: 1.65, height: 0.72, depth: 3.35 }, scene), shipMaterial, 0, 0, 0)
+  const nose = attachShipPart(MeshBuilder.CreateCylinder('starter-ship-nose', {
+    height: 2.15,
+    diameterTop: 0.12,
+    diameterBottom: 1.62,
+    tessellation: 4,
+  }, scene), shipMaterial, 0, 0, 2.55)
+  nose.rotation.x = Math.PI / 2
+  attachShipPart(MeshBuilder.CreateSphere('starter-ship-canopy', { diameterX: 1.12, diameterY: 0.56, diameterZ: 1.2, segments: 12 }, scene), canopyMaterial, 0, 0.52, 0.48)
+  attachShipPart(MeshBuilder.CreateBox('starter-ship-cargo-hold', { width: 1.38, height: 0.82, depth: 1.25 }, scene), shipTrimMaterial, 0, -0.12, -1.92)
+  for (const side of [-1, 1]) {
+    const wing = attachShipPart(MeshBuilder.CreateBox(`starter-ship-wing-${side}`, { width: 2.2, height: 0.13, depth: 1.35 }, scene), shipMaterial, side * 1.48, -0.08, 0.1)
+    wing.rotation.z = side * 0.12
+    attachShipPart(MeshBuilder.CreateCylinder(`starter-ship-engine-${side}`, { height: 0.95, diameterTop: 0.38, diameterBottom: 0.58, tessellation: 8 }, scene), shipTrimMaterial, side * 0.6, 0, -2.18).rotation.x = -Math.PI / 2
+    attachShipPart(MeshBuilder.CreateSphere(`starter-ship-exhaust-${side}`, { diameter: 0.38, segments: 8 }, scene), engineMaterial, side * 0.6, 0, -2.67)
+  }
+  const hardpoint = attachShipPart(MeshBuilder.CreateCylinder('starter-ship-hardpoint-01', { height: 1.35, diameter: 0.3, tessellation: 8 }, scene), shipTrimMaterial, 1.18, -0.12, 1.1)
+  hardpoint.rotation.z = Math.PI / 2
+  attachShipPart(MeshBuilder.CreateCylinder('starter-ship-hardpoint-emitter', { height: 0.52, diameter: 0.36, tessellation: 8 }, scene), engineMaterial, 1.82, -0.12, 1.1).rotation.z = Math.PI / 2
+  const remotePilots = new Map<string, { ship: TransformNode; targetMesh: Mesh; destination: Vector3; snapshotPosition: Vector3; velocity: Vector3; lastSnapshotAt: number; yaw: number; pitch: number; roll: number; miningBeam?: Mesh; miningSource?: Vector3; miningTarget?: Vector3; activityMarker?: Mesh; docked?: boolean; inWarpTransit?: boolean }>()
   const updateRemotePilot = (pilot: RemotePilot) => {
+    const snapshotAt = performance.now()
     let remote = remotePilots.get(pilot.pilotId)
     if (!remote) {
       const remoteShip = new TransformNode(`remote-pilot-${pilot.pilotId}`, scene)
@@ -380,10 +488,14 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       nameplate.billboardMode = Mesh.BILLBOARDMODE_ALL
       nameplate.isPickable = false
       remoteShip.rotation.set(-pilot.pitch, pilot.yaw, pilot.roll)
-      remote = { ship: remoteShip, targetMesh: remoteHull, destination: pilot.position.clone(), yaw: pilot.yaw, pitch: pilot.pitch, roll: pilot.roll }
+      remote = { ship: remoteShip, targetMesh: remoteHull, destination: pilot.position.clone(), snapshotPosition: pilot.position.clone(), velocity: Vector3.Zero(), lastSnapshotAt: snapshotAt, yaw: pilot.yaw, pitch: pilot.pitch, roll: pilot.roll }
       remotePilots.set(pilot.pilotId, remote)
     }
+    const elapsedSeconds = Math.max(0.1, (snapshotAt - remote.lastSnapshotAt) / 1_000)
+    remote.velocity = pilot.position.subtract(remote.snapshotPosition).scale(1 / elapsedSeconds)
+    remote.snapshotPosition.copyFrom(pilot.position)
     remote.destination.copyFrom(pilot.position)
+    remote.lastSnapshotAt = snapshotAt
     remote.yaw = pilot.yaw
     remote.pitch = pilot.pitch
     remote.roll = pilot.roll
@@ -405,6 +517,29 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   const remoteMiningMaterial = new StandardMaterial('remote-mining-laser-material', scene)
   remoteMiningMaterial.emissiveColor = new Color3(0.05, 0.8, 1)
   remoteMiningMaterial.diffuseColor = new Color3(0.02, 0.3, 0.5)
+  const remoteLockMaterial = new StandardMaterial('remote-target-lock-material', scene)
+  remoteLockMaterial.emissiveColor = new Color3(0.95, 0.7, 0.12)
+  remoteLockMaterial.diffuseColor = new Color3(0.45, 0.25, 0.02)
+  const setRemotePilotActivity = (pilotId: string, activity: RemotePilotActivity) => {
+    const remote = remotePilots.get(pilotId)
+    if (!remote) return
+    const inWarpTransit = activity.warpPhase === 'warping' || activity.warpPhase === 'cruising'
+    remote.docked = activity.docked
+    remote.inWarpTransit = inWarpTransit
+    remote.ship.setEnabled(!remote.docked)
+    const showLock = ['locking_asteroid', 'target_locked', 'mining'].includes(activity.behaviorState)
+    if (showLock && !remote.activityMarker) {
+      remote.activityMarker = MeshBuilder.CreateTorus(`remote-target-lock-${pilotId}`, { diameter: 7, thickness: 0.16, tessellation: 24 }, scene)
+      remote.activityMarker.material = remoteLockMaterial
+      remote.activityMarker.isPickable = false
+      glow.addIncludedOnlyMesh(remote.activityMarker)
+    }
+    if (remote.activityMarker) {
+      remote.activityMarker.position.copyFrom(activity.target)
+      remote.activityMarker.setEnabled(showLock)
+    }
+    if (activity.docked || inWarpTransit) setRemotePilotMining(pilotId, false, activity.target, activity.target)
+  }
   const setRemotePilotMining = (pilotId: string, active: boolean, source: Vector3, target: Vector3) => {
     const remote = remotePilots.get(pilotId)
     if (!remote) return
@@ -434,11 +569,13 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   const maximumPowerMegajoules = 100
   const powerRegenerationMegawatts = 8
   const miningLaserPowerDrawMegawatts = 12
+  const remotePilotVisibilityRangeMeters = 50_000
   const warpDriveStats = {
     maximumCapacity: 100,
     rechargeCapacityPerSecond: 2,
     capacityDrainPerSecond: 2,
     maximumSpeedMetersPerSecond: options.warpCruiseSpeedMetersPerSecond ?? 10_000,
+    manualCooldownSeconds: 30,
   }
   const warpEntryCapacityCost = warpDriveStats.maximumCapacity * 0.1
   const maximumWarpRangeKilometers = (
@@ -456,6 +593,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   let miningLaserReportedTarget: AbstractMesh | undefined
   let miningExtractionPending = false
   const activeModules = new Set<string>()
+  const activeModuleTargets = new Map<string, AbstractMesh>()
   const shieldBubbleMaterial = new StandardMaterial('starter-ship-shield-bubble-material', scene)
   shieldBubbleMaterial.diffuseColor = new Color3(0.08, 0.58, 1)
   shieldBubbleMaterial.emissiveColor = new Color3(0.02, 0.25, 0.62)
@@ -556,33 +694,6 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     }
   }
 
-  const nose = MeshBuilder.CreateCylinder('starter-ship-nose', {
-    height: 1.9,
-    diameterTop: 0.08,
-    diameterBottom: 1.45,
-    tessellation: 4,
-  }, scene)
-  nose.parent = ship
-  nose.position.z = 2.35
-  nose.rotation.x = Math.PI / 2
-  nose.material = shipMaterial
-
-  const engineMaterial = new StandardMaterial('starter-ship-engine-material', scene)
-  engineMaterial.emissiveColor = new Color3(0.1, 0.9, 1)
-  engineMaterial.diffuseColor = new Color3(0.02, 0.1, 0.16)
-  for (const engineX of [-0.52, 0.52]) {
-    const engine = MeshBuilder.CreateCylinder('starter-ship-engine', {
-      height: 0.85,
-      diameterTop: 0.42,
-      diameterBottom: 0.55,
-      tessellation: 8,
-    }, scene)
-    engine.parent = ship
-    engine.position.set(engineX, 0, -1.8)
-    engine.rotation.x = -Math.PI / 2
-    engine.material = engineMaterial
-  }
-
   const strafeThrusterMaterials = [-1, 1].map((side) => {
     const material = new StandardMaterial(`starter-ship-strafe-${side}-material`, scene)
     material.emissiveColor = Color3.Black()
@@ -602,6 +713,8 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   const pressedKeys = new Set<string>()
   let flightAssistEnabled = options.initialFlightAssistEnabled ?? true
   const velocity = new Vector3(0, 0, options.initialLaunchSpeed ?? 0)
+  let approachTarget: AbstractMesh | undefined
+  const approachDistanceMeters = 250
   const engineThrustNewtons = 550_000
   const brakingThrustNewtons = 200_000
   const maximumSpeed = 2_500
@@ -617,6 +730,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   const maximumSteeringPitch = Math.PI / 2 - 0.01
   let dockingAvailable = false
   let postWarpCollisionImmunitySeconds = 0
+  let manualWarpCooldownSeconds = 0
   let warp: {
     origin: Vector3
     destination: Vector3
@@ -626,6 +740,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     targetPitch: number
     phase: WarpPhase
     phaseElapsedSeconds: number
+    entrySpeedMetersPerSecond: number
     cruiseDurationSeconds: number
     cruiseCapacityDrainPerSecond: number
   } | undefined
@@ -661,6 +776,12 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       warp = undefined
       options.onWarpUpdate?.(false, 'decelerating', 1)
       return
+    }
+    if (nextPhase === 'accelerating') {
+      activeWarp.entrySpeedMetersPerSecond = Math.max(
+        100,
+        Vector3.Dot(velocity, activeWarp.direction),
+      )
     }
     activeWarp.phase = nextPhase
     activeWarp.phaseElapsedSeconds = 0
@@ -698,6 +819,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       targetPitch: Math.asin(direction.y),
       phase: 'aligning',
       phaseElapsedSeconds: 0,
+      entrySpeedMetersPerSecond: 0,
       cruiseDurationSeconds,
       cruiseCapacityDrainPerSecond: warpDriveStats.capacityDrainPerSecond,
     }
@@ -712,18 +834,32 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       if (warp.phase !== 'decelerating') beginWarpEgress(warp)
       return true
     }
+    if (manualWarpCooldownSeconds > 0) return false
     const direction = new Vector3(
       Math.sin(shipYaw) * Math.cos(shipPitch),
       Math.sin(shipPitch),
       Math.cos(shipYaw) * Math.cos(shipPitch),
     )
-    return warpTo(ship.position.add(direction.scale(options.systemRadiusMeters ?? 18_000_000)))
+    const started = warpTo(
+      ship.position.add(direction.scale(options.systemRadiusMeters ?? 18_000_000)),
+    )
+    if (started) manualWarpCooldownSeconds = warpDriveStats.manualCooldownSeconds
+    return started
   }
 
   const setModuleActive = (moduleName: string, isActive: boolean) => {
-    if (isActive) activeModules.add(moduleName)
-    else activeModules.delete(moduleName)
-    options.onModuleActiveChange?.(moduleName, isActive)
+    const activeTarget = activeModuleTargets.get(moduleName)
+    if (isActive) {
+      activeModules.add(moduleName)
+      if (targetedAsteroid && (lockedTargets.has(targetedAsteroid) || lockingTarget?.asteroid === targetedAsteroid)) {
+        activeModuleTargets.set(moduleName, targetedAsteroid)
+      }
+    } else {
+      activeModules.delete(moduleName)
+      activeModuleTargets.delete(moduleName)
+    }
+    const target = isActive ? activeModuleTargets.get(moduleName) : activeTarget
+    options.onModuleActiveChange?.(moduleName, isActive, target ? targetDescriptors.get(target.uniqueId)?.targetId : undefined)
     updateShipStatus()
   }
 
@@ -785,7 +921,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   let targetBrackets: TransformNode | undefined
   const hostileTargetBrackets = new Map<string, TransformNode>()
   const maximumTargetLocks = options.maximumTargetLocks ?? 3
-  const miningLaserRange = 2_500
+  const miningLaserRange = 500
   const miningLaserMaterial = new StandardMaterial('mining-laser-beam-material', scene)
   miningLaserMaterial.diffuseColor = new Color3(0.1, 0.8, 0.45)
   miningLaserMaterial.emissiveColor = new Color3(0.25, 1, 0.65)
@@ -857,6 +993,9 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   const unlockTarget = (targetMesh?: AbstractMesh) => {
     const target = targetMesh ?? targetedAsteroid ?? lockingTarget?.asteroid
     if (!target) return
+    for (const [moduleName, moduleTarget] of activeModuleTargets) {
+      if (moduleTarget === target) setModuleActive(moduleName, false)
+    }
     const targetPilotId = targetDescriptors.get(target.uniqueId)?.pilotId
     if (targetPilotId) options.onPilotTargetLockChange?.(targetPilotId, false)
     lockedTargets.get(target)?.dispose()
@@ -866,9 +1005,13 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   }
   const clearTargetSelection = () => {
     if (targetedAsteroid && lockingTarget?.asteroid === targetedAsteroid) unlockTarget(targetedAsteroid)
-    if (activeModules.has('Mining Laser')) setModuleActive('Mining Laser', false)
     clearTarget()
     reportTargetLock()
+  }
+  const beginApproach = () => {
+    if (!targetedAsteroid || !lockedTargets.has(targetedAsteroid)) return false
+    approachTarget = targetedAsteroid
+    return true
   }
   const replaceAsteroids = (asteroids: ServerAsteroid[]) => {
     const incomingIds = new Set(asteroids.map((asteroid) => asteroid.id))
@@ -887,10 +1030,9 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     for (const asteroid of asteroids) {
       let mesh = asteroidMeshes.get(asteroid.id)
       if (!mesh) {
-        mesh = MeshBuilder.CreateIcoSphere(`asteroid-${asteroid.id}`, { radius: asteroid.radius, subdivisions: 1 }, scene)
+        mesh = createAsteroidMesh(asteroid)
         mesh.position.copyFrom(asteroid.position)
         mesh.rotation.set(asteroid.position.x % Math.PI, asteroid.position.y % Math.PI, asteroid.position.z % Math.PI)
-        mesh.material = asteroidMaterial
         registerAsteroid(mesh, `${asteroid.composition.toUpperCase()} ASTEROID`, asteroid.radius, asteroid.initialOreCubicMeters, asteroid.id)
         asteroidMeshes.set(asteroid.id, mesh)
       }
@@ -1078,6 +1220,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       return
     }
     postWarpCollisionImmunitySeconds = Math.max(0, postWarpCollisionImmunitySeconds - deltaSeconds)
+    manualWarpCooldownSeconds = Math.max(0, manualWarpCooldownSeconds - deltaSeconds)
     if (lockingTarget) {
       lockingTarget.elapsedSeconds += deltaSeconds
       if (lockingTarget.elapsedSeconds >= targetLockDurationSeconds) {
@@ -1147,16 +1290,17 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
           warpReadyForTransit = currentSpeed >= 99.9 && Vector3.Dot(velocity, warp.direction) / currentSpeed >= 0.999
         }
       } else if (warp.phase === 'accelerating') {
-        const warpSpeed = warpDriveStats.maximumSpeedMetersPerSecond * progress
+        const warpSpeed = warp.entrySpeedMetersPerSecond + (
+          warpDriveStats.maximumSpeedMetersPerSecond - warp.entrySpeedMetersPerSecond
+        ) * progress
         velocity.copyFrom(warp.direction).scaleInPlace(warpSpeed)
         ship.position.addInPlace(velocity.scale(deltaSeconds))
       } else if (warp.phase === 'warping') {
         velocity.copyFrom(warp.direction).scaleInPlace(warpDriveStats.maximumSpeedMetersPerSecond)
         ship.position.addInPlace(velocity.scale(deltaSeconds))
       } else if (warp.phase === 'cruising') {
-        const cruiseProgress = progress * progress * (3 - 2 * progress)
-        Vector3.LerpToRef(warp.cruiseOrigin, warp.destination, cruiseProgress * 0.92, ship.position)
         velocity.copyFrom(warp.direction).scaleInPlace(warpDriveStats.maximumSpeedMetersPerSecond)
+        ship.position.addInPlace(velocity.scale(deltaSeconds))
         warpCapacity = Math.max(warpEntryCapacityCost, warpCapacity - warp.cruiseCapacityDrainPerSecond * deltaSeconds)
         updateShipStatus()
         if (warpCapacity <= warpEntryCapacityCost && progress < 1) {
@@ -1184,6 +1328,26 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
         const pitchDifference = steeringTargetPitch - shipPitch
         shipPitch += Math.max(-maxTurn, Math.min(maxTurn, pitchDifference))
       }
+      if (movementIntent.lengthSquared() > 0 || isSteering) approachTarget = undefined
+      if (approachTarget) {
+        const offset = approachTarget.getAbsolutePosition().subtract(ship.position)
+        const distance = offset.length()
+        if (!lockedTargets.has(approachTarget) || distance <= approachDistanceMeters) {
+          approachTarget = undefined
+          velocity.scaleInPlace(0.4)
+        } else {
+          const targetDirection = offset.scale(1 / distance)
+          const targetYaw = Math.atan2(targetDirection.x, targetDirection.z)
+          const targetPitch = Math.asin(targetDirection.y)
+          const maxTurn = turnSpeed * deltaSeconds
+          const yawDifference = Math.atan2(Math.sin(targetYaw - shipYaw), Math.cos(targetYaw - shipYaw))
+          shipYaw += Math.max(-maxTurn, Math.min(maxTurn, yawDifference))
+          shipPitch += Math.max(-maxTurn, Math.min(maxTurn, targetPitch - shipPitch))
+          velocity.addInPlace(
+            targetDirection.scale((engineThrustNewtons / shipMassKg) * deltaSeconds),
+          )
+        }
+      }
       if (movementIntent.lengthSquared() > 0) {
         const boostActive = pressedKeys.has('shift')
         const thrustMultiplier = boostActive ? 3 : 1
@@ -1209,7 +1373,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       ship.position.addInPlace(velocity.scale(deltaSeconds))
     }
     resolveWorldCollisions()
-    const miningTarget = targetedAsteroid && (lockedTargets.has(targetedAsteroid) || lockingTarget?.asteroid === targetedAsteroid) ? targetedAsteroid : undefined
+    const miningTarget = activeModuleTargets.get('Mining Laser')
     const miningTargetDetails = miningTarget ? asteroidTargets.get(miningTarget.uniqueId) : undefined
     const miningLaserActive = Boolean(
       miningTarget
@@ -1380,8 +1544,12 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     }
     const actualSpeed = Vector3.Distance(ship.position, frameStartPosition) / deltaSeconds
     for (const [pilotId, remote] of remotePilots) {
+      remote.destination.addInPlace(remote.velocity.scale(deltaSeconds))
       remote.ship.position = Vector3.Lerp(remote.ship.position, remote.destination, Math.min(1, deltaSeconds * 8))
-      remote.ship.setEnabled(Vector3.Distance(ship.position, remote.ship.position) <= 30_000)
+      remote.ship.setEnabled(
+        !remote.docked
+        && Vector3.Distance(ship.position, remote.ship.position) <= remotePilotVisibilityRangeMeters,
+      )
       remote.ship.rotation.x += (-remote.pitch - remote.ship.rotation.x) * Math.min(1, deltaSeconds * 8)
       remote.ship.rotation.y += Math.atan2(Math.sin(remote.yaw - remote.ship.rotation.y), Math.cos(remote.yaw - remote.ship.rotation.y)) * Math.min(1, deltaSeconds * 8)
       remote.ship.rotation.z += (remote.roll - remote.ship.rotation.z) * Math.min(1, deltaSeconds * 8)
@@ -1419,6 +1587,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     warpTo,
     toggleWarp,
     emitSensorPing,
+    approachTarget: beginApproach,
     replaceAsteroids,
     replaceJettisonedItems,
     pickupJettisonedItem,
@@ -1431,6 +1600,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     updateRemotePilot,
     removeRemotePilot,
     setRemotePilotMining,
+    setRemotePilotActivity,
     setHostileTargeting,
     dispose() {
       resizeObserver.disconnect()

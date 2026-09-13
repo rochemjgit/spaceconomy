@@ -1,0 +1,32 @@
+{
+  "services": [
+    {
+      "service_key": "starter_manufacturing",
+      "display_name": "Kepler Fabrication Bay",
+      "seconds_per_run": 30,
+      "fee_credits": 0,
+      "active_job_capacity": 1,
+      "queue_capacity": 5,
+      "active": true
+    }
+  ],
+  "recipes": [
+    {
+      "recipe_id": "recipe.mining_laser.m2",
+      "version": 1,
+      "service_key": "starter_manufacturing",
+      "display_name": "M2 Mining Laser",
+      "output": {
+        "definition_id": "module.mining_laser.m2",
+        "definition_version": 1,
+        "quantity": 1
+      },
+      "inputs": [
+        { "definition_id": "material.pure.iron", "definition_version": 1, "quantity": 12 },
+        { "definition_id": "material.pure.silicon", "definition_version": 1, "quantity": 8 },
+        { "definition_id": "material.pure.titanium", "definition_version": 1, "quantity": 3 }
+      ],
+      "active": true
+    }
+  ]
+}

@@ -50,6 +50,7 @@ class FittedModuleResponse(BaseModel):
     slot_index: int
     durability: float
     mass_kg: float
+    effective_range_meters: float
 
 
 class FittingSnapshotResponse(BaseModel):
@@ -82,6 +83,7 @@ async def _domain_module_definition(
         durability_maximum=definition.durability_maximum,
         mass_kg=definition.mass_kg,
         volume_cubic_meters=definition.volume_cubic_meters,
+        effective_range_meters=definition.effective_range_meters,
         passive_effects=tuple(
             StatisticModifier(
                 statistic=effect.statistic,
@@ -187,6 +189,7 @@ async def _snapshot_response(
                 slot_index=fitted.slot_index,
                 durability=fitted.durability,
                 mass_kg=definition.mass_kg,
+                effective_range_meters=definition.effective_range_meters,
             )
         )
     return FittingSnapshotResponse(
@@ -204,6 +207,19 @@ async def _locked_ship(session: AsyncSession, pilot_id: UUID) -> Ship:
     if ship is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "active ship was not found")
     return ship
+
+
+@router.get("/active", response_model=FittingSnapshotResponse)
+async def active_fitting(
+    session: SessionDependency, authorization: Annotated[str | None, Header()] = None
+) -> FittingSnapshotResponse:
+    """Return active-ship statistics for in-space systems such as sensors."""
+    pilot_id = _pilot_id_from_authorization(authorization)
+    async with session.begin():
+        _, station_container = await _ensure_containers(session, pilot_id)
+        ship = await _locked_ship(session, pilot_id)
+        service, definitions = await _service_for_ship(session, pilot_id, ship, station_container.id)
+        return await _snapshot_response(service, definitions)
 
 
 @router.get("/docked", response_model=FittingSnapshotResponse)

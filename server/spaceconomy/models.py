@@ -95,23 +95,29 @@ class PilotWallet(TimestampedModel, Base):
 
 
 class WalletTransaction(TimestampedModel, Base):
-    """An immutable credit movement created when a market trade settles."""
+    """An immutable credit movement in a pilot's wallet ledger."""
 
     __tablename__ = "wallet_transactions"
     __table_args__ = (
         CheckConstraint("amount_credits <> 0", name="wallet_transaction_amount_valid"),
         CheckConstraint(
-            "transaction_kind IN ('market_purchase', 'market_sale')",
+            "transaction_kind IN "
+            "('initial_grant', 'market_purchase', 'market_sale', 'refinery_fee', "
+            "'market_listing_fee', 'market_purchase_commission', 'market_buy_order_fee', "
+            "'market_buy_order_fill', 'market_buy_order_sale')",
             name="wallet_transaction_kind_valid",
         ),
+        UniqueConstraint("pilot_id", "command_id", name="uq_wallet_transaction_pilot_command"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     pilot_id: Mapped[UUID] = mapped_column(ForeignKey("pilots.id"), index=True, nullable=False)
-    counterparty_pilot_id: Mapped[UUID] = mapped_column(ForeignKey("pilots.id"), nullable=False)
+    counterparty_pilot_id: Mapped[UUID | None] = mapped_column(ForeignKey("pilots.id"))
     amount_credits: Mapped[int] = mapped_column(BigInteger, nullable=False)
     transaction_kind: Mapped[str] = mapped_column(String(32), nullable=False)
-    market_listing_id: Mapped[UUID] = mapped_column(Uuid, index=True, nullable=False)
+    command_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    settlement_id: Mapped[UUID] = mapped_column(Uuid, index=True, nullable=False)
+    market_listing_id: Mapped[UUID | None] = mapped_column(Uuid, index=True)
 
 
 class HullDefinition(TimestampedModel, Base):
@@ -147,6 +153,8 @@ class ModuleDefinition(TimestampedModel, Base):
     durability_maximum: Mapped[float] = mapped_column(Float, nullable=False)
     mass_kg: Mapped[float] = mapped_column(Float, nullable=False)
     volume_cubic_meters: Mapped[float] = mapped_column(Float, nullable=False)
+    effective_range_meters: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    starter_grant: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
@@ -221,6 +229,51 @@ class ShipState(TimestampedModel, Base):
     sensor_last_scan_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class NpcProfile(TimestampedModel, Base):
+    """Durable personality and capabilities for a non-player pilot."""
+
+    __tablename__ = "npc_profiles"
+    __table_args__ = (
+        CheckConstraint(
+            "lifecycle_state IN ('active', 'paused', 'retired')",
+            name="npc_profile_lifecycle_state_valid",
+        ),
+    )
+
+    pilot_id: Mapped[UUID] = mapped_column(ForeignKey("pilots.id"), primary_key=True)
+    archetype_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    backstory: Mapped[str] = mapped_column(Text, nullable=False)
+    motivations: Mapped[str] = mapped_column(Text, nullable=False)
+    capabilities: Mapped[str] = mapped_column(Text, nullable=False)
+    lifecycle_state: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
+
+
+class NpcRuntime(TimestampedModel, Base):
+    """Mutable server-owned runtime state for a non-player pilot."""
+
+    __tablename__ = "npc_runtimes"
+
+    pilot_id: Mapped[UUID] = mapped_column(ForeignKey("pilots.id"), primary_key=True)
+    behavior_state: Mapped[str] = mapped_column(Text, nullable=False, default="idle")
+    decision_source: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="deterministic"
+    )
+    target_x: Mapped[float | None] = mapped_column(Float)
+    target_y: Mapped[float | None] = mapped_column(Float)
+    target_z: Mapped[float | None] = mapped_column(Float)
+    decision_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    warp_phase: Mapped[str | None] = mapped_column(String(32))
+    warp_capacity: Mapped[float] = mapped_column(Float, nullable=False, default=100)
+    warp_phase_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    warp_destination_x: Mapped[float | None] = mapped_column(Float)
+    warp_destination_y: Mapped[float | None] = mapped_column(Float)
+    warp_destination_z: Mapped[float | None] = mapped_column(Float)
+    mining_target_asteroid_id: Mapped[UUID | None] = mapped_column(Uuid)
+    mining_lock_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    mining_locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    mining_next_cycle_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class SolarSystem(TimestampedModel, Base):
     """A navigable system with an authoritative spatial boundary."""
 
@@ -233,7 +286,7 @@ class SolarSystem(TimestampedModel, Base):
 
 
 class AsteroidField(TimestampedModel, Base):
-    """A discoverable asteroid-field site that replenishes through configured batches."""
+    """A finite discoverable asteroid-field site retained after its depletion."""
 
     __tablename__ = "asteroid_fields"
     __table_args__ = (UniqueConstraint("system_id", "field_key"),)
@@ -346,7 +399,7 @@ class RefineryService(TimestampedModel, Base):
     second_pass_seconds_per_cubic_meter: Mapped[float] = mapped_column(Float, nullable=False)
     first_pass_efficiency: Mapped[float] = mapped_column(Float, nullable=False)
     second_pass_efficiency: Mapped[float] = mapped_column(Float, nullable=False)
-    fee_credits: Mapped[float] = mapped_column(Float, nullable=False)
+    fee_credits: Mapped[int] = mapped_column(BigInteger, nullable=False)
     active_job_capacity: Mapped[int] = mapped_column(Integer, nullable=False)
     queue_capacity: Mapped[int] = mapped_column(Integer, nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -391,13 +444,165 @@ class RefineryJob(TimestampedModel, Base):
     queue_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     quoted_duration_seconds: Mapped[float] = mapped_column(Float, nullable=False)
     quoted_efficiency: Mapped[float] = mapped_column(Float, nullable=False)
-    quoted_fee_credits: Mapped[float] = mapped_column(Float, nullable=False)
+    quoted_fee_credits: Mapped[int] = mapped_column(BigInteger, nullable=False)
     expected_outputs: Mapped[str] = mapped_column(Text, nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completes_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     failure_reason: Mapped[str | None] = mapped_column(String(256))
+
+
+class ManufacturingService(TimestampedModel, Base):
+    """A station-owned manufacturing facility with bounded parallel work."""
+
+    __tablename__ = "manufacturing_services"
+    __table_args__ = (
+        UniqueConstraint("station_id", "service_key", name="uq_manufacturing_service_station_key"),
+        CheckConstraint("seconds_per_run > 0", name="manufacturing_service_duration_valid"),
+        CheckConstraint("fee_credits >= 0", name="manufacturing_service_fee_valid"),
+        CheckConstraint("active_job_capacity > 0", name="manufacturing_service_active_capacity_valid"),
+        CheckConstraint("queue_capacity > 0", name="manufacturing_service_queue_capacity_valid"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    station_id: Mapped[UUID] = mapped_column(Uuid, index=True, nullable=False)
+    service_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    seconds_per_run: Mapped[float] = mapped_column(Float, nullable=False)
+    fee_credits: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    active_job_capacity: Mapped[int] = mapped_column(Integer, nullable=False)
+    queue_capacity: Mapped[int] = mapped_column(Integer, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class ManufacturingRecipe(TimestampedModel, Base):
+    """An immutable, versioned recipe that produces one module definition."""
+
+    __tablename__ = "manufacturing_recipes"
+    __table_args__ = (
+        UniqueConstraint("recipe_id", "version", name="uq_manufacturing_recipe_version"),
+        CheckConstraint("output_quantity > 0", name="manufacturing_recipe_output_quantity_valid"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    recipe_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    service_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    output_module_definition_id: Mapped[UUID] = mapped_column(
+        ForeignKey("module_definitions.id"), nullable=False
+    )
+    output_quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class ManufacturingRecipeInput(TimestampedModel, Base):
+    """One material requirement pinned to a manufacturing recipe version."""
+
+    __tablename__ = "manufacturing_recipe_inputs"
+    __table_args__ = (
+        UniqueConstraint("manufacturing_recipe_id", "input_index"),
+        CheckConstraint("input_index >= 0", name="manufacturing_recipe_input_index_valid"),
+        CheckConstraint("quantity > 0", name="manufacturing_recipe_input_quantity_valid"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    manufacturing_recipe_id: Mapped[UUID] = mapped_column(
+        ForeignKey("manufacturing_recipes.id"), index=True, nullable=False
+    )
+    input_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    definition_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    definition_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class ManufacturingJob(TimestampedModel, Base):
+    """A durable manufacturing order with frozen terms and output."""
+
+    __tablename__ = "manufacturing_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('queued', 'processing', 'completed', 'cancelled', 'failed')",
+            name="manufacturing_job_state_valid",
+        ),
+        CheckConstraint("queue_sequence >= 0", name="manufacturing_job_sequence_valid"),
+        CheckConstraint("quoted_duration_seconds > 0", name="manufacturing_job_duration_valid"),
+        CheckConstraint("quoted_fee_credits >= 0", name="manufacturing_job_fee_valid"),
+        UniqueConstraint("pilot_id", "idempotency_key", name="uq_manufacturing_job_pilot_idempotency"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    pilot_id: Mapped[UUID] = mapped_column(ForeignKey("pilots.id"), index=True, nullable=False)
+    manufacturing_service_id: Mapped[UUID] = mapped_column(
+        ForeignKey("manufacturing_services.id"), index=True, nullable=False
+    )
+    manufacturing_recipe_id: Mapped[UUID] = mapped_column(
+        ForeignKey("manufacturing_recipes.id"), nullable=False
+    )
+    destination_container_id: Mapped[UUID] = mapped_column(
+        ForeignKey("inventory_containers.id"), nullable=False
+    )
+    state: Mapped[str] = mapped_column(String(16), index=True, nullable=False)
+    queue_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    quoted_duration_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    quoted_fee_credits: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    expected_output: Mapped[str] = mapped_column(Text, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completes_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failure_reason: Mapped[str | None] = mapped_column(String(256))
+
+
+class ManufacturingJobInput(TimestampedModel, Base):
+    """An exact inventory reservation held by one manufacturing job."""
+
+    __tablename__ = "manufacturing_job_inputs"
+    __table_args__ = (
+        UniqueConstraint("manufacturing_job_id", "input_index"),
+        UniqueConstraint("inventory_item_id", name="uq_manufacturing_job_input_item"),
+        CheckConstraint("input_index >= 0", name="manufacturing_job_input_index_valid"),
+        CheckConstraint("quantity > 0", name="manufacturing_job_input_quantity_valid"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    manufacturing_job_id: Mapped[UUID] = mapped_column(
+        ForeignKey("manufacturing_jobs.id"), index=True, nullable=False
+    )
+    inventory_item_id: Mapped[UUID | None] = mapped_column(ForeignKey("inventory_items.id"))
+    input_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    definition_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    definition_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class InventoryLedgerEntry(TimestampedModel, Base):
+    """An append-only audit record for authoritative inventory mutations."""
+
+    __tablename__ = "inventory_ledger_entries"
+    __table_args__ = (
+        CheckConstraint(
+            "event_kind IN ('manufacturing_reserved', 'manufacturing_completed', "
+            "'manufacturing_cancelled')",
+            name="inventory_ledger_event_kind_valid",
+        ),
+        CheckConstraint("quantity > 0", name="inventory_ledger_quantity_valid"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    pilot_id: Mapped[UUID] = mapped_column(ForeignKey("pilots.id"), index=True, nullable=False)
+    manufacturing_job_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("manufacturing_jobs.id"), index=True
+    )
+    inventory_item_id: Mapped[UUID | None] = mapped_column(ForeignKey("inventory_items.id"))
+    event_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    definition_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    definition_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_container_id: Mapped[UUID | None] = mapped_column(ForeignKey("inventory_containers.id"))
+    destination_container_id: Mapped[UUID | None] = mapped_column(ForeignKey("inventory_containers.id"))
+    command_id: Mapped[str] = mapped_column(String(128), nullable=False)
 
 
 class JettisonedItem(TimestampedModel, Base):
@@ -492,8 +697,10 @@ class MarketListing(TimestampedModel, Base):
         CheckConstraint("quantity > 0", name="market_listing_quantity_valid"),
         CheckConstraint("unit_price_credits > 0", name="market_listing_price_valid"),
         CheckConstraint(
-            "state IN ('active', 'sold', 'cancelled')", name="market_listing_state_valid"
+            "state IN ('active', 'sold', 'cancelled', 'expired')", name="market_listing_state_valid"
         ),
+        CheckConstraint("duration_days IN (1, 7, 30)", name="market_listing_duration_valid"),
+        UniqueConstraint("seller_pilot_id", "command_id", name="uq_market_listing_seller_command"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
@@ -506,7 +713,37 @@ class MarketListing(TimestampedModel, Base):
     )
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     unit_price_credits: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    duration_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    listing_fee_credits: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, nullable=False)
     state: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
+    command_id: Mapped[str] = mapped_column(String(128), nullable=False)
+
+
+class MarketBuyOrder(TimestampedModel, Base):
+    """Credits-reserved demand for a material or module at a station."""
+
+    __tablename__ = "market_buy_orders"
+    __table_args__ = (
+        CheckConstraint("quantity > 0", name="market_buy_order_quantity_valid"),
+        CheckConstraint("unit_price_credits > 0", name="market_buy_order_price_valid"),
+        CheckConstraint("duration_days IN (1, 7, 30)", name="market_buy_order_duration_valid"),
+        CheckConstraint("state IN ('active', 'filled', 'cancelled', 'expired')", name="market_buy_order_state_valid"),
+        UniqueConstraint("buyer_pilot_id", "command_id", name="uq_market_buy_order_buyer_command"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    station_id: Mapped[UUID] = mapped_column(Uuid, index=True, nullable=False)
+    buyer_pilot_id: Mapped[UUID] = mapped_column(ForeignKey("pilots.id"), index=True, nullable=False)
+    definition_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    definition_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    unit_price_credits: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    duration_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    listing_fee_credits: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
+    command_id: Mapped[str] = mapped_column(String(128), nullable=False)
 
 
 class FittedModule(TimestampedModel, Base):

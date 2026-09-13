@@ -23,10 +23,20 @@ from .inventory import (
     _ore_for_container,
     _used_volume,
 )
-from .models import Asteroid, AsteroidField, MinedOreLot, PilotDiscovery, ShipState, SolarSystem
+from .models import (
+    Asteroid,
+    AsteroidField,
+    MinedOreLot,
+    ModuleDefinition,
+    PilotDiscovery,
+    ShipState,
+    SolarSystem,
+)
+from .redis import publish_event, set_snapshot
 
 router = APIRouter(prefix="/api/v1/mining", tags=["mining"])
 SessionDependency = Annotated[AsyncSession, Depends(get_session)]
+SYSTEM_ID = "kepler"
 
 
 class SystemDefinitionResponse(BaseModel):
@@ -181,6 +191,81 @@ async def _kepler(session: AsyncSession) -> SolarSystem:
     return system
 
 
+async def deactivate_exhausted_asteroid_field(
+    session: AsyncSession, field: AsteroidField
+) -> bool:
+    """Hide a field as soon as none of its finite asteroids remain mineable."""
+    mineable_asteroid = await session.scalar(
+        select(Asteroid.id).where(
+            Asteroid.field_id == field.id,
+            Asteroid.depleted_at.is_(None),
+            Asteroid.remaining_volume_cubic_meters >= 1,
+        )
+    )
+    if mineable_asteroid is not None:
+        return False
+    field.active = False
+    field.next_spawn_at = None
+    return True
+
+
+async def scan_nearby_asteroid_fields(
+    session: AsyncSession, pilot_id: UUID, ship_state: ShipState, now: datetime
+) -> list[tuple[AsteroidField, float, float]]:
+    """Spend sensor power to persist every active asteroid field in scan range."""
+    if ship_state.power_megajoules < settings.sensor_default_power_cost_megajoules:
+        return []
+    last_scan_at = ship_state.sensor_last_scan_at
+    if last_scan_at is not None and last_scan_at.tzinfo is None:
+        last_scan_at = last_scan_at.replace(tzinfo=UTC)
+    if last_scan_at and now < last_scan_at + timedelta(
+        seconds=settings.sensor_default_cooldown_seconds
+    ):
+        return []
+    system = await _kepler(session)
+    fields = list(
+        await session.scalars(
+            select(AsteroidField).where(
+                AsteroidField.system_id == system.id,
+                AsteroidField.active.is_(True),
+            )
+        )
+    )
+    existing_ids = set(
+        await session.scalars(
+            select(PilotDiscovery.discoverable_id).where(
+                PilotDiscovery.pilot_id == pilot_id,
+                PilotDiscovery.discoverable_kind == "asteroid_field",
+            )
+        )
+    )
+    discovered = []
+    for field in fields:
+        distance_meters = _distance(ship_state, field)
+        if distance_meters > settings.sensor_default_range_meters or field.id in existing_ids:
+            continue
+        quality = max(
+            0.1,
+            min(
+                1.0,
+                field.discovery_signature
+                * (1 - distance_meters / settings.sensor_default_range_meters),
+            ),
+        )
+        session.add(
+            PilotDiscovery(
+                pilot_id=pilot_id,
+                discoverable_kind="asteroid_field",
+                discoverable_id=field.id,
+                scan_quality=quality,
+            )
+        )
+        discovered.append((field, distance_meters, quality))
+    ship_state.power_megajoules -= settings.sensor_default_power_cost_megajoules
+    ship_state.sensor_last_scan_at = now
+    return discovered
+
+
 @router.get("/bootstrap", response_model=DiscoveryBootstrapResponse)
 async def discovery_bootstrap(
     session: SessionDependency,
@@ -198,6 +283,7 @@ async def discovery_bootstrap(
         .where(
             PilotDiscovery.pilot_id == pilot_id,
             PilotDiscovery.discoverable_kind == "asteroid_field",
+            AsteroidField.active.is_(True),
         )
     )
     fields = [
@@ -236,48 +322,12 @@ async def scan(
             seconds=settings.sensor_default_cooldown_seconds
         ):
             raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "sensor scan is recharging")
-        system = await _kepler(session)
-        fields = list(
-            await session.scalars(
-                select(AsteroidField).where(
-                    AsteroidField.system_id == system.id, AsteroidField.active.is_(True)
-                )
-            )
-        )
-        existing_ids = set(
-            await session.scalars(
-                select(PilotDiscovery.discoverable_id).where(
-                    PilotDiscovery.pilot_id == pilot_id,
-                    PilotDiscovery.discoverable_kind == "asteroid_field",
-                )
-            )
-        )
-        discovered = []
-        for field in fields:
-            distance_meters = _distance(ship_state, field)
-            if distance_meters > settings.sensor_default_range_meters or field.id in existing_ids:
-                continue
-            quality = max(
-                0.1,
-                min(
-                    1.0,
-                    field.discovery_signature
-                    * (1 - distance_meters / settings.sensor_default_range_meters),
-                ),
-            )
-            session.add(
-                PilotDiscovery(
-                    pilot_id=pilot_id,
-                    discoverable_kind="asteroid_field",
-                    discoverable_id=field.id,
-                    scan_quality=quality,
-                )
-            )
-            discovered.append(_field_response(field, distance_meters, quality))
-        ship_state.power_megajoules -= settings.sensor_default_power_cost_megajoules
-        ship_state.sensor_last_scan_at = now
+        discoveries = await scan_nearby_asteroid_fields(session, pilot_id, ship_state, now)
     return ScanResponse(
-        newly_discovered_fields=discovered,
+            newly_discovered_fields=[
+                _field_response(field, distance_meters, quality)
+                for field, distance_meters, quality in discoveries
+            ],
         power_megajoules=ship_state.power_megajoules,
         cooldown_seconds=settings.sensor_default_cooldown_seconds,
     )
@@ -315,6 +365,7 @@ async def local_asteroids(
         .where(
             PilotDiscovery.pilot_id == pilot_id,
             PilotDiscovery.discoverable_kind == "asteroid_field",
+            AsteroidField.active.is_(True),
             Asteroid.depleted_at.is_(None),
         )
     )
@@ -371,6 +422,8 @@ async def extract_asteroid(
     pilot_id = _pilot_id_from_authorization(authorization)
     position = (command.position_x, command.position_y, command.position_z)
     _validate_system_position(position)
+    asteroid_snapshot: dict[str, object]
+    asteroid_event_type: str
     async with session.begin():
         ship_state = await _pilot_state(session, pilot_id)
         if ship_state.docked_station_name:
@@ -382,7 +435,7 @@ async def extract_asteroid(
         if asteroid is None or asteroid.depleted_at is not None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "asteroid is unavailable")
         field = await session.get(AsteroidField, asteroid.field_id)
-        if field is None:
+        if field is None or not field.active:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "asteroid field is unavailable")
         discovery = await session.scalar(
             select(PilotDiscovery.id).where(
@@ -393,9 +446,19 @@ async def extract_asteroid(
         )
         if discovery is None:
             raise HTTPException(status.HTTP_403_FORBIDDEN, "asteroid field has not been discovered")
+        mining_laser_range = await session.scalar(
+            select(ModuleDefinition.effective_range_meters).where(
+                ModuleDefinition.family.in_(("mining", "mining_laser")),
+                ModuleDefinition.active.is_(True),
+            ).order_by(ModuleDefinition.effective_range_meters.desc())
+        )
+        if mining_laser_range is None:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE, "mining laser catalog is unavailable"
+            )
         if (
             math.dist(position, (asteroid.position_x, asteroid.position_y, asteroid.position_z))
-            > 2_500
+            > mining_laser_range
         ):
             raise HTTPException(status.HTTP_409_CONFLICT, "asteroid is out of mining range")
         used_volume = await _used_volume(session, ship_container.id)
@@ -443,9 +506,27 @@ async def extract_asteroid(
             )
             mined_ore_lot.volume_cubic_meters += extracted
         asteroid.remaining_volume_cubic_meters -= extracted
-        if asteroid.remaining_volume_cubic_meters == 0:
+        if asteroid.remaining_volume_cubic_meters < 1:
+            asteroid.remaining_volume_cubic_meters = 0
             asteroid.depleted_at = datetime.now(UTC)
+            await deactivate_exhausted_asteroid_field(session, field)
         ship_state.cargo_cubic_meters = used_volume + extracted
+        asteroid_snapshot = AsteroidResponse(
+            id=asteroid.id,
+            field_id=asteroid.field_id,
+            position_x=asteroid.position_x,
+            position_y=asteroid.position_y,
+            position_z=asteroid.position_z,
+            radius_meters=asteroid.radius_meters,
+            composition=asteroid.composition,
+            mineral_assay=json.loads(asteroid.mineral_assay),
+            initial_volume_cubic_meters=asteroid.initial_volume_cubic_meters,
+            remaining_volume_cubic_meters=asteroid.remaining_volume_cubic_meters,
+        ).model_dump(mode="json")
+        asteroid_snapshot["depleted"] = asteroid.depleted_at is not None
+        asteroid_event_type = "asteroid_depleted" if asteroid.depleted_at else "asteroid_updated"
+    await set_snapshot("asteroid", str(asteroid.id), asteroid_snapshot)
+    await publish_event("system", SYSTEM_ID, asteroid_event_type, asteroid_snapshot)
     return ExtractionResponse(
         asteroid_id=asteroid.id,
         mined_ore_lot_id=mined_ore_lot.id,

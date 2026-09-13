@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import BaseModel, Field
@@ -14,7 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import get_session
 from .inventory import _ensure_containers, _require_docked_pilot
-from .models import InventoryItem, MinedOreLot, RefineryJob, RefineryService
+from .market import _wallet
+from .models import InventoryItem, MinedOreLot, RefineryJob, RefineryService, WalletTransaction
 from .refinery import RefineryOutput, crush_outputs, purify_output
 
 router = APIRouter(prefix="/api/v1/refinery", tags=["refinery"])
@@ -34,7 +35,7 @@ class RefineryJobResponse(BaseModel):
     queue_sequence: int
     quoted_duration_seconds: float
     quoted_efficiency: float
-    quoted_fee_credits: float
+    quoted_fee_credits: int
     expected_outputs: list[RefineryOutputResponse]
     started_at: datetime | None
     completes_at: datetime | None
@@ -43,7 +44,7 @@ class RefineryJobResponse(BaseModel):
 class RefineryServiceResponse(BaseModel):
     id: UUID
     display_name: str
-    fee_credits: float
+    fee_credits: int
     queue_capacity: int
     active_job_capacity: int
     first_pass_seconds_per_cubic_meter: float
@@ -146,6 +147,9 @@ async def queue_job(
         )
         if existing is not None:
             return await _snapshot(session, pilot_id, service)
+        wallet = await _wallet(session, pilot_id)
+        if wallet.balance_credits < service.fee_credits:
+            raise HTTPException(status.HTTP_409_CONFLICT, "insufficient wallet credits")
         active_jobs = list(
             await session.scalars(
                 select(RefineryJob)
@@ -222,5 +226,17 @@ async def queue_job(
                 completes_at=now + timedelta(seconds=duration) if state == "processing" else None,
             )
         )
+        wallet.balance_credits -= service.fee_credits
+        if service.fee_credits:
+            session.add(
+                WalletTransaction(
+                    pilot_id=pilot_id,
+                    counterparty_pilot_id=None,
+                    amount_credits=-service.fee_credits,
+                    transaction_kind="refinery_fee",
+                    command_id=f"refinery:{payload.idempotency_key}",
+                    settlement_id=uuid4(),
+                )
+            )
         await session.flush()
         return await _snapshot(session, pilot_id, service)

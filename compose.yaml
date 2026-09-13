@@ -29,6 +29,8 @@ services:
     build:
       context: ./server
     command: ["alembic", "upgrade", "head"]
+    volumes:
+      - ./server/catalog:/app/catalog:ro
     environment:
       SPACECONOMY_DATABASE_URL: postgresql+asyncpg://${SPACECONOMY_POSTGRES_USER:-spaceconomy}:${SPACECONOMY_POSTGRES_PASSWORD:-spaceconomy}@postgres:5432/${SPACECONOMY_POSTGRES_DB:-spaceconomy}
     depends_on:
@@ -38,6 +40,8 @@ services:
   api:
     build:
       context: ./server
+    volumes:
+      - ./server/catalog:/app/catalog:ro
     environment:
       SPACECONOMY_DATABASE_URL: postgresql+asyncpg://${SPACECONOMY_POSTGRES_USER:-spaceconomy}:${SPACECONOMY_POSTGRES_PASSWORD:-spaceconomy}@postgres:5432/${SPACECONOMY_POSTGRES_DB:-spaceconomy}
       SPACECONOMY_REDIS_URL: redis://redis:6379/0
@@ -49,6 +53,11 @@ services:
       SPACECONOMY_SMTP_PASSWORD: ${SPACECONOMY_SMTP_PASSWORD:-}
       SPACECONOMY_SMTP_FROM_EMAIL: ${SPACECONOMY_SMTP_FROM_EMAIL:-no-reply@spaceconomy.local}
       SPACECONOMY_SMTP_USE_TLS: ${SPACECONOMY_SMTP_USE_TLS:-true}
+      SPACECONOMY_LLM_PROVIDER: ${SPACECONOMY_LLM_PROVIDER:-ollama}
+      SPACECONOMY_AZURE_FOUNDRY_ENDPOINT: ${SPACECONOMY_AZURE_FOUNDRY_ENDPOINT:-}
+      SPACECONOMY_AZURE_FOUNDRY_API_KEY: ${SPACECONOMY_AZURE_FOUNDRY_API_KEY:-}
+      SPACECONOMY_AZURE_FOUNDRY_MODEL: ${SPACECONOMY_AZURE_FOUNDRY_MODEL:-gpt-4.1-mini}
+      SPACECONOMY_AZURE_FOUNDRY_TIMEOUT_SECONDS: ${SPACECONOMY_AZURE_FOUNDRY_TIMEOUT_SECONDS:-30}
     ports:
       - "8000:8000"
     depends_on:

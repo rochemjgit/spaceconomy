@@ -15,7 +15,7 @@ from redis.exceptions import RedisError
 from .config import settings
 from .db import session_factory
 from .models import Pilot
-from .redis import client, event_channel, publish_event
+from .redis import client, event_channel, presence_key, publish_event
 
 router = APIRouter(tags=["realtime"])
 SYSTEM_ID = "kepler"
@@ -24,7 +24,7 @@ STATION_SERVER_ID = "station:kepler"
 
 
 def _presence_key() -> str:
-    return f"spaceconomy:{settings.environment}:presence:{SYSTEM_ID}"
+    return presence_key(SYSTEM_ID)
 
 
 def _pilot_id(token: str | None) -> UUID | None:

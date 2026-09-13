@@ -25,6 +25,9 @@ class FakeRedis:
     async def publish(self, channel: str, message: str) -> None:
         self.published.append((channel, message))
 
+    async def hgetall(self, key: str) -> dict[bytes, bytes]:
+        return {key.encode(): value for key, value in self.values.items()}
+
 
 @pytest.mark.asyncio
 async def test_session_snapshot_and_event_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -59,3 +62,15 @@ async def test_redis_failure_is_a_cache_miss(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(redis, "client", FailingRedis())
 
     assert await redis.get_session("pilot-1") is None
+
+
+@pytest.mark.asyncio
+async def test_system_presence_ignores_invalid_records(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeRedis()
+    fake.values["pilot-1"] = b'{"x":12,"y":24,"z":48}'
+    fake.values["pilot-2"] = b"not-json"
+    monkeypatch.setattr(redis, "client", fake)
+
+    assert await redis.get_system_presence("kepler") == {
+        "pilot-1": {"x": 12, "y": 24, "z": 48}
+    }

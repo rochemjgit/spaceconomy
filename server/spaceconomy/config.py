@@ -1,5 +1,8 @@
 """Application configuration loaded from the environment."""
 
+from typing import Literal
+
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -37,13 +40,24 @@ class Settings(BaseSettings):
     asteroid_spawn_interval_seconds: int = 300
     asteroid_spawn_batch_size: int = 6
     asteroid_field_maximum_active_asteroids: int = 36
+    asteroid_system_maximum_active_fields: int = 10
     world_spawn_tick_seconds: int = 30
     refinery_tick_seconds: float = 1
+    manufacturing_recipe_catalog_path: str = "catalog/manufacturing_recipes.json"
     sensor_default_range_meters: float = 1_500_000
     sensor_default_power_cost_megajoules: float = 35
     sensor_default_cooldown_seconds: float = 20
     jettison_expiry_seconds: int = 300
     jettison_pickup_range_meters: float = 250
+    admin_auth_required: bool = False
+    llm_provider: Literal["ollama", "azure_foundry"] = "ollama"
+    ollama_url: str = "http://host.docker.internal:11434"
+    ollama_model: str = "qwen2.5:1.5b"
+    ollama_timeout_seconds: float = 120
+    azure_foundry_endpoint: str | None = None
+    azure_foundry_api_key: SecretStr | None = None
+    azure_foundry_model: str = "gpt-4.1-mini"
+    azure_foundry_timeout_seconds: float = 30
 
     model_config = SettingsConfigDict(
         env_file=".env", env_prefix="SPACECONOMY_", env_ignore_empty=True

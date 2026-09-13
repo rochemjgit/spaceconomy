@@ -1,15 +1,16 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { SceneOptions } from './game/scene'
+import { Vector3 } from '@babylonjs/core'
+import type { SceneOptions, TargetableObject } from './game/scene'
 import type { InventoryContainer } from './inventory'
 
-const scenes = vi.hoisted(() => ({ flight: vi.fn(), station: vi.fn(), options: [] as SceneOptions[] }))
+const scenes = vi.hoisted(() => ({ flight: vi.fn(), station: vi.fn(), options: [] as SceneOptions[], targets: [] as TargetableObject[], selectTarget: vi.fn(), approachTarget: vi.fn(() => true) }))
 vi.mock('./game/scene', () => ({
   createSystemScene: scenes.flight.mockImplementation((_canvas: unknown, options: SceneOptions) => {
     scenes.options.push(options)
     // Exercise a synchronous callback to catch socket declaration TDZ regressions.
     options.onMiningLaserUpdate?.(false)
-    return { dispose: vi.fn(), setCargoCubicMeters: vi.fn(), setModuleActive: vi.fn() }
+    return { dispose: vi.fn(), setCargoCubicMeters: vi.fn(), setModuleActive: vi.fn(), getTargetables: () => scenes.targets, selectTarget: scenes.selectTarget, approachTarget: scenes.approachTarget }
   }),
   createStationInteriorScene: scenes.station.mockImplementation(() => ({ dispose: vi.fn(), setModuleActive: vi.fn() })),
 }))
@@ -58,6 +59,7 @@ beforeEach(() => {
   vi.useFakeTimers()
   scenes.options.length = 0
   sockets.length = 0
+  scenes.targets = []
   initiallyDocked = true
   checkpoint = async () => json({})
   dockedLoad = async () => json({ ship, station })
@@ -79,7 +81,7 @@ beforeEach(() => {
   })
   requests.mockImplementation(async (input) => {
     const path = new URL(String(input)).pathname
-    if (path.endsWith('/auth/login')) return json({ access_token: 'test-account', refresh_token: 'test-refresh', pilots: [{ id: 'pilot', display_name: 'Test pilot' }] })
+    if (path.endsWith('/auth/login')) return json({ access_token: 'test-account', refresh_token: 'test-refresh', pilots: [{ id: 'pilot', display_name: 'Test pilot', balance_credits: 10_000 }] })
     if (path.endsWith('/auth/select-pilot')) return json({ access_token: 'test-pilot', ship_state: {
       position_x: 123078, position_y: 480, position_z: -2691,
       docked_station_name: initiallyDocked ? 'KEPLER STATION' : null,
@@ -89,6 +91,7 @@ beforeEach(() => {
     if (path.endsWith('/inventory/docked')) return dockedLoad()
     if (path.endsWith('/inventory/ship')) return json(ship)
     if (path.endsWith('/mining/bootstrap')) return json({ discovered_fields: [] })
+    if (path.endsWith('/market/wallet')) return json({ wallet_balance_credits: 10_000 })
     if (path.endsWith('/inventory/split') || path.endsWith('/inventory/merge-all')) return mutation()
     return json([])
   })
@@ -112,11 +115,52 @@ async function launch(inSpace = false) {
   element<HTMLInputElement>('#auth-password').value = 'test-password'
   element('#auth-form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
   await vi.waitFor(() => expect(document.querySelector('#pilot-select-launch')).not.toBeNull())
+  expect(element('#loading-pilot-wallet').textContent).toBe('10,000 CR')
   click('#pilot-select-launch')
   await vi.waitFor(() => expect(document.querySelector('.game-shell')).not.toBeNull())
 }
 
 describe('checkpoint-gated location transitions', () => {
+  it('shows the docked station services as compact icon controls with hover descriptions', async () => {
+    await launch()
+    const services = document.querySelectorAll<HTMLButtonElement>('.station-service-strip [data-station-service]')
+    expect(services).toHaveLength(7)
+    expect(element('#station-hotspots').classList.contains('station-service-strip')).toBe(true)
+    expect(element<HTMLButtonElement>('[data-station-service="market"]')
+      .getAttribute('data-tooltip')).toContain('buy and sell')
+    expect(element<HTMLButtonElement>('[data-station-service="refining"]')
+      .getAttribute('aria-label')).toBe('Refining')
+  })
+
+  it('uses compact docked controls for entities, station information, and undocking', async () => {
+    requests.mockImplementation(async (input) => {
+      const path = new URL(String(input)).pathname
+      if (path.endsWith('/inventory/docked-entities')) {
+        return json({
+          station_name: 'KEPLER STATION',
+          entities: [
+            { pilot_id: 'pilot', display_name: 'Test pilot', entity_type: 'PILOT' },
+            { pilot_id: 'npc', display_name: 'Garrik Stonehand', entity_type: 'NPC' },
+          ],
+        })
+      }
+      if (path.endsWith('/auth/login')) return json({ access_token: 'test-account', refresh_token: 'test-refresh', pilots: [{ id: 'pilot', display_name: 'Test pilot', balance_credits: 10_000 }] })
+      if (path.endsWith('/auth/select-pilot')) return json({ access_token: 'test-pilot', ship_state: { position_x: 123078, position_y: 480, position_z: -2691, docked_station_name: 'KEPLER STATION', power_megajoules: 100, shields: 100, hull: 100, fuel_liters: 80, cargo_cubic_meters: 1 } })
+      if (path.endsWith('/inventory/docked')) return dockedLoad()
+      if (path.endsWith('/inventory/ship')) return json(ship)
+      if (path.endsWith('/mining/bootstrap')) return json({ discovered_fields: [] })
+      return json({})
+    })
+    await launch()
+    expect(element('#docked-status').textContent).not.toContain('DOCKING BAY')
+    click('#station-information-action')
+    expect(element<HTMLDialogElement>('#station-information').open).toBe(true)
+    click('#docked-entities-action')
+    await vi.waitFor(() => expect(element('#docked-entities-content').textContent).toContain('Garrik Stonehand'))
+    expect(element<HTMLDialogElement>('#docked-entities').open).toBe(true)
+    expect(element<HTMLButtonElement>('#undock-action').getAttribute('aria-label')).toContain('Undock')
+  })
+
   it.each(['HTTP', 'network'])('keeps the station and displays a useful error after a failed %s undock', async (failure) => {
     await launch()
     const pending = deferred<Response>()
@@ -198,6 +242,77 @@ describe('checkpoint-gated location transitions', () => {
   })
 })
 
+describe('target list', () => {
+  it('shows the server scan error detail when sensors cannot scan', async () => {
+    requests.mockImplementation(async (input) => {
+      const path = new URL(String(input)).pathname
+      if (path.endsWith('/auth/login')) return json({ access_token: 'test-account', refresh_token: 'test-refresh', pilots: [{ id: 'pilot', display_name: 'Test pilot', balance_credits: 10_000 }] })
+      if (path.endsWith('/auth/select-pilot')) return json({ access_token: 'test-pilot', ship_state: { position_x: 123078, position_y: 480, position_z: -2691, docked_station_name: null, power_megajoules: 10, shields: 100, hull: 100, fuel_liters: 80, cargo_cubic_meters: 1 } })
+      if (path.endsWith('/inventory/ship')) return json(ship)
+      if (path.endsWith('/mining/bootstrap')) return json({ discovered_fields: [] })
+      if (path.endsWith('/mining/scan')) return json({ detail: 'insufficient power for sensor scan' }, 409)
+      return json([])
+    })
+    await launch(true)
+    click('[data-core-system="sensors"]')
+    await vi.waitFor(() => expect(element('#game-toast').textContent).toBe('INSUFFICIENT POWER FOR SENSOR SCAN'))
+    expect(requestCount('/auth/ship-state')).toBe(1)
+  })
+
+  it('filters nearby targets and selects the clicked row', async () => {
+    scenes.targets = [
+      { id: 'ore-1', name: 'Silicate Asteroid', kind: 'asteroid', position: new Vector3(123200, 480, -2691), locked: false, locking: false },
+      { id: 'player-1', name: 'Prospector', kind: 'player', position: new Vector3(123300, 480, -2691), locked: false, locking: false },
+      { id: 'ore-far', name: 'Distant Asteroid', kind: 'asteroid', position: new Vector3(173_079, 480, -2691), locked: false, locking: false },
+    ]
+    await launch(true)
+    expect(element('#target-list-items').textContent).toContain('Silicate Asteroid')
+    expect(element('#target-list-items').textContent).toContain('Prospector')
+    expect(element('#target-list-items').textContent).not.toContain('Distant Asteroid')
+    click('[data-target-filter="asteroid"]')
+    expect(element('#target-list-items').textContent).toContain('Silicate Asteroid')
+    expect(element('#target-list-items').textContent).not.toContain('Prospector')
+    click('[data-target-id="ore-1"]')
+    expect(scenes.selectTarget).toHaveBeenCalledWith('ore-1')
+  })
+
+  it('offers approach and details after a target lock completes', async () => {
+    await launch(true)
+    scenes.options[0]!.onTargetSelectionChange?.({
+      id: 'ore-1',
+      name: 'Silicate Asteroid',
+      kind: 'asteroid',
+      position: new Vector3(123200, 480, -2691),
+      oreRemainingCubicMeters: 42.5,
+      initialOreCubicMeters: 80,
+      locked: true,
+      locking: false,
+      lockProgress: 1,
+    })
+    click('#approach-target')
+    expect(scenes.approachTarget).toHaveBeenCalledOnce()
+    click('#view-target-details')
+    expect(element<HTMLDialogElement>('#target-details').open).toBe(true)
+    expect(element('#target-details-content').textContent).toContain('42.5 m3')
+  })
+
+  it('keeps the locked target card visible when another target is selected', async () => {
+    await launch(true)
+    scenes.options[0]!.onTargetSelectionChange?.({
+      id: 'ore-1', name: 'Silicate Asteroid', kind: 'asteroid',
+      position: new Vector3(123200, 480, -2691), oreRemainingCubicMeters: 42.5,
+      initialOreCubicMeters: 80, locked: true, locking: false, lockProgress: 1,
+    })
+    scenes.options[0]!.onTargetSelectionChange?.({
+      id: 'ore-2', name: 'Ferrous Asteroid', kind: 'asteroid',
+      position: new Vector3(123300, 480, -2691), oreRemainingCubicMeters: 35,
+      initialOreCubicMeters: 70, locked: false, locking: false, lockProgress: 0,
+    })
+    expect(element('#target-window').hasAttribute('hidden')).toBe(false)
+    expect(element('#target-name').textContent).toBe('Silicate Asteroid')
+  })
+})
+
 describe('inventory dialog and mutation ownership', () => {
   async function openInventory() {
     click('[data-station-service="inventory"]')
@@ -252,5 +367,36 @@ describe('inventory dialog and mutation ownership', () => {
     expect(requestCount('/auth/ship-state')).toBe(1)
     await vi.advanceTimersByTimeAsync(250)
     expect(docked()).toBe(false)
+  })
+})
+
+describe('top-bar major functions', () => {
+  it('renders a scanned dynamic field as a selectable system map destination', async () => {
+    requests.mockImplementation(async (input) => {
+      const path = new URL(String(input)).pathname
+      if (path.endsWith('/auth/login')) return json({ access_token: 'test-account', refresh_token: 'test-refresh', pilots: [{ id: 'pilot', display_name: 'Test pilot', balance_credits: 10_000 }] })
+      if (path.endsWith('/auth/select-pilot')) return json({ access_token: 'test-pilot', ship_state: { position_x: 123078, position_y: 480, position_z: -2691, docked_station_name: null, power_megajoules: 100, shields: 100, hull: 100, fuel_liters: 80, cargo_cubic_meters: 1 } })
+      if (path.endsWith('/inventory/ship')) return json(ship)
+      if (path.endsWith('/mining/bootstrap')) return json({ discovered_fields: [{ id: 'field-1', display_name: 'UNSURVEYED ASTEROID FIELD A1B2C3D4', position_x: 200_000, position_y: 120, position_z: -80_000, distance_meters: 110_000, scan_quality: 0.8 }] })
+      if (path.endsWith('/fitting/active')) return json({ statistics: { sensor_range_meters: 50_000 } })
+      return json([])
+    })
+    await launch(true)
+    click('#topbar-map')
+    const field = element<HTMLButtonElement>('[data-poi="discovered-field-field-1"]')
+    expect(field.textContent).toContain('UNSURVEYED ASTEROID FIELD A1B2C3D4')
+    field.click()
+    expect(element('#poi-type').textContent).toBe('SCANNED ASTEROID FIELD')
+    expect(element('#poi-description').textContent).toContain('80% quality')
+  })
+
+  it('opens the system map and the current pilot wallet', async () => {
+    await launch()
+    click('#topbar-map')
+    expect(element('#system-map-modal').hasAttribute('hidden')).toBe(false)
+    click('#system-map-close')
+    click('#topbar-wallet')
+    await vi.waitFor(() => expect(element('#game-modal-content').textContent).toContain('10,000 CR'))
+    expect(element('#game-modal-title').textContent).toBe('WALLET')
   })
 })

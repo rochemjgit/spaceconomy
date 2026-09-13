@@ -57,6 +57,34 @@
   letter-spacing: .06em;
 }
 
+.game-toast {
+  position: fixed;
+  z-index: 20;
+  top: 42%;
+  left: 50%;
+  max-width: min(420px, calc(100vw - 32px));
+  margin: 0;
+  padding: 12px 18px;
+  border: 1px solid #ffbb63;
+  background: rgb(30 17 7 / 92%);
+  box-shadow: 0 8px 28px rgb(0 0 0 / 45%);
+  color: #ffe1af;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  line-height: 1.35;
+  text-align: center;
+  transform: translate(-50%, -50%);
+  transition: opacity 250ms ease, transform 250ms ease;
+}
+
+.game-toast[hidden] { display: none; }
+
+.game-toast.is-fading {
+  opacity: 0;
+  transform: translate(-50%, calc(-50% - 8px));
+}
+
 .ship-destroyed-overlay {
   position: absolute;
   z-index: 8;

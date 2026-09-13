@@ -48,6 +48,9 @@
   justify-content: space-between;
 }
 
+.target-active-modules { display: flex; flex: 1; justify-content: flex-end; gap: 4px; margin-left: auto; }
+.target-module-icon { display: grid; width: 19px; height: 19px; place-items: center; border: 1px solid rgb(83 255 198 / 72%); color: #eafff8; background: rgb(5 86 73 / 72%); box-shadow: 0 0 8px rgb(83 255 198 / 36%); font: 700 7px ui-monospace, monospace; }
+
 .target-window-heading .eyebrow {
   margin: 0;
   color: #ffbd4a;
@@ -79,6 +82,9 @@
 }
 
 .target-range { margin: 4px 0 0; color: #ffcf78; font-size: 10px; letter-spacing: .06em; }
+.target-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; margin-top: 9px; }
+.target-actions button { min-height: 26px; border: 1px solid rgb(255 189 74 / 45%); color: #ffcf78; background: rgb(255 189 74 / 8%); font: 700 8px ui-monospace, monospace; letter-spacing: .06em; cursor: pointer; }
+.target-actions button:hover, .target-actions button:focus-visible { border-color: #fff4d9; color: #fff4d9; outline: none; }
 .target-summary { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 .target-thumbnail { display: grid; width: 32px; height: 32px; place-items: center; border: 1px solid rgb(201 214 221 / 65%); background: rgb(132 145 155 / 16%); }
 .target-thumbnail span { width: 17px; height: 17px; background: #9aa4aa; clip-path: polygon(50% 0, 92% 26%, 100% 68%, 60% 100%, 12% 82%, 0 34%); }
@@ -87,6 +93,10 @@
 .target-lock-progress { display: block; height: 3px; margin-top: 8px; background: rgb(255 189 74 / 18%); overflow: hidden; }
 .target-lock-progress[hidden] { display: none; }
 .target-lock-progress span { display: block; height: 100%; background: #ffbd4a; transition: width 80ms linear; }
+.target-details-dialog { width: min(340px, calc(100vw - 32px)); border: 1px solid rgb(255 189 74 / 65%); padding: 16px; color: #e9f7fa; background: #0b1521; box-shadow: 0 20px 50px rgb(0 0 0 / 55%); }
+.target-details-dialog::backdrop { background: rgb(0 5 12 / 68%); }
+.target-details-dialog header { display: flex; align-items: start; justify-content: space-between; gap: 16px; border-bottom: 1px solid rgb(255 189 74 / 22%); padding-bottom: 12px; }
+.target-details-dialog .eyebrow { margin: 0; color: #ffbd4a; }.target-details-dialog h2 { margin: 5px 0 0; color: #fff4d9; font-size: 16px; letter-spacing: 0; }.target-details-dialog header button { width: 28px; height: 28px; border: 1px solid rgb(255 189 74 / 42%); color: #ffcf78; background: transparent; font-size: 18px; cursor: pointer; }.target-details-dialog dl { display: grid; gap: 0; margin: 14px 0 0; }.target-details-dialog dl div { display: flex; justify-content: space-between; gap: 16px; border-bottom: 1px solid rgb(115 207 255 / 14%); padding: 9px 0; font: 700 10px ui-monospace, monospace; letter-spacing: .04em; }.target-details-dialog dt { color: #8ca8b7; }.target-details-dialog dd { margin: 0; color: #eafff8; text-align: right; }
 
 @media (max-width: 640px) {
   .target-window {

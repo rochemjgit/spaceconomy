@@ -49,6 +49,7 @@ class ShipStatistic(StrEnum):
     HEAT_DISSIPATION_PER_SECOND = "heat_dissipation_per_second"
     HEAT_GENERATION_PER_SECOND = "heat_generation_per_second"
     MINING_YIELD = "mining_yield"
+    SENSOR_RANGE_METERS = "sensor_range_meters"
     SHIELD_CAPACITY = "shield_capacity"
     ARMOR = "armor"
     HULL_DURABILITY = "hull_durability"
@@ -122,6 +123,8 @@ class ModuleDefinition:
     durability_maximum: float
     mass_kg: float = 0.0
     volume_cubic_meters: float = 0.0
+    effective_range_meters: float = 0.0
+    starter_grant: bool = True
     passive_effects: tuple[StatisticModifier, ...] = ()
 
     def __post_init__(self) -> None:
@@ -131,6 +134,7 @@ class ModuleDefinition:
             self.durability_maximum,
             self.mass_kg,
             self.volume_cubic_meters,
+            self.effective_range_meters,
         )):
             raise ValueError("module base statistics must be finite and non-negative")
 
@@ -356,6 +360,7 @@ STARTER_MINER: Final = HullDefinition(
         "heat_tolerance": 100.0,
         "heat_dissipation_per_second": 4.0,
         "mining_yield": 1.0,
+        "sensor_range_meters": 50_000.0,
         "maximum_speed": 120.0,
         "shield_capacity": 60.0,
         "armor": 25.0,
@@ -392,7 +397,24 @@ MINING_LASER: Final = ModuleDefinition(
     durability_maximum=100.0,
     mass_kg=240.0,
     volume_cubic_meters=1.5,
+    effective_range_meters=500.0,
     passive_effects=(StatisticModifier("mining_yield", ModifierOperation.PERCENT, 0.2),),
+)
+
+MINING_LASER_M2: Final = ModuleDefinition(
+    definition_id="module.mining_laser.m2",
+    version=1,
+    display_name="M2 Mining Laser",
+    family="mining_laser",
+    fit_location=SlotLocation.UNIVERSAL_HARDPOINT,
+    cpu_demand=24.0,
+    powergrid_demand=20.0,
+    durability_maximum=100.0,
+    mass_kg=320.0,
+    volume_cubic_meters=1.75,
+    effective_range_meters=650.0,
+    starter_grant=False,
+    passive_effects=(StatisticModifier("mining_yield", ModifierOperation.PERCENT, 0.35),),
 )
 
 SHIELD_BOOSTER: Final = ModuleDefinition(
@@ -439,6 +461,19 @@ REACTOR_CORE: Final = ModuleDefinition(
         StatisticModifier("capacitor_capacity", ModifierOperation.FLAT, 60.0),
         StatisticModifier("heat_tolerance", ModifierOperation.FLAT, 20.0),
     ),
+)
+
+WARP_DRIVE: Final = ModuleDefinition(
+    definition_id="module.warp_drive.w1",
+    version=1,
+    display_name="W1 Warp Drive",
+    family="warp_drive",
+    fit_location=SlotLocation.CORE_SYSTEM,
+    cpu_demand=16.0,
+    powergrid_demand=18.0,
+    durability_maximum=100.0,
+    mass_kg=1_000.0,
+    volume_cubic_meters=3.0,
 )
 
 

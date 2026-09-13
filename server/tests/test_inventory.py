@@ -31,6 +31,7 @@ from spaceconomy.models import (
     InventoryContainer,
     InventoryItem,
     JettisonedItem,
+    MarketListing,
     MinedOreLot,
     ModuleDefinition,
     Pilot,
@@ -419,6 +420,38 @@ async def test_selected_merge_leaves_other_container_and_versions_alone(game):
     assert len(response.json()["station"]["items"]) == 3
 
 
+async def test_merge_all_preserves_listing_source_stack(game):
+    await game.item(game.station, quantity=3, definition="material.listed")
+    listed_item = await game.item(game.station, quantity=2, definition="material.listed")
+    await game.item(game.station, quantity=4, definition="material.listed")
+    listing_id = uuid4()
+    async with game.sessions.begin() as session:
+        session.add(
+            MarketListing(
+                id=listing_id,
+                station_id=uuid4(),
+                seller_pilot_id=game.pilot,
+                inventory_item_id=listed_item,
+                quantity=2,
+                unit_price_credits=10,
+                duration_days=1,
+                listing_fee_credits=1,
+                expires_at=datetime.now(UTC) + timedelta(days=1),
+                state="sold",
+                command_id="listed-stack",
+            )
+        )
+    response = await game.post("/merge-all", {"container_id": str(game.station)})
+    assert response.status_code == 200
+    items = [item for item in response.json()["station"]["items"] if item["definition_id"] == "material.listed"]
+    assert sorted(item["quantity"] for item in items) == [2, 7]
+    assert next(item for item in items if item["id"] == str(listed_item))["quantity"] == 2
+    async with game.sessions() as session:
+        listing = await session.get(MarketListing, listing_id)
+        assert listing is not None
+        assert listing.inventory_item_id == listed_item
+
+
 async def test_ore_transfer_split_merge_preserves_assay_and_source(game):
     lot = await game.ore(volume=4)
     response = await game.post(
@@ -581,6 +614,40 @@ async def test_mining_only_ship_and_exact_assay_source(game):
     assert sum(lot["volume_cubic_meters"] for lot in response.json()) == 3
     async with game.sessions() as session:
         assert (await session.get(MinedOreLot, old)).mineral_assay == "[]"
+
+
+async def test_depleted_asteroid_is_persisted_and_published_to_redis(game, monkeypatch):
+    updates: list[tuple[str, str, dict[str, object]]] = []
+    events: list[tuple[str, str, str, dict[str, object]]] = []
+
+    async def set_asteroid_snapshot(snapshot_type, entity_id, payload):
+        updates.append((snapshot_type, entity_id, dict(payload)))
+        return True
+
+    async def publish_asteroid_event(channel_type, entity_id, event_type, payload):
+        events.append((channel_type, entity_id, event_type, dict(payload)))
+        return True
+
+    monkeypatch.setattr(mining, "set_snapshot", set_asteroid_snapshot)
+    monkeypatch.setattr(mining, "publish_event", publish_asteroid_event)
+    async with game.sessions.begin() as session:
+        asteroid = await session.get(Asteroid, game.asteroid)
+        asteroid.remaining_volume_cubic_meters = 1
+    await game.dock(False)
+
+    response = await game.client.post(
+        "/api/v1/mining/extract", json={"asteroid_id": str(game.asteroid), **POSITION}
+    )
+
+    assert response.status_code == 200
+    async with game.sessions() as session:
+        asteroid = await session.get(Asteroid, game.asteroid)
+        assert asteroid.remaining_volume_cubic_meters == 0
+        assert asteroid.depleted_at is not None
+    assert updates == [
+        ("asteroid", str(game.asteroid), {**updates[0][2], "remaining_volume_cubic_meters": 0, "depleted": True})
+    ]
+    assert events == [("system", "kepler", "asteroid_depleted", updates[0][2])]
 
 
 async def test_checkpoint_cannot_overwrite_cargo(game):
@@ -829,12 +896,30 @@ async def test_market_listing_reserves_inventory_and_settles_wallets(game):
     )
     listing = await game.client.post(
         "/api/v1/market/listings",
-        json={"inventory_item_id": str(item_id), "quantity": 2, "unit_price_credits": 50},
+        json={
+            "inventory_item_id": str(item_id),
+            "quantity": 2,
+            "unit_price_credits": 50,
+            "idempotency_key": "list-iron",
+        },
     )
     assert listing.status_code == 200
     listing_id = listing.json()["my_listings"][0]["id"]
+    terms = listing.json()["my_listings"][0]
+    assert terms["seller_display_name"] == "Test Pilot"
+    assert terms["duration_days"] == 1
+    assert terms["listing_fee_credits"] == 1
     inventory_snapshot = listing.json()["inventory"]
-    assert {item["quantity"] for item in inventory_snapshot["station"]["items"] if item["definition_id"] == "material.ore.iron"} == {1}
+    station_iron_quantities = {
+        item["quantity"]
+        for item in inventory_snapshot["station"]["items"]
+        if item["definition_id"] == "material.ore.iron"
+    }
+    assert station_iron_quantities == {1}
+    assert all(
+        item["id"] != listing.json()["my_listings"][0]["inventory_item_id"]
+        for item in inventory_snapshot["station"]["items"]
+    )
 
     buyer_id = uuid4()
     async with game.sessions.begin() as session:
@@ -842,10 +927,11 @@ async def test_market_listing_reserves_inventory_and_settles_wallets(game):
         session.add(ShipState(pilot_id=buyer_id, docked_station_name="KEPLER STATION", **POSITION))
     game.client.headers["Authorization"] = f"Bearer {auth._access_token(game.account, buyer_id)}"
     purchase = await game.client.post(
-        f"/api/v1/market/listings/{listing_id}/buy", json={"quantity": 1}
+        f"/api/v1/market/listings/{listing_id}/buy",
+        json={"quantity": 1, "idempotency_key": "buy-iron"},
     )
     assert purchase.status_code == 200
-    assert purchase.json()["wallet_balance_credits"] == 9_950
+    assert purchase.json()["wallet_balance_credits"] == 9_949
     assert any(
         item["definition_id"] == "material.ore.iron"
         and item["quantity"] == 1
@@ -855,12 +941,99 @@ async def test_market_listing_reserves_inventory_and_settles_wallets(game):
 
     game.client.headers["Authorization"] = f"Bearer {auth._access_token(game.account, game.pilot)}"
     seller_market = await game.client.get("/api/v1/market/docked")
-    assert seller_market.json()["wallet_balance_credits"] == 10_050
+    assert seller_market.json()["wallet_balance_credits"] == 10_049
     async with game.sessions() as session:
-        assert len(list(await session.scalars(select(WalletTransaction)))) == 2
+        entries = list(await session.scalars(select(WalletTransaction)))
+        assert [entry.transaction_kind for entry in entries].count("initial_grant") == 2
+        assert [entry.transaction_kind for entry in entries].count("market_purchase") == 1
+        assert [entry.transaction_kind for entry in entries].count("market_sale") == 1
+        assert [entry.transaction_kind for entry in entries].count("market_listing_fee") == 1
+        assert [entry.transaction_kind for entry in entries].count("market_purchase_commission") == 1
 
 
-async def test_replenish_preserves_public_ore_source_and_prunes_unreferenced(game, monkeypatch):
+async def test_wallet_snapshot_is_available_while_undocked(game):
+    await game.dock(False)
+
+    response = await game.client.get("/api/v1/market/wallet")
+
+    assert response.status_code == 200
+    assert response.json() == {"wallet_balance_credits": 10_000}
+
+
+async def test_market_purchase_replay_and_cancellation_are_safe(game):
+    item_id = await game.item(game.station, quantity=2, volume=1, definition="material.ore.iron")
+    listing = await game.client.post(
+        "/api/v1/market/listings",
+        json={
+            "inventory_item_id": str(item_id),
+            "quantity": 2,
+            "unit_price_credits": 50,
+            "idempotency_key": "list-for-replay",
+        },
+    )
+    assert listing.status_code == 200
+    listing_id = listing.json()["my_listings"][0]["id"]
+
+    buyer_id = uuid4()
+    async with game.sessions.begin() as session:
+        session.add(Pilot(id=buyer_id, account_id=game.account, display_name="Replay Buyer"))
+        session.add(ShipState(pilot_id=buyer_id, docked_station_name="KEPLER STATION", **POSITION))
+    game.client.headers["Authorization"] = f"Bearer {auth._access_token(game.account, buyer_id)}"
+    body = {"quantity": 1, "idempotency_key": "same-purchase"}
+    first = await game.client.post(f"/api/v1/market/listings/{listing_id}/buy", json=body)
+    second = await game.client.post(f"/api/v1/market/listings/{listing_id}/buy", json=body)
+    assert first.status_code == second.status_code == 200
+    assert second.json()["wallet_balance_credits"] == 9_949
+    assert second.json()["listings"][0]["quantity"] == 1
+    async with game.sessions() as session:
+        entries = list(await session.scalars(select(WalletTransaction)))
+        assert [entry.transaction_kind for entry in entries].count("market_purchase") == 1
+        assert [entry.transaction_kind for entry in entries].count("market_sale") == 1
+
+    game.client.headers["Authorization"] = f"Bearer {auth._access_token(game.account, game.pilot)}"
+    cancelled = await game.client.post(f"/api/v1/market/listings/{listing_id}/cancel")
+    assert cancelled.status_code == 200
+    assert cancelled.json()["my_listings"] == []
+    assert any(
+        item["id"] == listing.json()["my_listings"][0]["inventory_item_id"]
+        for item in cancelled.json()["inventory"]["station"]["items"]
+    )
+    repeated_cancel = await game.client.post(f"/api/v1/market/listings/{listing_id}/cancel")
+    assert repeated_cancel.status_code == 200
+
+
+async def test_expired_market_listing_releases_station_inventory_without_fee_refund(game):
+    item_id = await game.item(game.station, quantity=2, definition="material.ore.iron")
+    created = await game.client.post(
+        "/api/v1/market/listings",
+        json={
+            "inventory_item_id": str(item_id),
+            "quantity": 2,
+            "unit_price_credits": 500,
+            "duration_days": 7,
+            "idempotency_key": "expiring-listing",
+        },
+    )
+    assert created.status_code == 200
+    assert created.json()["wallet_balance_credits"] == 9_993
+    listing_id = UUID(created.json()["my_listings"][0]["id"])
+    async with game.sessions.begin() as session:
+        listing = await session.get(MarketListing, listing_id)
+        listing.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+
+    market = await game.client.get("/api/v1/market/docked")
+
+    assert market.status_code == 200
+    assert market.json()["my_listings"] == []
+    station = await game.client.get("/api/v1/inventory/docked")
+    assert any(
+        item["definition_id"] == "material.ore.iron" and item["quantity"] == 2
+        for item in station.json()["station"]["items"]
+    )
+    assert market.json()["wallet_balance_credits"] == 9_993
+
+
+async def test_replenish_retires_exhausted_field_and_preserves_public_ore_source(game, monkeypatch):
     lot = await game.ore(volume=2)
     await game.dock(False)
     response = await game.post(
@@ -869,50 +1042,33 @@ async def test_replenish_preserves_public_ore_source_and_prunes_unreferenced(gam
     assert response.status_code == 200
     public_id = UUID(response.json()["id"])
     now = datetime.now(UTC)
-    removable_id = uuid4()
     async with game.sessions.begin() as session:
         assert await session.get(MinedOreLot, lot) is None
         source = await session.get(Asteroid, game.asteroid)
-        source.created_at = now - timedelta(days=1)
+        source.remaining_volume_cubic_meters = 0
+        source.depleted_at = now
         field = await session.get(AsteroidField, source.field_id)
-        field.spawn_profile = '{"maximum_active":1,"batch_size":1}'
-        field.next_spawn_at = None
-        session.add(
-            Asteroid(
-                id=removable_id,
-                field_id=field.id,
-                spawn_seed=2,
-                **POSITION,
-                radius_meters=10,
-                composition="ferrous",
-                mineral_assay=ASSAY,
-                initial_volume_cubic_meters=100,
-                remaining_volume_cubic_meters=100,
-                created_at=now,
-            )
-        )
-        # A NULL ore source must not poison a NOT IN subquery and disable pruning.
-        session.add(
-            JettisonedItem(
-                definition_id="material.test",
-                definition_version=1,
-                quantity=1,
-                durability=100,
-                volume_per_unit=1,
-                **POSITION,
-                expires_at=now + timedelta(minutes=5),
-            )
-        )
     monkeypatch.setattr(world, "session_factory", game.sessions)
-    assert await world.replenish_asteroid_fields(now) == 0
+    monkeypatch.setattr(world.settings, "asteroid_system_maximum_active_fields", 1)
+    created = await world.replenish_asteroid_fields(now)
+    assert created > 0
     async with game.sessions() as session:
         assert await session.get(Asteroid, game.asteroid) is not None
-        assert await session.get(Asteroid, removable_id) is None
         public = await session.get(JettisonedItem, public_id)
         assert public.ore_asteroid_id == game.asteroid
         assert public.ore_mineral_assay == ASSAY
         field = await session.get(AsteroidField, field.id)
-        assert field.next_spawn_at is not None
+        assert field.active is False
+        active_fields = list(
+            await session.scalars(select(AsteroidField).where(AsteroidField.active.is_(True)))
+        )
+        assert len(active_fields) == 1
+        assert active_fields[0].id != field.id
+        assert await session.scalar(
+            select(text("count(*)")).select_from(Asteroid).where(
+                Asteroid.field_id == active_fields[0].id
+            )
+        ) == created
     response = await game.post(
         "/jettisoned/pickup", {"jettisoned_item_id": str(public_id), **POSITION}
     )

@@ -28,6 +28,14 @@ def test_fit_moves_a_docked_station_item_and_updates_derived_statistics() -> Non
     assert snapshot.statistics["powergrid_used"] == 14.0
 
 
+def test_starter_hull_sensor_range_is_fifty_kilometers() -> None:
+    assert STARTER_MINER.base_statistics["sensor_range_meters"] == 50_000
+
+
+def test_starter_mining_laser_effective_range_is_five_hundred_meters() -> None:
+    assert MINING_LASER.effective_range_meters == 500
+
+
 def test_fit_rejects_resource_overage_without_mutating_the_ship() -> None:
     service = FittingService("ship.1", "pilot.1", STARTER_MINER, "station.kepler")
     oversized_module = ModuleDefinition(
