@@ -49,7 +49,7 @@ from .models import (
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 SessionDependency = Annotated[AsyncSession, Depends(get_session)]
-KEPLER_STATION_POSITION = (123_078, 480, -2_691)
+KEPLER_STATION_POSITION = (3_000_000_000, 480, -50_000)
 SYSTEM_ID = "kepler"
 
 
@@ -614,9 +614,21 @@ async def get_system_state(session: SessionDependency, _: AdminDependency) -> Sy
                     display_name=pilot.display_name,
                     location_kind="docked" if ship_state.docked_station_name else "space",
                     station_name=ship_state.docked_station_name,
-                    position_x=live_presence.get(str(pilot.id), {}).get("x", ship_state.position_x),
-                    position_y=live_presence.get(str(pilot.id), {}).get("y", ship_state.position_y),
-                    position_z=live_presence.get(str(pilot.id), {}).get("z", ship_state.position_z),
+                    position_x=(
+                        ship_state.position_x
+                        if ship_state.docked_station_name
+                        else live_presence.get(str(pilot.id), {}).get("x", ship_state.position_x)
+                    ),
+                    position_y=(
+                        ship_state.position_y
+                        if ship_state.docked_station_name
+                        else live_presence.get(str(pilot.id), {}).get("y", ship_state.position_y)
+                    ),
+                    position_z=(
+                        ship_state.position_z
+                        if ship_state.docked_station_name
+                        else live_presence.get(str(pilot.id), {}).get("z", ship_state.position_z)
+                    ),
                     cargo_cubic_meters=ship_state.cargo_cubic_meters,
                     inventory=(assets := await _pilot_assets(session, pilot.id))[0],
                     wallet_balance_credits=assets[1],

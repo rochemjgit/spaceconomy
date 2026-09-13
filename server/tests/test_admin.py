@@ -166,7 +166,7 @@ async def test_system_state_uses_live_redis_position_for_connected_player(
     assert state.players[0].position_x == 101.0
     assert state.players[0].position_y == 202.0
     assert state.players[0].position_z == 303.0
-    assert state.system_radius_meters == 18_000_000.0
+    assert state.system_radius_meters == 3_100_000_000.0
     assert state.asteroid_fields[0].display_name == "UNSURVEYED ASTEROID FIELD A1B2C3D4"
     assert state.asteroid_fields[0].position_x == 12_345.0
     assert state.asteroid_fields[0].position_z == -98_765.0

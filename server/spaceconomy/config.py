@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     client_origin: str = "http://127.0.0.1:5173"
     simulation_tick_hz: int = 20
     snapshot_tick_hz: int = 10
-    system_radius_meters: float = 18_000_000
+    system_radius_meters: float = 3_100_000_000
     system_crossing_seconds: float = 1_800
     object_render_radius_meters: float = 40_000
     asteroid_spawn_interval_seconds: int = 300

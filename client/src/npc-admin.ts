@@ -116,12 +116,14 @@ let populationView: PopulationView = new URLSearchParams(window.location.search)
 let activePanel: Panel = 'overview'
 let npcFilter = ''
 let mapZoom = 1
+let mapPan = { x: 0, y: 0 }
+let mapDrag: { pointerId: number; startX: number; startY: number; panX: number; panY: number } | undefined
 let mapRefreshTimer: number | undefined
-let systemMapHalfExtentMeters = 400_000
+const systemMapHalfExtentMeters = 5_000_000_000
 const systemPoints: SystemPoint[] = [
   { name: 'PRIMARY STAR', kind: 'star', x: 0, z: 0 },
-  { name: 'STARTER WORLD', kind: 'world', x: 119_678, z: 0 },
-  { name: 'KEPLER STATION', kind: 'station', x: 123_078, z: -3_400 },
+  { name: 'STARTER WORLD', kind: 'world', x: 3_000_000_000, z: 0 },
+  { name: 'KEPLER STATION', kind: 'station', x: 3_000_000_000, z: -50_000 },
 ]
 
 function escapeHtml(value: string): string {
@@ -170,10 +172,10 @@ function setStatus(message: string, tone: 'success' | 'error' | 'neutral' = 'neu
 
 function systemMapMarkup(): string {
   const mapPosition = (x: number, z: number) => ({
-    left: 50 + (x / systemMapHalfExtentMeters) * 42,
-    top: 50 + (z / systemMapHalfExtentMeters) * 42,
+    left: Math.min(99.5, Math.max(0.5, 50 + (x / systemMapHalfExtentMeters) * 50)),
+    top: Math.min(99.5, Math.max(0.5, 50 - (z / systemMapHalfExtentMeters) * 50)),
   })
-  return `<div class="map-controls"><label>ZOOM <input id="map-zoom" type="range" min="0.5" max="2.5" step="0.1" value="${mapZoom}"></label></div><div class="system-map-viewport" aria-label="Kepler system points of interest and NPC locations"><div id="system-map-canvas" class="system-map" role="list" style="transform: scale(${mapZoom})"><div class="map-orbit orbit-one"></div><div class="map-orbit orbit-two"></div>${systemPoints.map((point) => {
+  return `<div class="map-controls"><button id="map-zoom-out" type="button" aria-label="Zoom out" title="Zoom out">−</button><button id="map-zoom-in" type="button" aria-label="Zoom in" title="Zoom in">+</button></div><div class="map-scale" aria-hidden="true"><span>-5,000,000 km</span><span>0 km</span><span>+5,000,000 km</span></div><div class="system-map-viewport" aria-label="Kepler system sector grid with NPC and player locations"><div id="system-map-canvas" class="system-map system-map-grid ${mapZoom >= 10 ? 'is-detail-scale' : ''}" role="list" style="--map-marker-scale:${1 / mapZoom};transform:translate(${mapPan.x}px,${mapPan.y}px) scale(${mapZoom})">${systemPoints.map((point) => {
     const position = mapPosition(point.x, point.z)
     return `<div class="map-point map-point-${point.kind}" style="left:${position.left.toFixed(2)}%;top:${position.top.toFixed(2)}%" title="${point.name}"><span></span><strong>${point.name}</strong></div>`
   }).join('')}${asteroidFields.map((field) => {
@@ -188,10 +190,30 @@ function systemMapMarkup(): string {
   }).join('')}</div></div><div class="map-legend"><span><i class="map-point-star"></i> Star</span><span><i class="map-point-world"></i> World</span><span><i class="map-point-station"></i> Station</span><span><i class="map-field"></i> Active field</span><span><i class="state-active"></i> NPC</span><span><i class="map-player"></i> Player</span></div>`
 }
 
-function updateMapTransform() {
+function changeMapZoom(factor: number) {
+  mapZoom = Math.max(1, Math.min(100, mapZoom * factor))
+  updateMapView()
+}
+
+function clampMapPan() {
+  const viewport = document.querySelector<HTMLElement>('.system-map-viewport')
+  if (!viewport || mapZoom === 1) {
+    mapPan = { x: 0, y: 0 }
+    return
+  }
+  const maximumX = (viewport.clientWidth * (mapZoom - 1)) / 2
+  const maximumY = (viewport.clientHeight * (mapZoom - 1)) / 2
+  mapPan.x = Math.max(-maximumX, Math.min(maximumX, mapPan.x))
+  mapPan.y = Math.max(-maximumY, Math.min(maximumY, mapPan.y))
+}
+
+function updateMapView() {
+  clampMapPan()
   const canvas = document.querySelector<HTMLElement>('#system-map-canvas')
   if (!canvas) return
-  canvas.style.transform = `scale(${mapZoom})`
+  canvas.classList.toggle('is-detail-scale', mapZoom >= 10)
+  canvas.style.setProperty('--map-marker-scale', String(1 / mapZoom))
+  canvas.style.transform = `translate(${mapPan.x}px, ${mapPan.y}px) scale(${mapZoom})`
 }
 
 function npcDirectoryMarkup(): string {
@@ -290,7 +312,6 @@ async function refresh() {
     npcs = state.npcs
     players = state.players
     asteroidFields = state.asteroid_fields
-    systemMapHalfExtentMeters = state.system_radius_meters
     selectedPilotId = [...npcs, ...players].some((pilot) => pilot.pilot_id === selectedPilotId) ? selectedPilotId : null
     if (populationView === 'control' && selectedPilotId === null) {
       selectedPilotId = npcs[0]?.pilot_id ?? players[0]?.pilot_id ?? null
@@ -336,12 +357,32 @@ function bindEvents() {
   document.querySelectorAll<HTMLButtonElement>('[data-npc-id], [data-player-id]').forEach((button) => button.addEventListener('click', () => { selectedPilotId = button.dataset.npcId ?? button.dataset.playerId ?? null; populationView = 'control'; activePanel = 'overview'; window.history.pushState({}, '', `/npc.html?pilot_id=${selectedPilotId}`); render() }))
   document.querySelector<HTMLButtonElement>('#show-system-map')?.addEventListener('click', () => { populationView = 'map'; window.history.pushState({}, '', '/npc.html?view=map'); render(); void refresh() })
   document.querySelector<HTMLButtonElement>('#show-population-control')?.addEventListener('click', () => { populationView = 'control'; window.history.pushState({}, '', `/npc.html?pilot_id=${selectedPilotId ?? ''}`); render() })
+  document.querySelector<HTMLButtonElement>('#map-zoom-out')?.addEventListener('click', () => changeMapZoom(0.5))
+  document.querySelector<HTMLButtonElement>('#map-zoom-in')?.addEventListener('click', () => changeMapZoom(2))
+  const mapViewport = document.querySelector<HTMLElement>('.system-map-viewport')
+  mapViewport?.addEventListener('wheel', (event) => { event.preventDefault(); changeMapZoom(event.deltaY > 0 ? 0.8 : 1.25) }, { passive: false })
+  mapViewport?.addEventListener('pointerdown', (event) => {
+    if (mapZoom === 1 || event.button !== 0) return
+    mapDrag = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, panX: mapPan.x, panY: mapPan.y }
+    mapViewport.setPointerCapture(event.pointerId)
+  })
+  mapViewport?.addEventListener('pointermove', (event) => {
+    if (!mapDrag || event.pointerId !== mapDrag.pointerId) return
+    mapPan = { x: mapDrag.panX + event.clientX - mapDrag.startX, y: mapDrag.panY + event.clientY - mapDrag.startY }
+    updateMapView()
+  })
+  const stopMapPan = (event: PointerEvent) => {
+    if (!mapDrag || event.pointerId !== mapDrag.pointerId) return
+    if (mapViewport?.hasPointerCapture(event.pointerId)) mapViewport.releasePointerCapture(event.pointerId)
+    mapDrag = undefined
+  }
+  mapViewport?.addEventListener('pointerup', stopMapPan)
+  mapViewport?.addEventListener('pointercancel', stopMapPan)
   document.querySelector<HTMLInputElement>('#npc-filter')?.addEventListener('input', (event) => { npcFilter = (event.currentTarget as HTMLInputElement).value; render() })
   document.querySelectorAll<HTMLButtonElement>('[data-panel]').forEach((button) => button.addEventListener('click', () => { activePanel = button.dataset.panel as Panel; render() }))
   document.querySelector<HTMLButtonElement>('#delete-npc')?.addEventListener('click', () => void deleteNpc())
   document.querySelector<HTMLFormElement>('#coordinate-move-form')?.addEventListener('submit', (event) => { event.preventDefault(); const values = new FormData(event.currentTarget as HTMLFormElement); void moveNpc({ destination: 'coordinates', position_x: Number(values.get('position_x')), position_y: Number(values.get('position_y')), position_z: Number(values.get('position_z')) }) })
   document.querySelector<HTMLButtonElement>('#dock-npc')?.addEventListener('click', () => void moveNpc({ destination: 'station' }))
-  document.querySelector<HTMLInputElement>('#map-zoom')?.addEventListener('input', (event) => { mapZoom = Number((event.currentTarget as HTMLInputElement).value); updateMapTransform() })
 }
 
 void refresh()

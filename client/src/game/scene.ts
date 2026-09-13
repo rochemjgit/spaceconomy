@@ -220,9 +220,15 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     })
     registerRenderableObject(mesh, 15_000)
   }
-  const planetPosition = new Vector3(119_678, 0, 0)
-  const stationPosition = planetPosition.add(new Vector3(3_400, 480, -3_400))
-  const launchPosition = stationPosition.add(new Vector3(0, 0, 709.5))
+  const planetWorldPosition = new Vector3(3_000_000_000, 0, 0)
+  const stationWorldPosition = planetWorldPosition.add(new Vector3(0, 480, -50_000))
+  const launchWorldPosition = stationWorldPosition.add(new Vector3(0, 0, 709.5))
+  const renderingOrigin = stationWorldPosition.clone()
+  const toRenderPosition = (position: Vector3) => position.subtract(renderingOrigin)
+  const toWorldPosition = (position: Vector3) => position.add(renderingOrigin)
+  const planetPosition = toRenderPosition(planetWorldPosition)
+  const stationPosition = toRenderPosition(stationWorldPosition)
+  const launchPosition = toRenderPosition(launchWorldPosition)
   const renderUnitsPerMeter = 3 / 10
   const astronomicalVisualCompression = 300_000
   const physicalStarDiameterUnits = 1_393_000_000 * renderUnitsPerMeter
@@ -259,12 +265,11 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   star.material = starMaterial
   targetDescriptors.set(star.uniqueId, { targetId: 'warpable:primary-star', name: 'PRIMARY STAR', kind: 'warpable' })
   targetableMeshes.set('warpable:primary-star', star)
-  registerRenderableObject(star, Number.POSITIVE_INFINITY)
-  registerCollisionTarget(star, 'PRIMARY STAR', 1.989e30, starVisualDiameter / 2, true)
+  star.setEnabled(false)
   const starVisualScaleDistance = 60_000
   const minimumStarVisualScale = 0.18
 
-  const planet = MeshBuilder.CreateSphere('starter-world', { diameter: 6_000, segments: 32 }, scene)
+  const planet = MeshBuilder.CreateSphere('starter-world', { diameter: 20_000, segments: 32 }, scene)
   planet.position = planetPosition
   const planetMaterial = new StandardMaterial('starter-world-material', scene)
   planetMaterial.diffuseColor = new Color3(0.12, 0.34, 0.58)
@@ -273,7 +278,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   targetDescriptors.set(planet.uniqueId, { targetId: 'planet:starter-world', name: 'STARTER WORLD', kind: 'planet' })
   targetableMeshes.set('planet:starter-world', planet)
   registerRenderableObject(planet, 180_000)
-  registerCollisionTarget(planet, 'STARTER WORLD', 5.972e24, 3_000, true)
+  registerCollisionTarget(planet, 'STARTER WORLD', 5.972e24, 10_000, true)
 
   const asteroidMaterial = new StandardMaterial('server-asteroid-material', scene)
   asteroidMaterial.diffuseColor = new Color3(0.38, 0.28, 0.17)
@@ -378,7 +383,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   }
 
   const ship = new TransformNode('starter-ship', scene)
-  ship.position = options.initialPosition?.clone() ?? launchPosition.clone()
+  ship.position = options.initialPosition ? toRenderPosition(options.initialPosition) : launchPosition.clone()
   const shipMaterial = new StandardMaterial('starter-ship-material', scene)
   shipMaterial.diffuseColor = new Color3(0.34, 0.06, 0.05)
   shipMaterial.emissiveColor = new Color3(0.09, 0.008, 0.006)
@@ -423,10 +428,11 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   const remotePilots = new Map<string, { ship: TransformNode; targetMesh: Mesh; destination: Vector3; snapshotPosition: Vector3; velocity: Vector3; lastSnapshotAt: number; yaw: number; pitch: number; roll: number; miningBeam?: Mesh; miningSource?: Vector3; miningTarget?: Vector3; activityMarker?: Mesh; docked?: boolean; inWarpTransit?: boolean }>()
   const updateRemotePilot = (pilot: RemotePilot) => {
     const snapshotAt = performance.now()
+    const renderPosition = toRenderPosition(pilot.position)
     let remote = remotePilots.get(pilot.pilotId)
     if (!remote) {
       const remoteShip = new TransformNode(`remote-pilot-${pilot.pilotId}`, scene)
-      remoteShip.position.copyFrom(pilot.position)
+      remoteShip.position.copyFrom(renderPosition)
       const remoteMaterial = new StandardMaterial(`remote-pilot-material-${pilot.pilotId}`, scene)
       remoteMaterial.diffuseColor = new Color3(0.04, 0.35, 0.55)
       remoteMaterial.emissiveColor = new Color3(0.02, 0.15, 0.32)
@@ -488,13 +494,13 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       nameplate.billboardMode = Mesh.BILLBOARDMODE_ALL
       nameplate.isPickable = false
       remoteShip.rotation.set(-pilot.pitch, pilot.yaw, pilot.roll)
-      remote = { ship: remoteShip, targetMesh: remoteHull, destination: pilot.position.clone(), snapshotPosition: pilot.position.clone(), velocity: Vector3.Zero(), lastSnapshotAt: snapshotAt, yaw: pilot.yaw, pitch: pilot.pitch, roll: pilot.roll }
+      remote = { ship: remoteShip, targetMesh: remoteHull, destination: renderPosition.clone(), snapshotPosition: renderPosition.clone(), velocity: Vector3.Zero(), lastSnapshotAt: snapshotAt, yaw: pilot.yaw, pitch: pilot.pitch, roll: pilot.roll }
       remotePilots.set(pilot.pilotId, remote)
     }
     const elapsedSeconds = Math.max(0.1, (snapshotAt - remote.lastSnapshotAt) / 1_000)
     remote.velocity = pilot.position.subtract(remote.snapshotPosition).scale(1 / elapsedSeconds)
-    remote.snapshotPosition.copyFrom(pilot.position)
-    remote.destination.copyFrom(pilot.position)
+    remote.snapshotPosition.copyFrom(renderPosition)
+    remote.destination.copyFrom(renderPosition)
     remote.lastSnapshotAt = snapshotAt
     remote.yaw = pilot.yaw
     remote.pitch = pilot.pitch
@@ -535,7 +541,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       glow.addIncludedOnlyMesh(remote.activityMarker)
     }
     if (remote.activityMarker) {
-      remote.activityMarker.position.copyFrom(activity.target)
+      remote.activityMarker.position.copyFrom(toRenderPosition(activity.target))
       remote.activityMarker.setEnabled(showLock)
     }
     if (activity.docked || inWarpTransit) setRemotePilotMining(pilotId, false, activity.target, activity.target)
@@ -550,14 +556,14 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       return
     }
     if (!remote.miningBeam) {
-      remote.miningBeam = MeshBuilder.CreateTube(`remote-mining-laser-${pilotId}`, { path: [source, target], radius: 0.2, tessellation: 8, updatable: true }, scene)
+      remote.miningBeam = MeshBuilder.CreateTube(`remote-mining-laser-${pilotId}`, { path: [toRenderPosition(source), toRenderPosition(target)], radius: 0.2, tessellation: 8, updatable: true }, scene)
       remote.miningBeam.material = remoteMiningMaterial
       remote.miningBeam.isPickable = false
       glow.addIncludedOnlyMesh(remote.miningBeam)
     }
     remote.miningBeam.setEnabled(true)
-    remote.miningSource = source.clone()
-    remote.miningTarget = target.clone()
+    remote.miningSource = toRenderPosition(source)
+    remote.miningTarget = toRenderPosition(target)
     remote.miningBeam = MeshBuilder.CreateTube(remote.miningBeam.name, { path: [source, target], radius: 0.2, tessellation: 8, instance: remote.miningBeam }, scene)
   }
   const shipMassKg = 25_000
@@ -799,6 +805,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   }
 
   const warpTo = (destination: Vector3): boolean => {
+    destination = toRenderPosition(destination)
     if (warp || Vector3.Distance(ship.position, destination) <= 100_000) return false
     const distance = Vector3.Distance(ship.position, destination)
     if (warpCapacity <= warpEntryCapacityCost) return false
@@ -841,7 +848,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       Math.cos(shipYaw) * Math.cos(shipPitch),
     )
     const started = warpTo(
-      ship.position.add(direction.scale(options.systemRadiusMeters ?? 18_000_000)),
+      toWorldPosition(ship.position.add(direction.scale(options.systemRadiusMeters ?? 18_000_000))),
     )
     if (started) manualWarpCooldownSeconds = warpDriveStats.manualCooldownSeconds
     return started
@@ -982,7 +989,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       kind: descriptor.kind,
       shipType: descriptor.shipType,
       jettisonedItemId: descriptor.jettisonedItemId,
-      position: targetMesh.getAbsolutePosition().clone(),
+      position: toWorldPosition(targetMesh.getAbsolutePosition()),
       oreRemainingCubicMeters: asteroid?.oreRemainingCubicMeters ?? 0,
       initialOreCubicMeters: asteroid?.initialOreCubicMeters ?? 0,
       locked: lockedTargets.has(targetMesh),
@@ -1031,7 +1038,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       let mesh = asteroidMeshes.get(asteroid.id)
       if (!mesh) {
         mesh = createAsteroidMesh(asteroid)
-        mesh.position.copyFrom(asteroid.position)
+        mesh.position.copyFrom(toRenderPosition(asteroid.position))
         mesh.rotation.set(asteroid.position.x % Math.PI, asteroid.position.y % Math.PI, asteroid.position.z % Math.PI)
         registerAsteroid(mesh, `${asteroid.composition.toUpperCase()} ASTEROID`, asteroid.radius, asteroid.initialOreCubicMeters, asteroid.id)
         asteroidMeshes.set(asteroid.id, mesh)
@@ -1061,7 +1068,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
         registerJettisonedItem(mesh, item)
         jettisonedItemMeshes.set(item.id, mesh)
       }
-      mesh.position.copyFrom(item.position)
+      mesh.position.copyFrom(toRenderPosition(item.position))
       mesh.rotation.y += 0.02
     }
   }
@@ -1072,7 +1079,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     if (pickupPending || !mesh || !itemId || !options.onJettisonedItemPickup) return false
     pickupPending = true
     try {
-      return await options.onJettisonedItemPickup(itemId, ship.position.clone())
+      return await options.onJettisonedItemPickup(itemId, toWorldPosition(ship.position))
     } catch {
       return false
     } finally {
@@ -1145,11 +1152,11 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     for (const [id, mesh] of targetableMeshes) {
       const descriptor = targetDescriptors.get(mesh.uniqueId)
       if (!descriptor || descriptor.kind === 'cargo' || descriptor.kind === 'pilot') continue
-      targets.push({ id, name: descriptor.name, kind: descriptor.kind, position: mesh.getAbsolutePosition().clone(), locked: lockedTargets.has(mesh), locking: lockingTarget?.asteroid === mesh })
+      targets.push({ id, name: descriptor.name, kind: descriptor.kind, position: toWorldPosition(mesh.getAbsolutePosition()), locked: lockedTargets.has(mesh), locking: lockingTarget?.asteroid === mesh })
     }
     for (const [pilotId, remote] of remotePilots) {
       const descriptor = targetDescriptors.get(remote.targetMesh.uniqueId)
-      if (descriptor) targets.push({ id: `player:${pilotId}`, name: descriptor.name, kind: 'player', position: remote.targetMesh.getAbsolutePosition().clone(), locked: lockedTargets.has(remote.targetMesh), locking: lockingTarget?.asteroid === remote.targetMesh })
+      if (descriptor) targets.push({ id: `player:${pilotId}`, name: descriptor.name, kind: 'player', position: toWorldPosition(remote.targetMesh.getAbsolutePosition()), locked: lockedTargets.has(remote.targetMesh), locking: lockingTarget?.asteroid === remote.targetMesh })
     }
     return targets
   }
@@ -1394,7 +1401,11 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       const miningBeamSource = miningLaserActive
         ? ship.position.add(shipForward.scale(2.5)).add(Vector3.Up().scale(0.35))
         : undefined
-      options.onMiningLaserUpdate?.(miningLaserActive, miningBeamSource, miningTarget?.getAbsolutePosition())
+      options.onMiningLaserUpdate?.(
+        miningLaserActive,
+        miningBeamSource ? toWorldPosition(miningBeamSource) : undefined,
+        miningTarget ? toWorldPosition(miningTarget.getAbsolutePosition()) : undefined,
+      )
     }
     if (miningLaserActive && miningTarget && miningTargetDetails) {
       const targetPosition = miningTarget.getAbsolutePosition()
@@ -1438,7 +1449,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       nextOreChunkSeconds -= deltaSeconds
       if (nextOreChunkSeconds <= 0 && !miningExtractionPending && miningTargetDetails.asteroidId && options.onAsteroidExtraction) {
         miningExtractionPending = true
-        void options.onAsteroidExtraction(miningTargetDetails.asteroidId, ship.position.clone()).then((result) => {
+        void options.onAsteroidExtraction(miningTargetDetails.asteroidId, toWorldPosition(ship.position)).then((result) => {
           miningExtractionPending = false
           if (!result || result.asteroidId !== miningTargetDetails.asteroidId || miningTarget.isDisposed()) return
           const oreVolume = result.extractedOreCubicMeters
@@ -1571,7 +1582,16 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       }
     }
     const miningBeamSource = miningLaserActive ? ship.position.add(shipForward.scale(2.5)).add(Vector3.Up().scale(0.35)) : undefined
-    options.onFlightUpdate(ship.position, actualSpeed, flightAssistEnabled, shipYaw, shipPitch, shipRoll, miningBeamSource, miningLaserActive ? miningTarget?.getAbsolutePosition() : undefined)
+    options.onFlightUpdate(
+      toWorldPosition(ship.position),
+      actualSpeed,
+      flightAssistEnabled,
+      shipYaw,
+      shipPitch,
+      shipRoll,
+      miningBeamSource ? toWorldPosition(miningBeamSource) : undefined,
+      miningLaserActive && miningTarget ? toWorldPosition(miningTarget.getAbsolutePosition()) : undefined,
+    )
     const isDockingAvailable = Vector3.Distance(ship.position, stationPosition) <= stationShieldRadius
     if (isDockingAvailable !== dockingAvailable) {
       dockingAvailable = isDockingAvailable

@@ -73,7 +73,7 @@ async def realtime(websocket: WebSocket) -> None:
         raw_pilots = await client.hgetall(presence_key)
         pilots = [json.loads(value) for key, value in raw_pilots.items() if key.decode() != pilot_key]
         await websocket.send_json({"type": "snapshot", "payload": {"pilots": pilots}})
-        pilot = {"pilot_id": pilot_key, "display_name": pilot_name, "ship_type": "starter-corvette", "x": 123_078, "y": 480, "z": -2_691, "yaw": 0, "pitch": 0, "roll": 0}
+        pilot = {"pilot_id": pilot_key, "display_name": pilot_name, "ship_type": "starter-corvette", "x": 3_000_000_000, "y": 480, "z": -50_000, "yaw": 0, "pitch": 0, "roll": 0}
         await client.hset(presence_key, pilot_key, json.dumps(pilot, separators=(",", ":")))
         await publish_event("system", SYSTEM_ID, "pilot_joined", pilot)
         event_task = asyncio.create_task(_forward_events(websocket, pilot_key))
@@ -97,7 +97,7 @@ async def realtime(websocket: WebSocket) -> None:
                         raw_pilots = await client.hgetall(presence_key)
                         pilots = [json.loads(value) for key, value in raw_pilots.items() if key.decode() != pilot_key]
                         await websocket.send_json({"type": "snapshot", "payload": {"pilots": pilots}})
-                        pilot = {"pilot_id": pilot_key, "display_name": pilot_name, "ship_type": "starter-corvette", "x": 123_078, "y": 480, "z": -2_691, "yaw": 0, "pitch": 0, "roll": 0}
+                        pilot = {"pilot_id": pilot_key, "display_name": pilot_name, "ship_type": "starter-corvette", "x": 3_000_000_000, "y": 480, "z": -50_000, "yaw": 0, "pitch": 0, "roll": 0}
                         await client.hset(presence_key, pilot_key, json.dumps(pilot, separators=(",", ":")))
                         await publish_event("system", SYSTEM_ID, "pilot_joined", pilot)
                         is_in_space = True

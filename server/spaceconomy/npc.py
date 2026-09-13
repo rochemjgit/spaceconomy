@@ -37,7 +37,7 @@ from .models import (
 )
 from .refinery import crush_outputs, purify_output
 
-KEPLER_POSITION = (123_078.0, 480.0, -3_400.0)
+KEPLER_POSITION = (3_000_000_000.0, 480.0, -50_000.0)
 DECISION_INTERVAL = timedelta(seconds=30)
 MOVEMENT_SPEED_METERS_PER_SECOND = 65.0
 WARP_MINIMUM_DISTANCE_METERS = 100_000

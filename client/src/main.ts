@@ -494,11 +494,12 @@ appRoot.innerHTML = `
     <section class="minimap" aria-label="System map">
       <p class="eyebrow">SYSTEM MAP</p>
       <div class="minimap-field">
-        <span class="map-orbit"></span>
-        <span id="map-primary-star" class="map-poi map-star" title="Primary Star"></span>
-        <span id="map-starter-world" class="map-poi map-planet" title="Starter World"></span>
-        <span id="map-kepler-station" class="map-poi map-station" title="Kepler Station"></span>
-        <span id="player-map-marker" class="player-map-marker" title="Your ship"></span>
+        <div id="minimap-world" class="minimap-world system-map-grid">
+          <span id="map-primary-star" class="map-poi map-star" title="Primary Star"></span>
+          <span id="map-starter-world" class="map-poi map-planet" title="Starter World"></span>
+          <span id="map-kepler-station" class="map-poi map-station" title="Kepler Station"></span>
+          <span id="player-map-marker" class="player-map-marker" title="Your ship"></span>
+        </div>
       </div>
       <div class="map-legend"><span class="legend-star">STAR</span><span class="legend-planet">WORLD</span><span class="legend-station">STATION</span><span class="legend-player">YOU</span></div>
     </section>
@@ -556,10 +557,11 @@ appRoot.innerHTML = `
     <div id="system-map-modal" class="system-map-modal" role="dialog" aria-modal="true" aria-labelledby="system-map-title" hidden>
       <div class="system-map-backdrop" data-system-map-close></div>
       <section class="system-map-panel">
-        <header class="system-map-heading"><div><p class="eyebrow">NAVIGATION OVERLAY</p><h1 id="system-map-title">LOCAL SYSTEM</h1></div><div class="system-map-actions"><button id="system-map-refresh" class="system-map-refresh" type="button" aria-label="Refresh system map" title="Refresh system map">&#x21bb;</button><button id="system-map-close" class="game-modal-close" type="button" aria-label="Close system map">×</button></div></header>
+        <header class="system-map-heading"><div><p class="eyebrow">NAVIGATION OVERLAY</p><h1 id="system-map-title">LOCAL SYSTEM</h1></div><div class="system-map-actions"><button id="system-map-zoom-out" class="system-map-refresh" type="button" aria-label="Zoom out" title="Zoom out">−</button><button id="system-map-zoom-in" class="system-map-refresh" type="button" aria-label="Zoom in" title="Zoom in">+</button><button id="system-map-refresh" class="system-map-refresh" type="button" aria-label="Refresh system map" title="Refresh system map">&#x21bb;</button><button id="system-map-close" class="game-modal-close" type="button" aria-label="Close system map">×</button></div></header>
         <div class="system-map-layout">
           <div class="system-map-display" aria-label="System map POIs">
-            <div id="system-map-world" class="system-map-world">
+            <div class="system-map-scale" aria-hidden="true"><span>-5,000,000 km</span><span>0 km</span><span>+5,000,000 km</span></div>
+            <div id="system-map-world" class="system-map-world system-map-grid">
               <button class="system-poi system-poi-star is-selected" type="button" data-poi="primary-star" aria-pressed="true"><span>PRIMARY STAR</span></button>
               <button class="system-poi system-poi-world" type="button" data-poi="starter-world" aria-pressed="false"><span>STARTER WORLD</span></button>
               <button class="system-poi system-poi-station" type="button" data-poi="kepler-station" aria-pressed="false"><span>KEPLER STATION</span></button>
@@ -591,6 +593,7 @@ const coordinateYDisplay = document.querySelector<HTMLElement>('#coordinate-y')
 const coordinateZDisplay = document.querySelector<HTMLElement>('#coordinate-z')
 const playerMapMarker = document.querySelector<HTMLElement>('#player-map-marker')
 const minimapField = document.querySelector<HTMLElement>('.minimap-field')
+const minimapWorld = document.querySelector<HTMLElement>('#minimap-world')
 const mapPrimaryStar = document.querySelector<HTMLElement>('#map-primary-star')
 const mapStarterWorld = document.querySelector<HTMLElement>('#map-starter-world')
 const mapKeplerStation = document.querySelector<HTMLElement>('#map-kepler-station')
@@ -632,6 +635,8 @@ const coreSystemButtons = document.querySelectorAll<HTMLButtonElement>('[data-co
 const systemMapModal = document.querySelector<HTMLElement>('#system-map-modal')
 const systemMapClose = document.querySelector<HTMLButtonElement>('#system-map-close')
 const systemMapRefresh = document.querySelector<HTMLButtonElement>('#system-map-refresh')
+const systemMapZoomOut = document.querySelector<HTMLButtonElement>('#system-map-zoom-out')
+const systemMapZoomIn = document.querySelector<HTMLButtonElement>('#system-map-zoom-in')
 const systemMapDisplay = document.querySelector<HTMLElement>('.system-map-display')
 const systemMapWorld = document.querySelector<HTMLElement>('#system-map-world')
 const systemMapPlayer = document.querySelector<HTMLElement>('#system-map-player')
@@ -695,10 +700,8 @@ function showGameToast(message: string) {
 }
 const shipDestroyedOverlay = document.querySelector<HTMLElement>('#ship-destroyed-overlay')
 const destructionCause = document.querySelector<HTMLElement>('#destruction-cause')
-const minimumMinimapRadius = 20_000
-const maximumMinimapRadius = 400_000
-let minimapRadius = 140_000
-let playerMapPosition = { x: 123_078, y: 480, z: -2_691 }
+let minimapZoom = 1
+let playerMapPosition = { x: 3_000_000_000, y: 480, z: -50_000 }
 let selectedTarget: { id?: string; name: string; kind: 'asteroid' | 'pilot' | 'cargo' | 'warpable' | 'station' | 'planet'; shipType?: string; jettisonedItemId?: string; position: Vector3; oreRemainingCubicMeters: number; initialOreCubicMeters: number; locked: boolean; locking: boolean; lockProgress: number } | undefined
 let lockedTarget: typeof selectedTarget
 const activeModuleTargetIds = new Map<string, string>()
@@ -724,13 +727,6 @@ function renderSavedShipState() {
   if (cargoDisplay) cargoDisplay.textContent = `${cargoCubicMeters.toFixed(2)} / ${cargoCapacityCubicMeters.toFixed(2)} M3`
   if (cargoBar) cargoBar.style.width = `${(cargoCubicMeters / cargoCapacityCubicMeters) * 100}%`
 }
-let systemMapPanX = 0
-let systemMapPanY = 0
-let systemMapRotation = -18
-let systemMapTilt = 54.7
-let systemMapZoom = 1
-let systemMapGesture: { pointerId: number; button: number; clientX: number; clientY: number } | undefined
-
 for (let index = 0; index < 240; index += 1) {
   const angle = index * 2.39996323
   const distance = 260 + ((index * 73) % 1_350)
@@ -763,8 +759,8 @@ function closeGameModal() {
 
 const poiDetails: Record<PoiName, PoiDetails> = {
   'primary-star': { type: 'STAR', name: 'PRIMARY STAR', description: 'The system primary and central navigation reference.', position: { x: 0, y: 0, z: 0 } },
-  'starter-world': { type: 'TERRESTRIAL WORLD', name: 'STARTER WORLD', description: 'A temperate starter world supporting Kepler Station operations.', position: { x: 119_678, y: 0, z: 0 } },
-  'kepler-station': { type: 'ORBITAL STATION', name: 'KEPLER STATION', description: 'A protected orbital outpost. Docking is available inside the station shield.', position: { x: 123_078, y: 480, z: -3_400 } },
+  'starter-world': { type: 'TERRESTRIAL WORLD', name: 'STARTER WORLD', description: 'A temperate starter world supporting Kepler Station operations.', position: { x: 3_000_000_000, y: 0, z: 0 } },
+  'kepler-station': { type: 'ORBITAL STATION', name: 'KEPLER STATION', description: 'A protected orbital outpost. Docking is available inside the station shield.', position: { x: 3_000_000_000, y: 480, z: -50_000 } },
 }
 let selectedPoi: PoiName = 'primary-star'
 const discoveredFields = new Map<string, DiscoveredField>()
@@ -796,14 +792,36 @@ function openSystemMap() {
   systemMapClose?.focus()
 }
 
-function updateSystemMapView() {
-  if (!systemMapWorld) return
-  systemMapWorld.style.transform = `translate(${systemMapPanX}px, ${systemMapPanY}px) rotateX(${systemMapTilt}deg) rotateZ(${systemMapRotation}deg) scale(${systemMapZoom})`
+const systemMapHalfSpanMeters = 5_000_000_000
+let systemMapZoom = 1
+let systemMapPan = { x: 0, y: 0 }
+let systemMapDrag: { pointerId: number; startX: number; startY: number; panX: number; panY: number } | undefined
+function systemMapCoordinate(value: number): string {
+  return `${Math.min(99.5, Math.max(0.5, 50 + (value / systemMapHalfSpanMeters) * 50)).toFixed(2)}%`
 }
 
-const systemMapHalfSpanMeters = 450_000
-function systemMapCoordinate(value: number): string {
-  return `${Math.min(95, Math.max(5, 50 + (value / systemMapHalfSpanMeters) * 45)).toFixed(2)}%`
+function clampSystemMapPan() {
+  if (!systemMapDisplay || systemMapZoom === 1) {
+    systemMapPan = { x: 0, y: 0 }
+    return
+  }
+  const maximumX = (systemMapDisplay.clientWidth * (systemMapZoom - 1)) / 2
+  const maximumY = (systemMapDisplay.clientHeight * (systemMapZoom - 1)) / 2
+  systemMapPan.x = Math.max(-maximumX, Math.min(maximumX, systemMapPan.x))
+  systemMapPan.y = Math.max(-maximumY, Math.min(maximumY, systemMapPan.y))
+}
+
+function updateSystemMapZoom() {
+  if (!systemMapWorld) return
+  clampSystemMapPan()
+  systemMapWorld.classList.toggle('is-detail-scale', systemMapZoom >= 10)
+  systemMapWorld.style.setProperty('--system-map-marker-scale', String(1 / systemMapZoom))
+  systemMapWorld.style.transform = `translate(${systemMapPan.x}px, ${systemMapPan.y}px) scale(${systemMapZoom})`
+}
+
+function changeSystemMapZoom(factor: number) {
+  systemMapZoom = Math.max(1, Math.min(100, systemMapZoom * factor))
+  updateSystemMapZoom()
 }
 
 function positionSystemMapMarker(marker: HTMLElement | null, position: { x: number; z: number }) {
@@ -1765,47 +1783,44 @@ window.addEventListener('keydown', handleGameNavigationKeyDown)
 systemMapClose?.addEventListener('click', closeSystemMap)
 document.querySelector<HTMLElement>('[data-system-map-close]')?.addEventListener('click', closeSystemMap)
 systemMapRefresh?.addEventListener('click', () => void refreshSystemMap())
+systemMapZoomOut?.addEventListener('click', () => changeSystemMapZoom(0.5))
+systemMapZoomIn?.addEventListener('click', () => changeSystemMapZoom(2))
+systemMapDisplay?.addEventListener('wheel', (event) => {
+  event.preventDefault()
+  changeSystemMapZoom(event.deltaY > 0 ? 0.8 : 1.25)
+}, { passive: false })
+systemMapDisplay?.addEventListener('pointerdown', (event) => {
+  if (systemMapZoom === 1 || event.button !== 0) return
+  systemMapDrag = {
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    panX: systemMapPan.x,
+    panY: systemMapPan.y,
+  }
+  systemMapDisplay.setPointerCapture(event.pointerId)
+})
+systemMapDisplay?.addEventListener('pointermove', (event) => {
+  if (!systemMapDrag || event.pointerId !== systemMapDrag.pointerId) return
+  systemMapPan = {
+    x: systemMapDrag.panX + event.clientX - systemMapDrag.startX,
+    y: systemMapDrag.panY + event.clientY - systemMapDrag.startY,
+  }
+  updateSystemMapZoom()
+})
+function stopSystemMapPan(event: PointerEvent) {
+  if (!systemMapDrag || event.pointerId !== systemMapDrag.pointerId) return
+  systemMapDisplay?.releasePointerCapture(event.pointerId)
+  systemMapDrag = undefined
+}
+systemMapDisplay?.addEventListener('pointerup', stopSystemMapPan)
+systemMapDisplay?.addEventListener('pointercancel', stopSystemMapPan)
 systemPois.forEach((poi) => poi.addEventListener('click', () => selectPoi(poi.dataset.poi as PoiName)))
 warpAction?.addEventListener('click', () => {
   if (locationTransitionPending) return
   const destination = poiDetails[selectedPoi].position
   if (scene.warpTo(new Vector3(destination.x, destination.y, destination.z))) closeSystemMap()
 })
-systemMapDisplay?.addEventListener('pointerdown', (event) => {
-  if (event.button === 0 && (event.target as HTMLElement).closest('[data-poi]')) return
-  if (event.button !== 0 && event.button !== 2) return
-  event.preventDefault()
-  systemMapGesture = { pointerId: event.pointerId, button: event.button, clientX: event.clientX, clientY: event.clientY }
-  systemMapDisplay.setPointerCapture(event.pointerId)
-})
-systemMapDisplay?.addEventListener('pointermove', (event) => {
-  if (!systemMapGesture || event.pointerId !== systemMapGesture.pointerId) return
-  const movementX = event.clientX - systemMapGesture.clientX
-  const movementY = event.clientY - systemMapGesture.clientY
-  if (systemMapGesture.button === 0) {
-    systemMapPanX += movementX
-    systemMapPanY += movementY
-  } else {
-    systemMapRotation += movementX * 0.35
-    systemMapTilt = Math.max(20, Math.min(75, systemMapTilt - movementY * 0.25))
-  }
-  systemMapGesture.clientX = event.clientX
-  systemMapGesture.clientY = event.clientY
-  updateSystemMapView()
-})
-systemMapDisplay?.addEventListener('pointerup', (event) => {
-  if (!systemMapGesture || event.pointerId !== systemMapGesture.pointerId) return
-  if (systemMapDisplay.hasPointerCapture(event.pointerId)) systemMapDisplay.releasePointerCapture(event.pointerId)
-  systemMapGesture = undefined
-})
-systemMapDisplay?.addEventListener('contextmenu', (event) => event.preventDefault())
-systemMapDisplay?.addEventListener('wheel', (event) => {
-  event.preventDefault()
-  const zoomFactor = event.deltaY > 0 ? 1 / 1.15 : 1.15
-  systemMapZoom = Math.max(0.55, Math.min(2.4, systemMapZoom * zoomFactor))
-  updateSystemMapView()
-}, { passive: false })
-updateSystemMapView()
 
 function toggleHardpoint(slot: HTMLButtonElement) {
   if (!selectedTarget || slot.disabled) {
@@ -1861,8 +1876,7 @@ function updateHardpointAvailability() {
 }
 
 function mapCoordinate(value: number): string {
-  const percentage = 50 + (value / minimapRadius) * 50
-  return `${Math.min(96, Math.max(4, percentage)).toFixed(2)}%`
+  return systemMapCoordinate(value)
 }
 
 function positionMapMarker(marker: HTMLElement | null, x: number, z: number) {
@@ -1983,16 +1997,17 @@ document.querySelector<HTMLButtonElement>('#pickup-jettisoned-item')?.addEventLi
 })
 
 function updateMinimapMarkers() {
+  if (minimapWorld) minimapWorld.style.transform = `scale(${minimapZoom})`
   positionMapMarker(mapPrimaryStar, 0, 0)
-  positionMapMarker(mapStarterWorld, 119_678, 0)
-  positionMapMarker(mapKeplerStation, 123_078, -3_400)
+  positionMapMarker(mapStarterWorld, 3_000_000_000, 0)
+  positionMapMarker(mapKeplerStation, 3_000_000_000, -50_000)
   positionMapMarker(playerMapMarker, playerMapPosition.x, playerMapPosition.z)
 }
 
 minimapField?.addEventListener('wheel', (event) => {
   event.preventDefault()
-  const zoomFactor = event.deltaY > 0 ? 1.2 : 1 / 1.2
-  minimapRadius = Math.min(maximumMinimapRadius, Math.max(minimumMinimapRadius, minimapRadius * zoomFactor))
+  const zoomFactor = event.deltaY > 0 ? 0.8 : 1.25
+  minimapZoom = Math.max(1, Math.min(100, minimapZoom * zoomFactor))
   updateMinimapMarkers()
 }, { passive: false })
 updateMinimapMarkers()
@@ -2411,7 +2426,7 @@ async function changeDockedState(docking: boolean) {
     if (button) { button.disabled = true; button.setAttribute('aria-busy', 'true') }
   }
   renderActiveInventory()
-  const position = docking ? { ...playerMapPosition } : { x: 123_078, y: 480, z: -2_690.5 }
+  const position = docking ? { ...playerMapPosition } : { x: 3_000_000_000, y: 480, z: -49_990.5 }
   try {
     await saveShipState(docking ? 'KEPLER STATION' : null, position)
   } catch (error) {
