@@ -6,6 +6,7 @@ from spaceconomy.fitting import (
     FittingService,
     ModuleDefinition,
     ModuleItem,
+    SENSOR_ARRAY,
     SlotLocation,
     STARTER_MINER,
     create_demo_fitting_service,
@@ -28,8 +29,13 @@ def test_fit_moves_a_docked_station_item_and_updates_derived_statistics() -> Non
     assert snapshot.statistics["powergrid_used"] == 14.0
 
 
-def test_starter_hull_sensor_range_is_fifty_kilometers() -> None:
-    assert STARTER_MINER.base_statistics["sensor_range_meters"] == 50_000
+def test_starter_sensor_array_sets_scan_range_to_five_hundred_kilometers() -> None:
+    service = create_demo_fitting_service()
+
+    assert "sensor_range_meters" not in STARTER_MINER.base_statistics
+    snapshot = service.fit("item.sensor_array.1", SlotLocation.CORE_SYSTEM, 0, "fit-sensor")
+
+    assert snapshot.statistics["sensor_range_meters"] == 500_000
 
 
 def test_starter_mining_laser_effective_range_is_five_hundred_meters() -> None:

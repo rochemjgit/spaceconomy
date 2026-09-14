@@ -39,6 +39,15 @@
 
 Asteroids, discoveries, cargo, scans, and extraction outcomes are durable PostgreSQL state. Babylon renders only server snapshot records and applies ore/cargo changes only after extraction succeeds. Current ship movement remains client-predicted, so prototype local-interest and extraction range checks accept a bounded client position. Replacing this with server-owned transforms and area-of-interest routing is the next authority milestone.
 
+## In-game navigation map (2026-09-13)
+
+- World dimensions are 100 by 100 cells, each **100,000 km per side**, not 100,000 square km of area. The region spans 10 million km on each axis; the primary star is at (0, 0, 0).
+- The map opens centered on the ship at a sensor-relative local scale. Its top-down X/Z projection uses equal distance scales on both axes; selected destinations retain their actual X/Y/Z coordinates for distance and warp calculations.
+- Screen-space markers preserve local coordinate precision. An adaptive 1/2/5 grid and distance ruler subdivide cells locally and aggregate them at system scale. Individual sensor-range contacts disappear at broader scales; charted destinations remain selectable from the list even when markers overlap.
+- Wheel zoom is proportional, animated, and anchored at the cursor, including repeated wheel input. Dragging pans without selecting a POI. Controls include ship recentering, whole-system overview, scanning, refresh, and zoom; the focused map also supports arrow-key panning, +/- zoom, and Home recentering.
+- Successful server scans reveal destinations and add survey footprints. Discoveries reload from the existing server bootstrap; footprint overlays currently cover only scans performed in the current client session, not historical scan coverage. Failed scans reveal nothing. Map scanning and warp are unavailable while docked.
+- Validation covers camera precision, aspect ratio, cursor anchoring, resizing, detail levels, sensor-range filtering, scan success/failure, drag selection, and warp coordinates. Desktop and mobile visual checks use mocked API data, not live flight or live-server warp validation.
+
 ## Next implementation slice
 
 1. Move flight transforms, area-of-interest, and extraction range checks to the system server; add client prediction/reconciliation.

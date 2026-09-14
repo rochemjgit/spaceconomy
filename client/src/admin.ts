@@ -89,6 +89,7 @@ type AdminConfiguration = {
   snapshot_tick_hz: number
   asteroid_spawn_interval_seconds: number
   asteroid_field_maximum_active_asteroids: number
+  asteroid_system_maximum_active_fields: number
   refinery_tick_seconds: number
   llm_provider: 'ollama' | 'azure_foundry'
   llm_model: string
@@ -225,6 +226,7 @@ type RuntimeConfiguration = {
   snapshot_tick_hz: number
   asteroid_spawn_interval_seconds: number
   asteroid_field_maximum_active_asteroids: number
+  asteroid_system_maximum_active_fields: number
   refinery_tick_seconds: number
   ollama_model: string
   ollama_timeout_seconds: number
@@ -249,8 +251,14 @@ type MarketAdmin = { orders: { id: string; side: string; owner: string; station:
 let marketAdmin: MarketAdmin = { orders: [], ledger: [] }
 type RefineryAdmin = { jobs: { id: string; pilot: string; refinery_name: string; stage: string; state: string; queue_sequence: number; quoted_duration_seconds: number; quoted_efficiency: number; quoted_fee_credits: number; started_at: string | null; completes_at: string | null; completed_at: string | null; failure_reason: string | null }[] }
 let refineryAdmin: RefineryAdmin = { jobs: [] }
-type DashboardView = 'settings' | 'npc' | 'market' | 'refining'
-let activeDashboardView: DashboardView = location.hash === '#market' ? 'market' : location.hash === '#refining' ? 'refining' : location.hash === '#npc' ? 'npc' : 'settings'
+type SystemState = {
+  npcs: (Npc & { location_kind: 'docked' | 'space'; station_name: string | null; position_x: number; position_y: number; position_z: number })[]
+  players: { pilot_id: string; display_name: string; location_kind: 'docked' | 'space'; station_name: string | null; position_x: number; position_y: number; position_z: number }[]
+  asteroid_fields: { id: string; display_name: string; position_x: number; position_y: number; position_z: number }[]
+}
+type DashboardView = 'settings' | 'npc' | 'map' | 'poi' | 'market' | 'refining'
+let activeDashboardView: DashboardView = location.hash === '#market' ? 'market' : location.hash === '#refining' ? 'refining' : location.hash === '#poi' ? 'poi' : location.hash === '#map' ? 'map' : location.hash === '#npc' ? 'npc' : 'settings'
+let systemState: SystemState = { npcs: [], players: [], asteroid_fields: [] }
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>'"]/g, (character) => ({
@@ -292,6 +300,7 @@ function configurationMarkup(): string {
       <label>SIMULATION TICK <input name="simulation_tick_hz" type="number" min="1" max="60" value="${configuration.simulation_tick_hz}"></label>
       <label>SNAPSHOT TICK <input name="snapshot_tick_hz" type="number" min="1" max="60" value="${configuration.snapshot_tick_hz}"></label>
       <label>ASTEROID RESPAWN <input name="asteroid_spawn_interval_seconds" type="number" min="10" max="3600" value="${configuration.asteroid_spawn_interval_seconds}"></label>
+      <label>ACTIVE ASTEROID BELTS <input name="asteroid_system_maximum_active_fields" type="number" min="1" max="100" value="${configuration.asteroid_system_maximum_active_fields}"></label>
       <label>FIELD ASTEROID LIMIT <input name="asteroid_field_maximum_active_asteroids" type="number" min="1" max="500" value="${configuration.asteroid_field_maximum_active_asteroids}"></label>
       <label>REFINERY INTERVAL <input name="refinery_tick_seconds" type="number" min="0.1" max="60" step="0.1" value="${configuration.refinery_tick_seconds}"></label>
       <label>OLLAMA MODEL <input name="ollama_model" maxlength="128" value="${escapeHtml(configuration.ollama_model)}"></label>
@@ -324,6 +333,22 @@ function refineryMarkup(): string {
   return `<form id="refinery-filter-form" class="market-admin-filters"><label>PILOT <input name="pilot" placeholder="Pilot name"></label><label>REFINERY <input name="refinery" placeholder="Refinery name"></label><label>STAGE <select name="stage"><option value="">ALL</option><option value="crush">CRUSH</option><option value="purify">PURIFY</option></select></label><label>STATE <select name="state"><option value="">ALL</option><option value="queued">QUEUED</option><option value="processing">PROCESSING</option><option value="completed">COMPLETED</option><option value="cancelled">CANCELLED</option><option value="failed">FAILED</option></select></label><button type="submit">APPLY FILTERS</button></form><div class="market-admin-table"><h3>Refinery Jobs</h3><table><thead><tr><th>Pilot</th><th>Refinery</th><th>Stage</th><th>State</th><th>Queue</th><th>Duration</th><th>Efficiency</th><th>Fee</th><th>Completed / Due</th><th>Failure</th></tr></thead><tbody>${jobs}</tbody></table></div>`
 }
 
+function poiMarkup(): string {
+  const fixedPoints = [
+    { name: 'PRIMARY STAR', kind: 'Star', x: 0, y: 0, z: 0, status: 'System primary' },
+    { name: 'STARTER WORLD', kind: 'World', x: 3_000_000_000, y: 0, z: 0, status: 'Colonized world' },
+    { name: 'KEPLER STATION', kind: 'Station', x: 3_000_000_000, y: 480, z: -50_000, status: 'Operational' },
+  ]
+  const points = [
+    ...fixedPoints,
+    ...systemState.asteroid_fields.map((field) => ({ name: field.display_name, kind: 'Asteroid field', x: field.position_x, y: field.position_y, z: field.position_z, status: 'Active' })),
+    ...systemState.npcs.map((npc) => ({ name: npc.display_name, kind: 'NPC ship', x: npc.position_x, y: npc.position_y, z: npc.position_z, status: npc.location_kind === 'docked' ? `Docked: ${npc.station_name ?? 'station'}` : npc.behavior_state.replaceAll('_', ' ') })),
+    ...systemState.players.map((player) => ({ name: player.display_name, kind: 'Player ship', x: player.position_x, y: player.position_y, z: player.position_z, status: player.location_kind === 'docked' ? `Docked: ${player.station_name ?? 'station'}` : 'In space' })),
+  ]
+  const rows = points.map((point) => `<tr><td>${escapeHtml(point.name)}</td><td>${point.kind}</td><td>${point.x.toLocaleString()}</td><td>${point.y.toLocaleString()}</td><td>${point.z.toLocaleString()}</td><td>${escapeHtml(point.status)}</td></tr>`).join('') || '<tr><td colspan="6">No points of interest are available.</td></tr>'
+  return `<section class="section"><div class="section-heading"><div><p class="eyebrow">KEPLER SYSTEM</p><h2>Points of Interest</h2></div><button id="refresh-pois" class="secondary" type="button">REFRESH POIS</button></div><div class="market-admin-table"><table><thead><tr><th>Name</th><th>Kind</th><th>X</th><th>Y</th><th>Z</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table></div></section>`
+}
+
 function render() {
   const viewMarkup = activeDashboardView === 'settings'
     ? `<section class="section"><div class="section-heading"><div><p class="eyebrow">RUNTIME</p><h2>Simulation Configuration</h2></div></div>${configurationMarkup()}</section>
@@ -331,14 +356,18 @@ function render() {
     : activeDashboardView === 'npc'
       ? `<section class="section npc-section"><div class="section-heading"><div><p class="eyebrow">POPULATION</p><h2>Game State Overview</h2></div><span class="population-count">LIVE SYSTEM MAP</span></div><iframe class="npc-population-frame" src="/npc.html" title="NPC population and game state overview"></iframe></section>
          <section class="section create-section"><div class="section-heading"><div><p class="eyebrow">NEW LIFE</p><h2>Create NPC</h2></div><button id="generate-profile" class="secondary" type="button">DRAFT WITH FOUNDRY</button></div><form id="create-npc-form" class="npc-form create-form"><label>DISPLAY NAME <input name="display_name" maxlength="32" required></label><label>ROLE <select name="archetype_key" required><option value="economic_miner">Mining</option></select></label><label>CREATIVE DIRECTION <input name="prompt" maxlength="1000" placeholder="Independent prospector with a taste for rare deposits"></label><label>BACKGROUND STORY <textarea name="backstory" maxlength="4000" required></textarea></label><label>MOTIVATIONS <textarea name="motivations" maxlength="1200" required placeholder="Build a stable business&#10;Map profitable deposits"></textarea></label><div class="form-actions"><button type="submit">CREATE NPC</button></div></form></section>`
-      : activeDashboardView === 'market'
+      : activeDashboardView === 'map'
+        ? `<section class="section npc-section"><div class="section-heading"><div><p class="eyebrow">NAVIGATION</p><h2>Kepler System Map</h2></div><span class="population-count">ALL POINTS OF INTEREST</span></div><iframe class="npc-population-frame" src="/npc.html?view=map" title="Kepler system map"></iframe></section>`
+      : activeDashboardView === 'poi'
+        ? poiMarkup()
+        : activeDashboardView === 'market'
         ? `<section class="section"><div class="section-heading"><div><p class="eyebrow">ECONOMY</p><h2>Market Operations</h2></div></div>${marketMarkup()}</section>`
         : `<section class="section"><div class="section-heading"><div><p class="eyebrow">INDUSTRY</p><h2>Refining Operations</h2></div><span class="population-count">${refineryAdmin.jobs.length} JOBS</span></div>${refineryMarkup()}</section>`
   appRoot.innerHTML = `
     <main class="admin-shell">
       <aside class="sidebar"><a class="brand" href="/">SPACECONOMY<span>CONTROL</span></a><div class="local-access"><span></span>LOCAL ADMIN ACCESS</div></aside>
       <section class="workspace">
-        <header class="topbar"><div><p class="eyebrow">KEPLER SYSTEM</p><h1>World Control</h1></div><p id="admin-status" data-tone="neutral">Connecting to local control plane...</p><nav class="dashboard-menu" aria-label="Administration functions"><button type="button" data-dashboard-view="settings" class="${activeDashboardView === 'settings' ? 'is-active' : ''}">Settings</button><button type="button" data-dashboard-view="npc" class="${activeDashboardView === 'npc' ? 'is-active' : ''}">NPC</button><button type="button" data-dashboard-view="market" class="${activeDashboardView === 'market' ? 'is-active' : ''}">Market</button><button type="button" data-dashboard-view="refining" class="${activeDashboardView === 'refining' ? 'is-active' : ''}">Refining</button></nav></header>
+        <header class="topbar"><div><p class="eyebrow">KEPLER SYSTEM</p><h1>World Control</h1></div><p id="admin-status" data-tone="neutral">Connecting to local control plane...</p><nav class="dashboard-menu" aria-label="Administration functions"><button type="button" data-dashboard-view="settings" class="${activeDashboardView === 'settings' ? 'is-active' : ''}">Settings</button><button type="button" data-dashboard-view="npc" class="${activeDashboardView === 'npc' ? 'is-active' : ''}">NPC</button><button type="button" data-dashboard-view="map" class="${activeDashboardView === 'map' ? 'is-active' : ''}">Map</button><button type="button" data-dashboard-view="poi" class="${activeDashboardView === 'poi' ? 'is-active' : ''}">POI</button><button type="button" data-dashboard-view="market" class="${activeDashboardView === 'market' ? 'is-active' : ''}">Market</button><button type="button" data-dashboard-view="refining" class="${activeDashboardView === 'refining' ? 'is-active' : ''}">Refining</button></nav></header>
         ${viewMarkup}
       </section>
     </main>
@@ -360,6 +389,7 @@ function bindEvents() {
     location.hash = activeDashboardView === 'settings' ? '' : activeDashboardView
     render()
   }))
+  document.querySelector<HTMLButtonElement>('#refresh-pois')?.addEventListener('click', () => void refreshPointsOfInterest())
   document.querySelector<HTMLFormElement>('#market-filter-form')?.addEventListener('submit', (event) => { event.preventDefault(); const values = new FormData(event.currentTarget as HTMLFormElement); const query = new URLSearchParams(); for (const [key, value] of values) if (String(value).trim()) query.set(key, String(value)); void (async () => { try { marketAdmin = await request<MarketAdmin>(`/market/orders?${query}`); render(); setStatus('Market view refreshed.', 'success') } catch (error) { setStatus(error instanceof Error ? error.message : 'Unable to load market orders.', 'error') } })() })
   document.querySelector<HTMLFormElement>('#refinery-filter-form')?.addEventListener('submit', (event) => { event.preventDefault(); const values = new FormData(event.currentTarget as HTMLFormElement); const query = new URLSearchParams(); for (const [key, value] of values) if (String(value).trim()) query.set(key, String(value)); void (async () => { try { refineryAdmin = await request<RefineryAdmin>(`/refinery/jobs?${query}`); render(); setStatus('Refinery jobs refreshed.', 'success') } catch (error) { setStatus(error instanceof Error ? error.message : 'Unable to load refinery jobs.', 'error') } })() })
   document.querySelector<HTMLFormElement>('#configuration-form')?.addEventListener('submit', (event) => {
@@ -367,7 +397,7 @@ function bindEvents() {
     const form = new FormData(event.currentTarget as HTMLFormElement)
     void (async () => {
       try {
-        configuration = await request<RuntimeConfiguration>('/configuration', { method: 'PATCH', body: JSON.stringify({ simulation_tick_hz: Number(form.get('simulation_tick_hz')), snapshot_tick_hz: Number(form.get('snapshot_tick_hz')), asteroid_spawn_interval_seconds: Number(form.get('asteroid_spawn_interval_seconds')), asteroid_field_maximum_active_asteroids: Number(form.get('asteroid_field_maximum_active_asteroids')), refinery_tick_seconds: Number(form.get('refinery_tick_seconds')), ollama_model: String(form.get('ollama_model')), ollama_timeout_seconds: Number(form.get('ollama_timeout_seconds')) }) })
+        configuration = await request<RuntimeConfiguration>('/configuration', { method: 'PATCH', body: JSON.stringify({ simulation_tick_hz: Number(form.get('simulation_tick_hz')), snapshot_tick_hz: Number(form.get('snapshot_tick_hz')), asteroid_spawn_interval_seconds: Number(form.get('asteroid_spawn_interval_seconds')), asteroid_system_maximum_active_fields: Number(form.get('asteroid_system_maximum_active_fields')), asteroid_field_maximum_active_asteroids: Number(form.get('asteroid_field_maximum_active_asteroids')), refinery_tick_seconds: Number(form.get('refinery_tick_seconds')), ollama_model: String(form.get('ollama_model')), ollama_timeout_seconds: Number(form.get('ollama_timeout_seconds')) }) })
         render(); setStatus('Runtime configuration saved.', 'success')
       } catch (error) { setStatus(error instanceof Error ? error.message : 'Unable to save configuration.', 'error') }
     })()
@@ -429,9 +459,19 @@ function bindEvents() {
   })
 }
 
+async function refreshPointsOfInterest() {
+  try {
+    systemState = await request<SystemState>('/system/state')
+    render()
+    setStatus('Points of interest refreshed.', 'success')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : 'Unable to load points of interest.', 'error')
+  }
+}
+
 async function load() {
   try {
-    [configuration, npcs, marketAdmin, refineryAdmin] = await Promise.all([request<RuntimeConfiguration>('/configuration'), request<Npc[]>('/npcs'), request<MarketAdmin>('/market/orders'), request<RefineryAdmin>('/refinery/jobs')])
+    [configuration, npcs, marketAdmin, refineryAdmin, systemState] = await Promise.all([request<RuntimeConfiguration>('/configuration'), request<Npc[]>('/npcs'), request<MarketAdmin>('/market/orders'), request<RefineryAdmin>('/refinery/jobs'), request<SystemState>('/system/state')])
     selectedNpcId = npcs[0]?.pilot_id ?? null
     render()
     setStatus('Local control plane connected.', 'success')

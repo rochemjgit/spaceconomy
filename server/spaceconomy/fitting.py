@@ -360,7 +360,6 @@ STARTER_MINER: Final = HullDefinition(
         "heat_tolerance": 100.0,
         "heat_dissipation_per_second": 4.0,
         "mining_yield": 1.0,
-        "sensor_range_meters": 50_000.0,
         "maximum_speed": 120.0,
         "shield_capacity": 60.0,
         "armor": 25.0,
@@ -445,6 +444,21 @@ CAPACITOR_BANK: Final = ModuleDefinition(
     passive_effects=(StatisticModifier("capacitor_capacity", ModifierOperation.FLAT, 40.0),),
 )
 
+SENSOR_ARRAY: Final = ModuleDefinition(
+    definition_id="module.sensor_array.s1",
+    version=1,
+    display_name="S1 Survey Array",
+    family="sensor_array",
+    fit_location=SlotLocation.CORE_SYSTEM,
+    cpu_demand=8.0,
+    powergrid_demand=10.0,
+    durability_maximum=100.0,
+    mass_kg=350.0,
+    volume_cubic_meters=2.0,
+    effective_range_meters=500_000.0,
+    passive_effects=(StatisticModifier("sensor_range_meters", ModifierOperation.FLAT, 500_000.0),),
+)
+
 REACTOR_CORE: Final = ModuleDefinition(
     definition_id="module.reactor.r1",
     version=1,
@@ -484,5 +498,6 @@ def create_demo_fitting_service() -> FittingService:
     service.add_station_item(ModuleItem("item.mining_laser.1", MINING_LASER, "station.kepler", "pilot.demo.1", 100.0))
     service.add_station_item(ModuleItem("item.shield_booster.1", SHIELD_BOOSTER, "station.kepler", "pilot.demo.1", 100.0))
     service.add_station_item(ModuleItem("item.capacitor_bank.1", CAPACITOR_BANK, "station.kepler", "pilot.demo.1", 100.0))
+    service.add_station_item(ModuleItem("item.sensor_array.1", SENSOR_ARRAY, "station.kepler", "pilot.demo.1", 100.0))
     service.add_station_item(ModuleItem("item.reactor_core.1", REACTOR_CORE, "station.kepler", "pilot.demo.1", 100.0))
     return service

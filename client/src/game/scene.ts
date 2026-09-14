@@ -575,7 +575,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   const maximumPowerMegajoules = 100
   const powerRegenerationMegawatts = 8
   const miningLaserPowerDrawMegawatts = 12
-  const remotePilotVisibilityRangeMeters = 50_000
+  const remotePilotVisibilityRangeMeters = 500_000
   const warpDriveStats = {
     maximumCapacity: 100,
     rechargeCapacityPerSecond: 2,

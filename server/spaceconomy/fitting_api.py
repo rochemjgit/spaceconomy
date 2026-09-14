@@ -209,6 +209,14 @@ async def _locked_ship(session: AsyncSession, pilot_id: UUID) -> Ship:
     return ship
 
 
+async def active_ship_statistics(session: AsyncSession, pilot_id: UUID) -> dict[str, float]:
+    """Derive authoritative active-ship statistics for in-space systems."""
+    _, station_container = await _ensure_containers(session, pilot_id)
+    ship = await _locked_ship(session, pilot_id)
+    service, _ = await _service_for_ship(session, pilot_id, ship, station_container.id)
+    return service.snapshot().statistics
+
+
 @router.get("/active", response_model=FittingSnapshotResponse)
 async def active_fitting(
     session: SessionDependency, authorization: Annotated[str | None, Header()] = None

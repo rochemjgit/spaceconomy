@@ -117,9 +117,14 @@ let activePanel: Panel = 'overview'
 let npcFilter = ''
 let mapZoom = 1
 let mapPan = { x: 0, y: 0 }
+let mapZoomTarget = 1
+let mapPanTarget = { x: 0, y: 0 }
 let mapDrag: { pointerId: number; startX: number; startY: number; panX: number; panY: number } | undefined
+let mapAnimation: number | undefined
 let mapRefreshTimer: number | undefined
 const systemMapHalfExtentMeters = 5_000_000_000
+const systemMapCellSizeMeters = 100_000_000
+const systemMapMaximumZoom = 100_000_000
 const systemPoints: SystemPoint[] = [
   { name: 'PRIMARY STAR', kind: 'star', x: 0, z: 0 },
   { name: 'STARTER WORLD', kind: 'world', x: 3_000_000_000, z: 0 },
@@ -171,32 +176,92 @@ function setStatus(message: string, tone: 'success' | 'error' | 'neutral' = 'neu
 }
 
 function systemMapMarkup(): string {
-  const mapPosition = (x: number, z: number) => ({
-    left: Math.min(99.5, Math.max(0.5, 50 + (x / systemMapHalfExtentMeters) * 50)),
-    top: Math.min(99.5, Math.max(0.5, 50 - (z / systemMapHalfExtentMeters) * 50)),
-  })
-  return `<div class="map-controls"><button id="map-zoom-out" type="button" aria-label="Zoom out" title="Zoom out">−</button><button id="map-zoom-in" type="button" aria-label="Zoom in" title="Zoom in">+</button></div><div class="map-scale" aria-hidden="true"><span>-5,000,000 km</span><span>0 km</span><span>+5,000,000 km</span></div><div class="system-map-viewport" aria-label="Kepler system sector grid with NPC and player locations"><div id="system-map-canvas" class="system-map system-map-grid ${mapZoom >= 10 ? 'is-detail-scale' : ''}" role="list" style="--map-marker-scale:${1 / mapZoom};transform:translate(${mapPan.x}px,${mapPan.y}px) scale(${mapZoom})">${systemPoints.map((point) => {
-    const position = mapPosition(point.x, point.z)
-    return `<div class="map-point map-point-${point.kind}" style="left:${position.left.toFixed(2)}%;top:${position.top.toFixed(2)}%" title="${point.name}"><span></span><strong>${point.name}</strong></div>`
+  const poiCount = systemPoints.length + asteroidFields.length + npcs.length + players.length
+  return `<section id="admin-system-chart" class="admin-system-chart" aria-label="Kepler system chart showing all points of interest"><header class="admin-system-chart-heading"><div><p class="eyebrow">KEPLER / ADMINISTRATIVE NAVIGATION</p><h3 id="admin-system-map-title">KEPLER SYSTEM</h3></div><div class="map-controls"><button id="map-fullscreen" type="button" aria-label="Enter fullscreen map" title="Enter fullscreen map">&#x26F6;</button><button id="map-recenter" type="button" aria-label="Recenter map" title="Recenter map">&#8982;</button><button id="map-zoom-out" type="button" aria-label="Zoom out" title="Zoom out">−</button><button id="map-zoom-in" type="button" aria-label="Zoom in" title="Zoom in">+</button></div></header><div class="admin-system-map-viewport" aria-label="Kepler system grid with every point of interest"><div class="admin-system-map-scale" aria-hidden="true"><span id="admin-system-map-coordinate">ALL POIS: ${poiCount}</span><span>X / Z PLANE</span></div><div id="system-map-canvas" class="admin-system-map ${mapZoom >= 10 ? 'is-detail-scale' : ''}" role="list" style="--map-marker-scale:${1 / mapZoom};transform:translate(${mapPan.x}px,${mapPan.y}px) scale(${mapZoom})">${systemPoints.map((point) => {
+    return `<div class="map-point map-point-${point.kind}" data-map-x="${point.x}" data-map-z="${point.z}" title="${point.name}"><span></span><strong>${point.name}</strong></div>`
   }).join('')}${asteroidFields.map((field) => {
-    const position = mapPosition(field.position_x, field.position_z)
-    return `<div class="map-field" style="left:${position.left.toFixed(2)}%;top:${position.top.toFixed(2)}%" title="${escapeHtml(field.display_name)}"><span></span><strong>${escapeHtml(field.display_name)}</strong></div>`
+    return `<div class="map-field" data-map-x="${field.position_x}" data-map-z="${field.position_z}" title="${escapeHtml(field.display_name)}"><span></span><strong>${escapeHtml(field.display_name)}</strong></div>`
   }).join('')}${npcs.map((npc) => {
-    const position = mapPosition(npc.position_x, npc.position_z)
-    return `<button class="map-npc state-${npc.lifecycle_state}" data-npc-id="${npc.pilot_id}" type="button" style="left:${position.left.toFixed(2)}%;top:${position.top.toFixed(2)}%" aria-label="Open ${escapeHtml(npc.display_name)} details"><span></span><strong>${escapeHtml(npc.display_name)}</strong><small>${escapeHtml(npc.behavior_state.replaceAll('_', ' '))}</small></button>`
+    return `<button class="map-npc state-${npc.lifecycle_state}" data-map-x="${npc.position_x}" data-map-z="${npc.position_z}" data-npc-id="${npc.pilot_id}" type="button" aria-label="Open ${escapeHtml(npc.display_name)} details"><span></span><strong>${escapeHtml(npc.display_name)}</strong><small>${escapeHtml(npc.behavior_state.replaceAll('_', ' '))}</small></button>`
   }).join('')}${players.map((player) => {
-    const position = mapPosition(player.position_x, player.position_z)
-    return `<div class="map-player" style="left:${position.left.toFixed(2)}%;top:${position.top.toFixed(2)}%" title="${escapeHtml(player.display_name)} - ${player.location_kind}"><span></span><strong>${escapeHtml(player.display_name)}</strong><small>${player.location_kind === 'docked' ? 'docked' : 'in space'}</small></div>`
-  }).join('')}</div></div><div class="map-legend"><span><i class="map-point-star"></i> Star</span><span><i class="map-point-world"></i> World</span><span><i class="map-point-station"></i> Station</span><span><i class="map-field"></i> Active field</span><span><i class="state-active"></i> NPC</span><span><i class="map-player"></i> Player</span></div>`
+    return `<div class="map-player" data-map-x="${player.position_x}" data-map-z="${player.position_z}" title="${escapeHtml(player.display_name)} - ${player.location_kind}"><span></span><strong>${escapeHtml(player.display_name)}</strong><small>${player.location_kind === 'docked' ? 'docked' : 'in space'}</small></div>`
+  }).join('')}</div><div class="admin-system-map-ruler" aria-hidden="true"><span id="admin-system-map-ruler-label">1,000,000 km</span><i id="admin-system-map-ruler-line"></i></div><div class="admin-system-map-footer" aria-hidden="true"><span id="admin-system-map-grid-label">100 x 100 CELLS / ADMINISTRATIVE ALL-POI OVERLAY</span><span>${npcs.length} NPCS / ${players.length} PLAYERS / ${asteroidFields.length} FIELDS</span></div></div><div class="map-legend"><span><i class="map-point-star"></i> Star</span><span><i class="map-point-world"></i> World</span><span><i class="map-point-station"></i> Station</span><span><i class="map-field"></i> Active field</span><span><i class="state-active"></i> NPC</span><span><i class="map-player"></i> Player</span></div></section>`
 }
 
-function changeMapZoom(factor: number) {
-  mapZoom = Math.max(1, Math.min(100, mapZoom * factor))
+function formatMapDistance(meters: number): string {
+  return `${(meters / 1_000).toLocaleString('en-US', { maximumFractionDigits: 2 })} km`
+}
+
+function stopMapAnimation() {
+  if (mapAnimation !== undefined) window.cancelAnimationFrame(mapAnimation)
+  mapAnimation = undefined
+}
+
+function resetMapView() {
+  stopMapAnimation()
+  mapZoom = 1
+  mapZoomTarget = 1
+  mapPan = { x: 0, y: 0 }
+  mapPanTarget = { x: 0, y: 0 }
   updateMapView()
 }
 
+async function toggleMapFullscreen() {
+  const chart = document.querySelector<HTMLElement>('#admin-system-chart')
+  if (!chart) return
+  if (document.fullscreenElement === chart) {
+    await document.exitFullscreen()
+  } else {
+    await chart.requestFullscreen()
+  }
+}
+
+function updateMapFullscreenControl() {
+  const chart = document.querySelector<HTMLElement>('#admin-system-chart')
+  const button = document.querySelector<HTMLButtonElement>('#map-fullscreen')
+  if (!chart || !button) return
+  const isFullscreen = document.fullscreenElement === chart
+  button.setAttribute('aria-label', isFullscreen ? 'Exit fullscreen map' : 'Enter fullscreen map')
+  button.title = isFullscreen ? 'Exit fullscreen map' : 'Enter fullscreen map'
+  button.innerHTML = isFullscreen ? '&#x2715;' : '&#x26F6;'
+  window.requestAnimationFrame(updateMapView)
+}
+
+function changeMapZoom(factor: number, anchor = { x: 0, y: 0 }) {
+  const previousZoom = mapAnimation === undefined ? mapZoom : mapZoomTarget
+  mapZoomTarget = Math.max(1, Math.min(systemMapMaximumZoom, previousZoom * factor))
+  const ratio = mapZoomTarget / mapZoom
+  mapPanTarget = {
+    x: anchor.x - (anchor.x - mapPan.x) * ratio,
+    y: anchor.y - (anchor.y - mapPan.y) * ratio,
+  }
+  stopMapAnimation()
+  if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+    mapZoom = mapZoomTarget
+    mapPan = { ...mapPanTarget }
+    updateMapView()
+    return
+  }
+  let previousTime = performance.now()
+  const animate = (time: number) => {
+    const amount = 1 - Math.exp(-Math.max(1, time - previousTime) / 65)
+    previousTime = time
+    mapZoom += (mapZoomTarget - mapZoom) * amount
+    mapPan.x += (mapPanTarget.x - mapPan.x) * amount
+    mapPan.y += (mapPanTarget.y - mapPan.y) * amount
+    const complete = Math.abs(mapZoom - mapZoomTarget) / mapZoomTarget < 0.00001
+    if (complete) {
+      mapZoom = mapZoomTarget
+      mapPan = { ...mapPanTarget }
+    }
+    updateMapView()
+    mapAnimation = complete ? undefined : window.requestAnimationFrame(animate)
+  }
+  mapAnimation = window.requestAnimationFrame(animate)
+}
+
 function clampMapPan() {
-  const viewport = document.querySelector<HTMLElement>('.system-map-viewport')
+  const viewport = document.querySelector<HTMLElement>('.admin-system-map-viewport, .system-map-viewport')
   if (!viewport || mapZoom === 1) {
     mapPan = { x: 0, y: 0 }
     return
@@ -211,9 +276,38 @@ function updateMapView() {
   clampMapPan()
   const canvas = document.querySelector<HTMLElement>('#system-map-canvas')
   if (!canvas) return
-  canvas.classList.toggle('is-detail-scale', mapZoom >= 10)
-  canvas.style.setProperty('--map-marker-scale', String(1 / mapZoom))
-  canvas.style.transform = `translate(${mapPan.x}px, ${mapPan.y}px) scale(${mapZoom})`
+  const viewport = document.querySelector<HTMLElement>('.admin-system-map-viewport, .system-map-viewport')
+  const side = Math.min(viewport?.clientWidth || 800, viewport?.clientHeight || 600)
+  const scale = side * mapZoom / (systemMapHalfExtentMeters * 2)
+  const span = (viewport?.clientWidth || 800) / scale
+  const detail = span <= 2_000_000 ? 'local' : span <= 1_000_000_000 ? 'sector' : 'system'
+  canvas.dataset.detail = detail
+  canvas.classList.toggle('is-detail-scale', detail === 'local')
+  canvas.style.setProperty('--map-marker-scale', '1')
+  canvas.style.transform = 'none'
+  const baseStep = 10 ** Math.floor(Math.log10(70 / scale))
+  const step = baseStep * ([1, 2, 5, 10].find((multiple) => baseStep * multiple * scale >= 70) ?? 10)
+  canvas.style.backgroundSize = `${step * scale}px ${step * scale}px`
+  const viewportWidth = viewport?.clientWidth || 800
+  const viewportHeight = viewport?.clientHeight || 600
+  canvas.querySelectorAll<HTMLElement>('[data-map-x][data-map-z]').forEach((marker) => {
+    const x = Number(marker.dataset.mapX)
+    const z = Number(marker.dataset.mapZ)
+    marker.style.left = `${viewportWidth / 2 + (x + mapPan.x / scale) * scale}px`
+    marker.style.top = `${viewportHeight / 2 - (z - mapPan.y / scale) * scale}px`
+  })
+  const coordinate = document.querySelector<HTMLElement>('#admin-system-map-coordinate')
+  if (coordinate) coordinate.textContent = `X ${formatMapDistance(-mapPan.x / scale)} / Z ${formatMapDistance(mapPan.y / scale)}`
+  const title = document.querySelector<HTMLElement>('#admin-system-map-title')
+  if (title) title.textContent = detail === 'local' ? 'LOCAL SPACE' : detail === 'sector' ? 'SECTOR CHART' : 'KEPLER SYSTEM'
+  const gridLabel = document.querySelector<HTMLElement>('#admin-system-map-grid-label')
+  if (gridLabel) gridLabel.textContent = `CELL X ${Math.floor((-mapPan.x / scale) / systemMapCellSizeMeters)} / Z ${Math.floor((mapPan.y / scale) / systemMapCellSizeMeters)} / ${formatMapDistance(step)} GRID / ${formatMapDistance(span)} ACROSS`
+  const rulerBase = 10 ** Math.floor(Math.log10(160 / scale))
+  const rulerDistance = rulerBase * ([5, 2, 1].find((multiple) => rulerBase * multiple * scale <= 160) ?? 1)
+  const ruler = document.querySelector<HTMLElement>('#admin-system-map-ruler-line')
+  if (ruler) ruler.style.width = `${rulerDistance * scale}px`
+  const rulerLabel = document.querySelector<HTMLElement>('#admin-system-map-ruler-label')
+  if (rulerLabel) rulerLabel.textContent = formatMapDistance(rulerDistance)
 }
 
 function npcDirectoryMarkup(): string {
@@ -250,7 +344,18 @@ function refiningMarkup(jobs: ActiveRefineryJob[]): string {
 }
 
 function navigationMarkup(npc: NpcState): string {
-  return `<div class="npc-navigation"><form id="coordinate-move-form" class="coordinate-form"><p class="eyebrow">Move To Coordinates</p><label>X <input name="position_x" type="number" step="1" value="${npc.position_x}" required></label><label>Y <input name="position_y" type="number" step="1" value="${npc.position_y}" required></label><label>Z <input name="position_z" type="number" step="1" value="${npc.position_z}" required></label><button type="submit">MOVE TO COORDINATES</button></form><div class="dock-command"><p class="eyebrow">Station Command</p><p>Place this NPC at Kepler Station. The mining controller will resume its normal docked behavior.</p><button id="dock-npc" class="secondary" type="button">DOCK AT KEPLER STATION</button></div></div>`
+  const mapPosition = (x: number, z: number) => ({
+    left: Math.min(99.5, Math.max(0.5, 50 + (x / systemMapHalfExtentMeters) * 50)),
+    top: Math.min(99.5, Math.max(0.5, 50 - (z / systemMapHalfExtentMeters) * 50)),
+  })
+  const npcPosition = mapPosition(npc.position_x, npc.position_z)
+  return `<section class="npc-navigation-map"><div class="section-heading"><div><p class="eyebrow">Navigation Map</p><h3>${escapeHtml(npc.display_name)}</h3></div><span class="population-count">${escapeHtml(npc.behavior_state.replaceAll('_', ' '))}</span></div><div class="map-controls"><button id="map-zoom-out" type="button" aria-label="Zoom out" title="Zoom out">−</button><button id="map-zoom-in" type="button" aria-label="Zoom in" title="Zoom in">+</button></div><div class="map-scale" aria-hidden="true"><span>-5,000,000 km</span><span>0 km</span><span>+5,000,000 km</span></div><div class="system-map-viewport" aria-label="Kepler system map centered on ${escapeHtml(npc.display_name)}"><div id="system-map-canvas" class="system-map system-map-grid ${mapZoom >= 10 ? 'is-detail-scale' : ''}" role="list" style="--map-marker-scale:${1 / mapZoom};transform:translate(${mapPan.x}px,${mapPan.y}px) scale(${mapZoom})">${systemPoints.map((point) => {
+    const position = mapPosition(point.x, point.z)
+    return `<div class="map-point map-point-${point.kind}" style="left:${position.left.toFixed(2)}%;top:${position.top.toFixed(2)}%" title="${point.name}"><span></span><strong>${point.name}</strong></div>`
+  }).join('')}${asteroidFields.map((field) => {
+    const position = mapPosition(field.position_x, field.position_z)
+    return `<div class="map-field" style="left:${position.left.toFixed(2)}%;top:${position.top.toFixed(2)}%" title="${escapeHtml(field.display_name)}"><span></span><strong>${escapeHtml(field.display_name)}</strong></div>`
+  }).join('')}<div class="map-npc state-${npc.lifecycle_state}" style="left:${npcPosition.left.toFixed(2)}%;top:${npcPosition.top.toFixed(2)}%" role="listitem"><span></span><strong>${escapeHtml(npc.display_name)}</strong><small>${escapeHtml(npc.behavior_state.replaceAll('_', ' '))}</small></div></div></div><div class="map-legend"><span><i class="map-point-star"></i> Star</span><span><i class="map-point-world"></i> World</span><span><i class="map-point-station"></i> Station</span><span><i class="map-field"></i> Active field</span><span><i class="state-active"></i> Selected NPC</span></div></section><div class="npc-navigation"><form id="coordinate-move-form" class="coordinate-form"><p class="eyebrow">Move To Coordinates</p><label>X <input name="position_x" type="number" step="1" value="${npc.position_x}" required></label><label>Y <input name="position_y" type="number" step="1" value="${npc.position_y}" required></label><label>Z <input name="position_z" type="number" step="1" value="${npc.position_z}" required></label><button type="submit">MOVE TO COORDINATES</button></form><div class="dock-command"><p class="eyebrow">Station Command</p><p>Place this NPC at Kepler Station. The mining controller will resume its normal docked behavior.</p><button id="dock-npc" class="secondary" type="button">DOCK AT KEPLER STATION</button></div></div>`
 }
 
 function contentMarkup(npc: NpcState): string {
@@ -292,15 +397,17 @@ function render() {
     : `<button id="show-system-map" class="back-to-map" type="button">SYSTEM MAP</button><section class="npc-population-layout npc-detail-layout">${npcDirectoryMarkup()}${detailMarkup()}</section>`
   appRoot.innerHTML = `<main class="npc-population-shell"><header class="npc-population-header"><div><a class="back-link" href="/admin.html">Administration</a><p class="eyebrow">Population Control</p><h1>${populationView === 'map' ? 'NPC System Map' : detail ? escapeHtml(detail.display_name) : 'Population Control'}</h1></div><div><p id="npc-status" data-tone="neutral">Loading population state...</p><button id="refresh-npcs" class="secondary" type="button">REFRESH</button></div></header>${viewMarkup}</main>`
   bindEvents()
+  updateMapView()
   syncMapAutoRefresh()
 }
 
 function syncMapAutoRefresh() {
-  if (populationView === 'map' && mapRefreshTimer === undefined) {
+  const isMapVisible = populationView === 'control' && activePanel === 'navigation'
+  if (isMapVisible && mapRefreshTimer === undefined) {
     mapRefreshTimer = window.setInterval(() => void refresh(), 1_000)
     return
   }
-  if (populationView !== 'map' && mapRefreshTimer !== undefined) {
+  if (!isMapVisible && mapRefreshTimer !== undefined) {
     window.clearInterval(mapRefreshTimer)
     mapRefreshTimer = undefined
   }
@@ -357,10 +464,19 @@ function bindEvents() {
   document.querySelectorAll<HTMLButtonElement>('[data-npc-id], [data-player-id]').forEach((button) => button.addEventListener('click', () => { selectedPilotId = button.dataset.npcId ?? button.dataset.playerId ?? null; populationView = 'control'; activePanel = 'overview'; window.history.pushState({}, '', `/npc.html?pilot_id=${selectedPilotId}`); render() }))
   document.querySelector<HTMLButtonElement>('#show-system-map')?.addEventListener('click', () => { populationView = 'map'; window.history.pushState({}, '', '/npc.html?view=map'); render(); void refresh() })
   document.querySelector<HTMLButtonElement>('#show-population-control')?.addEventListener('click', () => { populationView = 'control'; window.history.pushState({}, '', `/npc.html?pilot_id=${selectedPilotId ?? ''}`); render() })
+  document.querySelector<HTMLButtonElement>('#map-fullscreen')?.addEventListener('click', () => void toggleMapFullscreen())
+  document.querySelector<HTMLButtonElement>('#map-recenter')?.addEventListener('click', resetMapView)
   document.querySelector<HTMLButtonElement>('#map-zoom-out')?.addEventListener('click', () => changeMapZoom(0.5))
   document.querySelector<HTMLButtonElement>('#map-zoom-in')?.addEventListener('click', () => changeMapZoom(2))
-  const mapViewport = document.querySelector<HTMLElement>('.system-map-viewport')
-  mapViewport?.addEventListener('wheel', (event) => { event.preventDefault(); changeMapZoom(event.deltaY > 0 ? 0.8 : 1.25) }, { passive: false })
+  const mapViewport = document.querySelector<HTMLElement>('.admin-system-map-viewport, .system-map-viewport')
+  mapViewport?.addEventListener('wheel', (event) => {
+    event.preventDefault()
+    const bounds = mapViewport.getBoundingClientRect()
+    changeMapZoom(event.deltaY > 0 ? 0.8 : 1.25, {
+      x: event.clientX - bounds.left - mapViewport.clientWidth / 2,
+      y: event.clientY - bounds.top - mapViewport.clientHeight / 2,
+    })
+  }, { passive: false })
   mapViewport?.addEventListener('pointerdown', (event) => {
     if (mapZoom === 1 || event.button !== 0) return
     mapDrag = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, panX: mapPan.x, panY: mapPan.y }
@@ -369,6 +485,7 @@ function bindEvents() {
   mapViewport?.addEventListener('pointermove', (event) => {
     if (!mapDrag || event.pointerId !== mapDrag.pointerId) return
     mapPan = { x: mapDrag.panX + event.clientX - mapDrag.startX, y: mapDrag.panY + event.clientY - mapDrag.startY }
+    mapPanTarget = { ...mapPan }
     updateMapView()
   })
   const stopMapPan = (event: PointerEvent) => {
@@ -384,5 +501,7 @@ function bindEvents() {
   document.querySelector<HTMLFormElement>('#coordinate-move-form')?.addEventListener('submit', (event) => { event.preventDefault(); const values = new FormData(event.currentTarget as HTMLFormElement); void moveNpc({ destination: 'coordinates', position_x: Number(values.get('position_x')), position_y: Number(values.get('position_y')), position_z: Number(values.get('position_z')) }) })
   document.querySelector<HTMLButtonElement>('#dock-npc')?.addEventListener('click', () => void moveNpc({ destination: 'station' }))
 }
+
+document.addEventListener('fullscreenchange', updateMapFullscreenControl)
 
 void refresh()

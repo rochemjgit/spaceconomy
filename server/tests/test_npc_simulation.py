@@ -273,7 +273,7 @@ async def test_npc_market_price_undercuts_or_stockpiles_against_competition() ->
         session.add(competing_listing)
         assert await _npc_listing_price(session, miner_id, material) == 89
         competing_listing.unit_price_credits = 75
-        assert await _npc_listing_price(session, miner_id, material) is None
+        assert await _npc_listing_price(session, miner_id, material) == 75
     await engine.dispose()
 
 

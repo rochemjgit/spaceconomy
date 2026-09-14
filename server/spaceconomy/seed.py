@@ -19,6 +19,7 @@ from .fitting import (
     MINING_LASER,
     MINING_LASER_M2,
     REACTOR_CORE,
+    SENSOR_ARRAY,
     SHIELD_BOOSTER,
     STARTER_MINER,
     WARP_DRIVE,
@@ -51,6 +52,7 @@ STARTER_MODULE_DEFINITION_IDS = frozenset(
         "module.shield_booster.s1",
         "module.capacitor_bank.c1",
         "module.reactor.r1",
+        "module.sensor_array.s1",
         "module.warp_drive.w1",
     }
 )
@@ -103,6 +105,7 @@ async def seed_catalog() -> None:
             MINING_LASER_M2,
             SHIELD_BOOSTER,
             CAPACITOR_BANK,
+            SENSOR_ARRAY,
             REACTOR_CORE,
             WARP_DRIVE,
         ):

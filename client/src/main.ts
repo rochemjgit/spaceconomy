@@ -9,6 +9,7 @@ import './station-services.css'
 import './hardpoints.css'
 import './inventory.css'
 import { Vector3 } from '@babylonjs/core'
+import { createElement, Crosshair, Eye, EyeOff, Maximize2, Minus, Plus, RefreshCw, ScanLine, X } from 'lucide'
 import { createStationInteriorScene, createSystemScene } from './game/scene'
 import type { MiningExtractionResult, ServerAsteroid, ServerJettisonedItem } from './game/scene'
 import stationInteriorUrl from './assets/station-interior.svg'
@@ -491,18 +492,6 @@ appRoot.innerHTML = `
       <div class="durability-layer"><div class="durability-label"><span>CARGO</span><strong id="ship-cargo">0.00 / 24.00 M3</strong></div><span class="durability-bar"><span id="ship-cargo-bar" class="durability-fill cargo-fill"></span></span></div>
       <p id="collision-alert" class="collision-alert" aria-live="polite"></p>
     </section>
-    <section class="minimap" aria-label="System map">
-      <p class="eyebrow">SYSTEM MAP</p>
-      <div class="minimap-field">
-        <div id="minimap-world" class="minimap-world system-map-grid">
-          <span id="map-primary-star" class="map-poi map-star" title="Primary Star"></span>
-          <span id="map-starter-world" class="map-poi map-planet" title="Starter World"></span>
-          <span id="map-kepler-station" class="map-poi map-station" title="Kepler Station"></span>
-          <span id="player-map-marker" class="player-map-marker" title="Your ship"></span>
-        </div>
-      </div>
-      <div class="map-legend"><span class="legend-star">STAR</span><span class="legend-planet">WORLD</span><span class="legend-station">STATION</span><span class="legend-player">YOU</span></div>
-    </section>
     <section id="target-window" class="target-window" aria-label="Selected target" hidden>
       <div class="target-window-heading"><p id="target-lock-label" class="eyebrow">TARGET LOCK</p><div id="target-active-modules" class="target-active-modules" aria-label="Active modules on target"></div><button id="clear-target" type="button" aria-label="Unlock target">×</button></div>
       <div id="target-thumbnail" class="target-thumbnail" aria-hidden="true"><span></span></div><div><p id="target-name" class="target-name"></p><p id="target-range" class="target-range"></p><button id="pickup-jettisoned-item" type="button" hidden>COLLECT CARGO</button></div></div>
@@ -557,22 +546,39 @@ appRoot.innerHTML = `
     <div id="system-map-modal" class="system-map-modal" role="dialog" aria-modal="true" aria-labelledby="system-map-title" hidden>
       <div class="system-map-backdrop" data-system-map-close></div>
       <section class="system-map-panel">
-        <header class="system-map-heading"><div><p class="eyebrow">NAVIGATION OVERLAY</p><h1 id="system-map-title">LOCAL SYSTEM</h1></div><div class="system-map-actions"><button id="system-map-zoom-out" class="system-map-refresh" type="button" aria-label="Zoom out" title="Zoom out">−</button><button id="system-map-zoom-in" class="system-map-refresh" type="button" aria-label="Zoom in" title="Zoom in">+</button><button id="system-map-refresh" class="system-map-refresh" type="button" aria-label="Refresh system map" title="Refresh system map">&#x21bb;</button><button id="system-map-close" class="game-modal-close" type="button" aria-label="Close system map">×</button></div></header>
+        <header class="system-map-heading"><div><p class="eyebrow">KEPLER / NAVIGATION</p><h1 id="system-map-title">LOCAL SPACE</h1></div><div class="system-map-actions">
+          <button id="system-map-zoom-out" class="system-map-refresh" type="button" aria-label="Zoom out" title="Zoom out">${createElement(Minus).outerHTML}</button>
+          <button id="system-map-zoom-in" class="system-map-refresh" type="button" aria-label="Zoom in" title="Zoom in">${createElement(Plus).outerHTML}</button>
+          <button id="system-map-recenter" class="system-map-refresh" type="button" aria-label="Center on ship" title="Center on ship">${createElement(Crosshair).outerHTML}</button>
+          <button id="system-map-overview" class="system-map-refresh" type="button" aria-label="Show whole system" title="Show whole system">${createElement(Maximize2).outerHTML}</button>
+          <button id="system-map-scan" class="system-map-refresh" type="button" aria-label="Scan surrounding space" title="Scan surrounding space">${createElement(ScanLine).outerHTML}</button>
+          <button id="system-map-sensor-range-toggle" class="system-map-refresh" type="button" aria-label="Hide sensor range" aria-pressed="true" title="Hide sensor range">${createElement(Eye).outerHTML}</button>
+          <button id="system-map-refresh" class="system-map-refresh" type="button" aria-label="Refresh system map" title="Refresh system map">${createElement(RefreshCw).outerHTML}</button>
+          <button id="system-map-close" class="game-modal-close" type="button" aria-label="Close system map" title="Close system map">${createElement(X).outerHTML}</button>
+        </div></header>
         <div class="system-map-layout">
-          <div class="system-map-display" aria-label="System map POIs">
-            <div class="system-map-scale" aria-hidden="true"><span>-5,000,000 km</span><span>0 km</span><span>+5,000,000 km</span></div>
-            <div id="system-map-world" class="system-map-world system-map-grid">
+          <div class="system-map-display" aria-label="System map POIs" tabindex="0">
+            <div class="system-map-scale"><span id="system-map-coordinate"></span><span>X / Z PLANE</span></div>
+            <div id="system-map-world" class="system-map-world">
+              <div id="system-map-surveys" aria-hidden="true"></div>
+              <div id="system-map-sensor-range" class="system-map-sensor-range" title="Current sensor range"></div>
+              <div id="system-map-boundary" class="system-map-boundary" aria-hidden="true"></div>
+              <svg id="system-map-sectors" class="system-map-sectors" aria-label="Kepler space sectors"></svg>
+              <div id="system-map-sector-labels" class="system-map-sector-labels" aria-hidden="true"></div>
+              <div id="system-map-cell-labels" class="system-map-cell-labels" aria-hidden="true"></div>
               <button class="system-poi system-poi-star is-selected" type="button" data-poi="primary-star" aria-pressed="true"><span>PRIMARY STAR</span></button>
               <button class="system-poi system-poi-world" type="button" data-poi="starter-world" aria-pressed="false"><span>STARTER WORLD</span></button>
               <button class="system-poi system-poi-station" type="button" data-poi="kepler-station" aria-pressed="false"><span>KEPLER STATION</span></button>
               <div id="system-map-discoveries" class="system-map-discoveries" aria-label="Scanned asteroid fields"></div>
-              <span id="system-map-player" class="system-map-player" title="Your ship"></span>
+              <span id="system-map-player" class="system-map-player" title="Your ship"><span class="system-map-player-heading" aria-hidden="true"></span></span>
               <div id="system-map-contacts" class="system-map-contacts" aria-label="Live contacts"></div>
             </div>
+            <div class="system-map-ruler"><span id="system-map-ruler-label"></span><i id="system-map-ruler-line"></i></div>
+            <div id="system-map-grid-label" class="system-map-grid-label"></div>
           </div>
-          <aside class="poi-details" aria-live="polite"><p id="poi-type" class="eyebrow">STAR</p><h2 id="poi-name">PRIMARY STAR</h2><p id="poi-distance" class="poi-distance">0.0 km</p><p id="poi-description" class="modal-copy">The system's primary stellar body and central navigation reference.</p><button id="warp-action" class="warp-action" type="button" hidden>WARP TO SELECTED POI</button></aside>
+          <aside class="poi-details"><div aria-live="polite"><p id="poi-type" class="eyebrow">STAR</p><h2 id="poi-name">PRIMARY STAR</h2><p id="poi-distance" class="poi-distance">0.0 km</p><p id="poi-description" class="modal-copy">The system's primary stellar body and central navigation reference.</p><p id="poi-coordinates" class="poi-coordinates"></p></div><button id="warp-action" class="warp-action" type="button" hidden>WARP TO SELECTED POI</button><p class="eyebrow poi-chart-heading">CHARTED DESTINATIONS</p><nav id="system-map-destinations" aria-label="Charted destinations"></nav></aside>
         </div>
-        <footer class="system-map-footer"><span>M</span> CLOSE MAP</footer>
+        <footer class="system-map-footer"><span>100 x 100 CELLS / 100,000 km PER SIDE</span><span id="system-map-survey-status">0 SESSION SCANS</span><span>STAR ORIGIN / 0, 0, 0</span></footer>
       </section>
     </div>
     <div id="warp-overlay" class="warp-overlay" aria-hidden="true" hidden><div id="warp-stars" class="warp-stars"></div></div>
@@ -591,12 +597,6 @@ const flightAssistDisplay = document.querySelector<HTMLElement>('#flight-assist'
 const coordinateXDisplay = document.querySelector<HTMLElement>('#coordinate-x')
 const coordinateYDisplay = document.querySelector<HTMLElement>('#coordinate-y')
 const coordinateZDisplay = document.querySelector<HTMLElement>('#coordinate-z')
-const playerMapMarker = document.querySelector<HTMLElement>('#player-map-marker')
-const minimapField = document.querySelector<HTMLElement>('.minimap-field')
-const minimapWorld = document.querySelector<HTMLElement>('#minimap-world')
-const mapPrimaryStar = document.querySelector<HTMLElement>('#map-primary-star')
-const mapStarterWorld = document.querySelector<HTMLElement>('#map-starter-world')
-const mapKeplerStation = document.querySelector<HTMLElement>('#map-kepler-station')
 const availableActions = document.querySelector<HTMLElement>('#available-actions')
 const dockAction = document.querySelector<HTMLButtonElement>('#dock-action')
 const dockedStatus = document.querySelector<HTMLElement>('#docked-status')
@@ -700,8 +700,8 @@ function showGameToast(message: string) {
 }
 const shipDestroyedOverlay = document.querySelector<HTMLElement>('#ship-destroyed-overlay')
 const destructionCause = document.querySelector<HTMLElement>('#destruction-cause')
-let minimapZoom = 1
 let playerMapPosition = { x: 3_000_000_000, y: 480, z: -50_000 }
+let playerMapYaw = 0
 let selectedTarget: { id?: string; name: string; kind: 'asteroid' | 'pilot' | 'cargo' | 'warpable' | 'station' | 'planet'; shipType?: string; jettisonedItemId?: string; position: Vector3; oreRemainingCubicMeters: number; initialOreCubicMeters: number; locked: boolean; locking: boolean; lockProgress: number } | undefined
 let lockedTarget: typeof selectedTarget
 const activeModuleTargetIds = new Map<string, string>()
@@ -778,26 +778,106 @@ function updateSelectedPoiDetails() {
   poiName.textContent = details.name
   poiDistance.textContent = distance >= 1_000 ? `${(distance / 1_000).toFixed(1)} km` : `${distance.toFixed(0)} m`
   poiDescription.textContent = details.description
-  warpAction.hidden = distance <= 100_000
+  const coordinates = document.querySelector<HTMLElement>('#poi-coordinates')
+  if (coordinates) coordinates.textContent = `X ${formatMapDistance(details.position.x)} / Y ${formatMapDistance(details.position.y)} / Z ${formatMapDistance(details.position.z)}`
+  warpAction.hidden = distance <= 100_000 || !isInSystemSpace
 }
 
 function closeSystemMap() {
+  stopSystemMapAnimation()
   systemMapModal?.setAttribute('hidden', '')
 }
 
 function openSystemMap() {
   if (locationTransitionPending || !systemMapModal || gameModal?.hasAttribute('hidden') === false) return
-  updateSystemMapMarkers()
   systemMapModal.removeAttribute('hidden')
+  resetSystemMapToPlayerCell()
+  renderSystemMapDestinations()
+  updateSelectedPoiDetails()
+  const scan = document.querySelector<HTMLButtonElement>('#system-map-scan')
+  if (scan) scan.disabled = !isInSystemSpace
   systemMapClose?.focus()
 }
 
 const systemMapHalfSpanMeters = 5_000_000_000
+const systemMapCellSizeMeters = 100_000_000
+const systemMapMaximumZoom = 100_000_000
+const systemMapSectorNames = [
+  'AURORA REACH', 'CALDERA DRIFT', 'CINDER VEIL', 'DELPHI EXPANSE', 'ECHO WILDS',
+  'FARADAY SPUR', 'GILDED MARCH', 'HELIX SHROUD', 'IONIAN SHELF', 'JANUS RIFT',
+  'KITEWAY', 'LANTERN DEEP', 'MORROW LINE', 'NADIR FIELDS', 'ORISON BEND',
+  'PEREGRINE WAKE', 'QUARTZ FRONT', 'RADIANT STEPPE', 'SABLE CORRIDOR', 'TIDAL VALE',
+  'UMBRA BASIN', 'VANTAGE MERE', 'WRAITH PASS', 'XENON REACH', 'ZENITH CROWN',
+]
+const systemMapSectorVertices = [
+  [[0, 0], [18, 0], [39, 0], [61, 0], [83, 0], [100, 0]],
+  [[0, 17], [21, 14], [37, 18], [63, 15], [80, 20], [100, 16]],
+  [[0, 38], [16, 42], [42, 35], [58, 41], [85, 37], [100, 43]],
+  [[0, 57], [23, 54], [36, 62], [65, 56], [82, 61], [100, 55]],
+  [[0, 81], [18, 85], [41, 78], [59, 84], [87, 80], [100, 86]],
+  [[0, 100], [20, 100], [38, 100], [62, 100], [81, 100], [100, 100]],
+] as const
 let systemMapZoom = 1
 let systemMapPan = { x: 0, y: 0 }
-let systemMapDrag: { pointerId: number; startX: number; startY: number; panX: number; panY: number } | undefined
-function systemMapCoordinate(value: number): string {
-  return `${Math.min(99.5, Math.max(0.5, 50 + (value / systemMapHalfSpanMeters) * 50)).toFixed(2)}%`
+let systemMapDrag: { pointerId: number; startX: number; startY: number; panX: number; panY: number; moved: boolean } | undefined
+let systemMapSuppressClick = false
+let systemMapAnimation: number | undefined
+let systemMapZoomTarget = 1
+let systemMapPanTarget = { x: 0, y: 0 }
+let systemMapViewportSide = 600
+let systemMapSensorRangeVisible = true
+const systemMapSurveys: { x: number; y: number; z: number; radius: number }[] = []
+function isInVisibleSystemMapRange(position: { x: number; z: number }): boolean {
+  if (!systemMapDisplay) return true
+  const point = projectSystemMapPosition(position)
+  return point.x >= 0 && point.x <= systemMapDisplay.clientWidth
+    && point.y >= 0 && point.y <= systemMapDisplay.clientHeight
+}
+
+function systemMapPixelsPerMeter() {
+  return systemMapViewportSide * systemMapZoom / (systemMapHalfSpanMeters * 2)
+}
+
+function projectSystemMapPosition(position: { x: number; z: number }) {
+  const scale = systemMapPixelsPerMeter()
+  return {
+    x: (systemMapDisplay?.clientWidth ?? 0) / 2 + (position.x + systemMapPan.x / scale) * scale,
+    y: (systemMapDisplay?.clientHeight ?? 0) / 2 - (position.z - systemMapPan.y / scale) * scale,
+  }
+}
+
+function formatMapDistance(meters: number) {
+  return `${(meters === 0 ? 0 : meters / 1_000).toLocaleString('en-US', { maximumFractionDigits: 2 })} km`
+}
+
+function systemMapCellId(position: { x: number; z: number }) {
+  return { x: Math.floor(position.x / systemMapCellSizeMeters), z: Math.floor(position.z / systemMapCellSizeMeters) }
+}
+
+function formatSystemMapCellId(cell: { x: number; z: number }) {
+  return `CELL X ${cell.x >= 0 ? '+' : ''}${cell.x} / Z ${cell.z >= 0 ? '+' : ''}${cell.z}`
+}
+
+function currentSensorRange() {
+  const range = fittingSnapshot?.statistics.sensor_range_meters
+  return typeof range === 'number' && Number.isFinite(range) && range >= 0 ? range : 0
+}
+
+function stopSystemMapAnimation() {
+  if (systemMapAnimation !== undefined) window.cancelAnimationFrame(systemMapAnimation)
+  systemMapAnimation = undefined
+}
+
+function resetSystemMapToPlayerCell() {
+  if (!systemMapDisplay) return
+  stopSystemMapAnimation()
+  systemMapZoom = Math.max(100, Math.min(systemMapMaximumZoom, systemMapHalfSpanMeters * 2 / Math.max(100_000, currentSensorRange() * 2)))
+  const scale = systemMapPixelsPerMeter()
+  systemMapPan = {
+    x: -playerMapPosition.x * scale,
+    y: playerMapPosition.z * scale,
+  }
+  updateSystemMapZoom()
 }
 
 function clampSystemMapPan() {
@@ -805,55 +885,273 @@ function clampSystemMapPan() {
     systemMapPan = { x: 0, y: 0 }
     return
   }
-  const maximumX = (systemMapDisplay.clientWidth * (systemMapZoom - 1)) / 2
-  const maximumY = (systemMapDisplay.clientHeight * (systemMapZoom - 1)) / 2
+  const extent = systemMapPixelsPerMeter() * systemMapHalfSpanMeters * 2
+  const maximumX = Math.max(0, (extent - systemMapDisplay.clientWidth) / 2)
+  const maximumY = Math.max(0, (extent - systemMapDisplay.clientHeight) / 2)
   systemMapPan.x = Math.max(-maximumX, Math.min(maximumX, systemMapPan.x))
   systemMapPan.y = Math.max(-maximumY, Math.min(maximumY, systemMapPan.y))
 }
 
 function updateSystemMapZoom() {
   if (!systemMapWorld) return
+  const side = Math.min(systemMapDisplay?.clientWidth || 800, systemMapDisplay?.clientHeight || 600)
+  const resizeRatio = side / systemMapViewportSide
+  systemMapPan.x *= resizeRatio
+  systemMapPan.y *= resizeRatio
+  systemMapPanTarget.x *= resizeRatio
+  systemMapPanTarget.y *= resizeRatio
+  systemMapViewportSide = side
   clampSystemMapPan()
-  systemMapWorld.classList.toggle('is-detail-scale', systemMapZoom >= 10)
-  systemMapWorld.style.setProperty('--system-map-marker-scale', String(1 / systemMapZoom))
-  systemMapWorld.style.transform = `translate(${systemMapPan.x}px, ${systemMapPan.y}px) scale(${systemMapZoom})`
+  systemMapWorld.dataset.zoom = String(systemMapZoom)
+  systemMapWorld.dataset.panX = String(systemMapPan.x)
+  systemMapWorld.dataset.panY = String(systemMapPan.y)
+  const scale = systemMapPixelsPerMeter()
+  const span = (systemMapDisplay?.clientWidth || 800) / scale
+  const detail = span <= 2_000_000 ? 'local' : span <= 1_000_000_000 ? 'sector' : 'system'
+  systemMapWorld.dataset.detail = detail
+  systemMapPlayer?.classList.toggle('show-heading', span <= 5_000_000)
+  const title = document.querySelector<HTMLElement>('#system-map-title')
+  if (title) title.textContent = detail === 'local' ? 'LOCAL SPACE' : detail === 'sector' ? 'SECTOR CHART' : 'KEPLER SYSTEM'
+  const baseStep = 10 ** Math.floor(Math.log10(70 / scale))
+  const step = baseStep * ([1, 2, 5, 10].find((multiple) => baseStep * multiple * scale >= 70) ?? 10)
+  const grid = step * scale
+  const origin = projectSystemMapPosition({ x: 0, z: 0 })
+  systemMapWorld.style.backgroundSize = `${grid}px ${grid}px`
+  systemMapWorld.style.backgroundPosition = `${origin.x % grid}px ${origin.y % grid}px`
+  const coordinate = document.querySelector<HTMLElement>('#system-map-coordinate')
+  if (coordinate) coordinate.textContent = `X ${formatMapDistance(-systemMapPan.x / scale)} / Z ${formatMapDistance(systemMapPan.y / scale)}`
+  const gridLabel = document.querySelector<HTMLElement>('#system-map-grid-label')
+  const centerCell = systemMapCellId({ x: -systemMapPan.x / scale, z: systemMapPan.y / scale })
+  if (gridLabel) gridLabel.textContent = `${formatSystemMapCellId(centerCell)} / ${formatMapDistance(step)} GRID / ${formatMapDistance(span)} ACROSS`
+  const rulerBase = 10 ** Math.floor(Math.log10(160 / scale))
+  const rulerDistance = rulerBase * ([5, 2, 1].find((multiple) => rulerBase * multiple * scale <= 160) ?? 1)
+  const ruler = document.querySelector<HTMLElement>('#system-map-ruler-line')
+  if (ruler) ruler.style.width = `${rulerDistance * scale}px`
+  const rulerLabel = document.querySelector<HTMLElement>('#system-map-ruler-label')
+  if (rulerLabel) rulerLabel.textContent = formatMapDistance(rulerDistance)
+  const boundary = document.querySelector<HTMLElement>('#system-map-boundary')
+  if (boundary) {
+    boundary.hidden = systemMapZoom > 3
+    const side = systemMapHalfSpanMeters * 2 * scale
+    boundary.style.cssText = `left:${origin.x - side / 2}px;top:${origin.y - side / 2}px;width:${side}px;height:${side}px`
+  }
+  if (systemMapZoomIn) systemMapZoomIn.disabled = systemMapZoom >= systemMapMaximumZoom
+  if (systemMapZoomOut) systemMapZoomOut.disabled = systemMapZoom <= 1
+  updateSystemMapSectors()
+  updateSystemMapCellLabels()
+  updateSystemMapMarkers()
 }
 
-function changeSystemMapZoom(factor: number) {
-  systemMapZoom = Math.max(1, Math.min(100, systemMapZoom * factor))
-  updateSystemMapZoom()
+function updateSystemMapSectors() {
+  const sectors = document.querySelector<SVGSVGElement>('#system-map-sectors')
+  const labels = document.querySelector<HTMLElement>('#system-map-sector-labels')
+  if (!sectors || !labels) return
+  const svgNamespace = 'http://www.w3.org/2000/svg'
+  const coordinate = (point: readonly [number, number]) => projectSystemMapPosition({
+    x: (point[0] - 50) * systemMapCellSizeMeters,
+    z: (50 - point[1]) * systemMapCellSizeMeters,
+  })
+  const sectorCells = Array.from({ length: 5 }, (_, row) => Array.from({ length: 5 }, (_, column) => {
+    const points = [
+      systemMapSectorVertices[row]![column]!, systemMapSectorVertices[row]![column + 1]!,
+      systemMapSectorVertices[row + 1]![column + 1]!, systemMapSectorVertices[row + 1]![column]!,
+    ]
+    return { points, name: systemMapSectorNames[row * 5 + column]! }
+  })).flat()
+  sectors.replaceChildren(...sectorCells.map((sector) => {
+    const path = document.createElementNS(svgNamespace, 'path')
+    path.setAttribute('d', `${sector.points.map((point, index) => {
+      const projected = coordinate(point)
+      return `${index === 0 ? 'M' : 'L'}${projected.x} ${projected.y}`
+    }).join(' ')} Z`)
+    return path
+  }))
+  const showLabels = systemMapSectorNames.length > 0 && systemMapCellSizeMeters * systemMapPixelsPerMeter() >= 4
+  labels.replaceChildren(...(showLabels ? sectorCells.map((sector) => {
+    const center = sector.points.reduce((total, point) => ({ x: total.x + point[0], y: total.y + point[1] }), { x: 0, y: 0 })
+    const label = document.createElement('span')
+    const point = coordinate([center.x / sector.points.length, center.y / sector.points.length])
+    label.textContent = sector.name
+    label.style.left = `${point.x}px`
+    label.style.top = `${point.y}px`
+    return label
+  }) : []))
+}
+
+function updateSystemMapCellLabels() {
+  const labels = document.querySelector<HTMLElement>('#system-map-cell-labels')
+  if (!labels || !systemMapDisplay) return
+  const cellPixels = systemMapCellSizeMeters * systemMapPixelsPerMeter()
+  if (cellPixels < 72) {
+    labels.replaceChildren()
+    return
+  }
+  const center = {
+    x: -systemMapPan.x / systemMapPixelsPerMeter(),
+    z: systemMapPan.y / systemMapPixelsPerMeter(),
+  }
+  const halfWidth = systemMapDisplay.clientWidth / systemMapPixelsPerMeter() / 2
+  const halfHeight = systemMapDisplay.clientHeight / systemMapPixelsPerMeter() / 2
+  const firstX = Math.max(-50, Math.floor((center.x - halfWidth) / systemMapCellSizeMeters))
+  const lastX = Math.min(49, Math.floor((center.x + halfWidth) / systemMapCellSizeMeters))
+  const firstZ = Math.max(-50, Math.floor((center.z - halfHeight) / systemMapCellSizeMeters))
+  const lastZ = Math.min(49, Math.floor((center.z + halfHeight) / systemMapCellSizeMeters))
+  labels.replaceChildren(...Array.from({ length: lastX - firstX + 1 }, (_, xOffset) => Array.from({ length: lastZ - firstZ + 1 }, (_, zOffset) => {
+    const cell = { x: firstX + xOffset, z: firstZ + zOffset }
+    const label = document.createElement('span')
+    const point = projectSystemMapPosition({
+      x: (cell.x + 0.5) * systemMapCellSizeMeters,
+      z: (cell.z + 0.5) * systemMapCellSizeMeters,
+    })
+    label.textContent = `X ${cell.x >= 0 ? '+' : ''}${cell.x}\nZ ${cell.z >= 0 ? '+' : ''}${cell.z}`
+    label.style.left = `${point.x}px`
+    label.style.top = `${point.y}px`
+    return label
+  })).flat())
+}
+
+function changeSystemMapZoom(factor: number, anchor = { x: 0, y: 0 }) {
+  const previousZoom = systemMapAnimation === undefined ? systemMapZoom : systemMapZoomTarget
+  systemMapZoomTarget = Math.max(1, Math.min(systemMapMaximumZoom, previousZoom * factor))
+  const ratio = systemMapZoomTarget / systemMapZoom
+  systemMapPanTarget = {
+    x: anchor.x - (anchor.x - systemMapPan.x) * ratio,
+    y: anchor.y - (anchor.y - systemMapPan.y) * ratio,
+  }
+  stopSystemMapAnimation()
+  if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+    systemMapZoom = systemMapZoomTarget
+    systemMapPan = { ...systemMapPanTarget }
+    updateSystemMapZoom()
+    return
+  }
+  let previousTime = performance.now()
+  const animate = (time: number) => {
+    const amount = 1 - Math.exp(-Math.max(1, time - previousTime) / 65)
+    previousTime = time
+    systemMapZoom += (systemMapZoomTarget - systemMapZoom) * amount
+    systemMapPan.x += (systemMapPanTarget.x - systemMapPan.x) * amount
+    systemMapPan.y += (systemMapPanTarget.y - systemMapPan.y) * amount
+    const complete = Math.abs(systemMapZoom - systemMapZoomTarget) / systemMapZoomTarget < 0.00001
+    if (complete) {
+      systemMapZoom = systemMapZoomTarget
+      systemMapPan = { ...systemMapPanTarget }
+    }
+    updateSystemMapZoom()
+    systemMapAnimation = complete ? undefined : window.requestAnimationFrame(animate)
+  }
+  systemMapAnimation = window.requestAnimationFrame(animate)
 }
 
 function positionSystemMapMarker(marker: HTMLElement | null, position: { x: number; z: number }) {
   if (!marker) return
-  marker.style.left = systemMapCoordinate(position.x)
-  marker.style.top = systemMapCoordinate(-position.z)
+  const point = projectSystemMapPosition(position)
+  marker.style.left = `${point.x}px`
+  marker.style.top = `${point.y}px`
 }
 
 function updateSystemMapMarkers() {
+  if (systemMapModal?.hidden !== false) return
   systemPois.forEach((poi) => {
     const name = poi.dataset.poi as PoiName
+    poi.setAttribute('aria-label', poiDetails[name].name)
     positionSystemMapMarker(poi, poiDetails[name].position)
+    poi.hidden = !isInVisibleSystemMapRange(poiDetails[name].position)
   })
   if (systemMapDiscoveries) {
-    systemMapDiscoveries.innerHTML = [...discoveredFields.values()].map((field) => {
+    for (const field of discoveredFields.values()) {
       const poiId = `discovered-field-${field.id}`
-      return `<button class="system-poi system-poi-discovery${selectedPoi === poiId ? ' is-selected' : ''}" type="button" data-poi="${escapeHtml(poiId)}" aria-pressed="${selectedPoi === poiId}"><span>${escapeHtml(field.display_name)}</span></button>`
-    }).join('')
-    systemMapDiscoveries.querySelectorAll<HTMLButtonElement>('[data-poi]').forEach((poi) => {
-      const field = discoveredFields.get((poi.dataset.poi ?? '').replace('discovered-field-', ''))
-      if (field) positionSystemMapMarker(poi, { x: field.position_x, z: field.position_z })
-      poi.addEventListener('click', () => selectPoi(poi.dataset.poi ?? 'primary-star'))
-    })
+      let marker = document.getElementById(poiId)
+      if (!marker) {
+        marker = document.createElement('button')
+        marker.id = poiId
+        marker.className = 'system-poi system-poi-discovery'
+        marker.dataset.poi = poiId
+        marker.innerHTML = `<span>${escapeHtml(field.display_name)}</span>`
+        marker.setAttribute('aria-label', field.display_name)
+        marker.addEventListener('click', () => selectPoi(poiId))
+        systemMapDiscoveries.append(marker)
+      }
+      const position = { x: field.position_x, z: field.position_z }
+      positionSystemMapMarker(marker, position)
+      marker.hidden = !isInVisibleSystemMapRange(position)
+      marker.classList.toggle('is-selected', selectedPoi === poiId)
+      marker.setAttribute('aria-pressed', String(selectedPoi === poiId))
+    }
   }
   positionSystemMapMarker(systemMapPlayer, playerMapPosition)
+  if (systemMapPlayer) {
+    systemMapPlayer.hidden = !isInVisibleSystemMapRange(playerMapPosition)
+    systemMapPlayer.style.setProperty('--heading-degrees', `${playerMapYaw * 180 / Math.PI}deg`)
+  }
+  const scale = systemMapPixelsPerMeter()
+  const sensorRange = document.querySelector<HTMLElement>('#system-map-sensor-range')
+  if (sensorRange) {
+    positionSystemMapMarker(sensorRange, playerMapPosition)
+    const rangeMeters = currentSensorRange()
+    sensorRange.style.width = sensorRange.style.height = `${rangeMeters * scale * 2}px`
+    sensorRange.title = `Equipped sensor range: ${formatMapDistance(rangeMeters)}`
+    sensorRange.hidden = !systemMapSensorRangeVisible || !isInSystemSpace || rangeMeters * scale < 3
+  }
+  document.querySelectorAll<HTMLElement>('.system-map-survey').forEach((marker, index) => {
+    const survey = systemMapSurveys[index]!
+    positionSystemMapMarker(marker, survey)
+    marker.style.width = marker.style.height = `${survey.radius * scale * 2}px`
+    marker.hidden = survey.radius * scale < 2
+  })
+  layoutSystemMapLabels()
   if (!systemMapContacts) return
   const contacts = (scene.getTargetables?.() ?? []).filter((target) => (
-    target.kind === 'asteroid' || target.kind === 'player'
+    systemMapWorld?.dataset.detail === 'local' && (target.kind === 'asteroid' || target.kind === 'player')
+      && Math.hypot(target.position.x - playerMapPosition.x, target.position.y - playerMapPosition.y, target.position.z - playerMapPosition.z) <= currentSensorRange()
+      && isInVisibleSystemMapRange({ x: target.position.x, z: target.position.z })
   ))
-  systemMapContacts.innerHTML = contacts.map((target) => (
-    `<span class="system-map-contact system-map-contact-${target.kind}" title="${escapeHtml(target.name)}" style="left: ${systemMapCoordinate(target.position.x)}; top: ${systemMapCoordinate(-target.position.z)}"></span>`
-  )).join('')
+  systemMapContacts.innerHTML = contacts.map((target) => {
+    const point = projectSystemMapPosition(target.position)
+    return `<span class="system-map-contact system-map-contact-${target.kind}" title="${escapeHtml(target.name)}" style="left:${point.x}px;top:${point.y}px"></span>`
+  }).join('')
+}
+
+function layoutSystemMapLabels() {
+  const occupied: { left: number; top: number; right: number; bottom: number }[] = []
+  const markers = [...(systemMapWorld?.querySelectorAll<HTMLElement>('[data-poi]') ?? [])]
+    .sort((left, right) => Number(right.dataset.poi === selectedPoi) - Number(left.dataset.poi === selectedPoi))
+  for (const marker of markers) {
+    const label = marker.querySelector<HTMLElement>('span')!
+    label.hidden = true
+    if (marker.hidden || (systemMapWorld?.dataset.detail !== 'local' && marker.classList.contains('system-poi-discovery') && marker.dataset.poi !== selectedPoi)) continue
+    const point = projectSystemMapPosition(poiDetails[marker.dataset.poi!]!.position)
+    const width = Math.min(180, (label.textContent?.length ?? 0) * 6.5)
+    for (const offset of [{ x: 18, y: -10 }, { x: -width - 18, y: -10 }, { x: -width / 2, y: 24 }, { x: -width / 2, y: -48 }]) {
+      const box = { left: point.x + offset.x, top: point.y + offset.y, right: point.x + offset.x + width, bottom: point.y + offset.y + 34 }
+      if (box.left < 8 || box.top < 42 || box.right > (systemMapDisplay?.clientWidth ?? 0) - 8 || box.bottom > (systemMapDisplay?.clientHeight ?? 0) - 52) continue
+      if (occupied.some((other) => box.left < other.right + 8 && box.right > other.left - 8 && box.top < other.bottom + 4 && box.bottom > other.top - 4)) continue
+      label.style.cssText = `left:calc(50% + ${offset.x}px);top:calc(50% + ${offset.y}px);width:${width}px`
+      label.hidden = false
+      occupied.push(box)
+      break
+    }
+  }
+}
+
+function renderSystemMapDestinations() {
+  const list = document.querySelector<HTMLElement>('#system-map-destinations')
+  if (!list) return
+  list.innerHTML = Object.entries(poiDetails).map(([id, details]) => `<div class="system-map-destination"><button type="button" data-destination="${escapeHtml(id)}" aria-pressed="${selectedPoi === id}"><span>${escapeHtml(details.name)}</span><small>${formatMapDistance(distanceToPoi(id))}</small></button><button type="button" class="system-map-destination-warp" data-warp-destination="${escapeHtml(id)}" ${distanceToPoi(id) <= 100_000 || !isInSystemSpace ? 'disabled' : ''}>WARP TO</button></div>`).join('')
+  list.querySelectorAll<HTMLButtonElement>('[data-destination]').forEach((button) => button.addEventListener('click', () => {
+    const id = button.dataset.destination!
+    selectPoi(id)
+    if (!isInVisibleSystemMapRange(poiDetails[id]!.position)) {
+      stopSystemMapAnimation()
+      const position = poiDetails[id]!.position
+      const scale = systemMapPixelsPerMeter()
+      systemMapPan = { x: -position.x * scale, y: position.z * scale }
+      updateSystemMapZoom()
+    }
+  }))
+  list.querySelectorAll<HTMLButtonElement>('[data-warp-destination]').forEach((button) => button.addEventListener('click', () => {
+    warpToPoi(button.dataset.warpDestination as PoiName)
+  }))
 }
 
 async function refreshSystemMap() {
@@ -870,11 +1168,20 @@ async function refreshSystemMap() {
 function selectPoi(name: PoiName) {
   selectedPoi = name
   updateSelectedPoiDetails()
-  systemPois.forEach((poi) => {
+  systemMapWorld?.querySelectorAll<HTMLElement>('[data-poi]').forEach((poi) => {
     const isSelected = poi.dataset.poi === name
     poi.classList.toggle('is-selected', isSelected)
     poi.setAttribute('aria-pressed', String(isSelected))
   })
+  document.querySelectorAll<HTMLElement>('[data-destination]').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.destination === name)))
+  layoutSystemMapLabels()
+}
+
+function warpToPoi(name: PoiName) {
+  if (locationTransitionPending || !isInSystemSpace) return
+  const destination = poiDetails[name].position
+  if (scene.warpTo?.(new Vector3(destination.x, destination.y, destination.z))) closeSystemMap()
+  else showGameToast('WARP UNAVAILABLE: CHECK RANGE, CAPACITOR AND FLIGHT STATUS')
 }
 
 function openGameModal(name: ModalName) {
@@ -1785,23 +2092,81 @@ document.querySelector<HTMLElement>('[data-system-map-close]')?.addEventListener
 systemMapRefresh?.addEventListener('click', () => void refreshSystemMap())
 systemMapZoomOut?.addEventListener('click', () => changeSystemMapZoom(0.5))
 systemMapZoomIn?.addEventListener('click', () => changeSystemMapZoom(2))
+document.querySelector('#system-map-recenter')?.addEventListener('click', resetSystemMapToPlayerCell)
+document.querySelector('#system-map-overview')?.addEventListener('click', () => {
+  stopSystemMapAnimation()
+  systemMapZoom = 1
+  systemMapPan = { x: 0, y: 0 }
+  updateSystemMapZoom()
+})
+document.querySelector('#system-map-scan')?.addEventListener('click', () => void runSensorScan())
+document.querySelector<HTMLButtonElement>('#system-map-sensor-range-toggle')?.addEventListener('click', (event) => {
+  if (!(event.currentTarget instanceof HTMLButtonElement)) return
+  systemMapSensorRangeVisible = !systemMapSensorRangeVisible
+  const button = event.currentTarget
+  button.setAttribute('aria-pressed', String(systemMapSensorRangeVisible))
+  button.setAttribute('aria-label', systemMapSensorRangeVisible ? 'Hide sensor range' : 'Show sensor range')
+  button.title = systemMapSensorRangeVisible ? 'Hide sensor range' : 'Show sensor range'
+  button.replaceChildren(createElement(systemMapSensorRangeVisible ? Eye : EyeOff))
+  updateSystemMapMarkers()
+})
+function resizeSystemMap() {
+  if (systemMapModal?.hidden !== false || !systemMapDisplay) return
+  stopSystemMapAnimation()
+  updateSystemMapZoom()
+}
+window.addEventListener('resize', resizeSystemMap)
+if (typeof ResizeObserver !== 'undefined' && systemMapDisplay) new ResizeObserver(resizeSystemMap).observe(systemMapDisplay)
+systemMapDisplay?.addEventListener('keydown', (event) => {
+  if (event.target !== systemMapDisplay) return
+  const offsets: Record<string, { x: number; y: number }> = {
+    ArrowLeft: { x: 80, y: 0 }, ArrowRight: { x: -80, y: 0 },
+    ArrowUp: { x: 0, y: 80 }, ArrowDown: { x: 0, y: -80 },
+  }
+  const offset = offsets[event.key]
+  if (offset) {
+    event.preventDefault()
+    stopSystemMapAnimation()
+    systemMapPan.x += offset.x
+    systemMapPan.y += offset.y
+    updateSystemMapZoom()
+  } else if (event.key === '+' || event.key === '=' || event.key === '-') {
+    event.preventDefault()
+    changeSystemMapZoom(event.key === '-' ? 0.5 : 2)
+  } else if (event.key === 'Home') {
+    event.preventDefault()
+    resetSystemMapToPlayerCell()
+  }
+})
 systemMapDisplay?.addEventListener('wheel', (event) => {
   event.preventDefault()
-  changeSystemMapZoom(event.deltaY > 0 ? 0.8 : 1.25)
+  const bounds = systemMapDisplay.getBoundingClientRect()
+  const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? bounds.height : 1)
+  changeSystemMapZoom(Math.exp(-Math.max(-300, Math.min(300, delta)) * 0.002), {
+    x: event.clientX - bounds.left - bounds.width / 2,
+    y: event.clientY - bounds.top - bounds.height / 2,
+  })
 }, { passive: false })
 systemMapDisplay?.addEventListener('pointerdown', (event) => {
   if (systemMapZoom === 1 || event.button !== 0) return
+  stopSystemMapAnimation()
+  systemMapSuppressClick = false
   systemMapDrag = {
     pointerId: event.pointerId,
     startX: event.clientX,
     startY: event.clientY,
     panX: systemMapPan.x,
     panY: systemMapPan.y,
+    moved: false,
   }
-  systemMapDisplay.setPointerCapture(event.pointerId)
 })
 systemMapDisplay?.addEventListener('pointermove', (event) => {
   if (!systemMapDrag || event.pointerId !== systemMapDrag.pointerId) return
+  if (!systemMapDrag.moved) {
+    if (Math.hypot(event.clientX - systemMapDrag.startX, event.clientY - systemMapDrag.startY) < 4) return
+    systemMapDrag.moved = true
+    systemMapDisplay.setPointerCapture(event.pointerId)
+  }
   systemMapPan = {
     x: systemMapDrag.panX + event.clientX - systemMapDrag.startX,
     y: systemMapDrag.panY + event.clientY - systemMapDrag.startY,
@@ -1810,16 +2175,22 @@ systemMapDisplay?.addEventListener('pointermove', (event) => {
 })
 function stopSystemMapPan(event: PointerEvent) {
   if (!systemMapDrag || event.pointerId !== systemMapDrag.pointerId) return
-  systemMapDisplay?.releasePointerCapture(event.pointerId)
+  systemMapSuppressClick = systemMapDrag.moved
+  if (systemMapDisplay?.hasPointerCapture(event.pointerId)) systemMapDisplay.releasePointerCapture(event.pointerId)
   systemMapDrag = undefined
 }
-systemMapDisplay?.addEventListener('pointerup', stopSystemMapPan)
+window.addEventListener('pointerup', stopSystemMapPan)
 systemMapDisplay?.addEventListener('pointercancel', stopSystemMapPan)
+systemMapDisplay?.addEventListener('lostpointercapture', stopSystemMapPan)
+systemMapDisplay?.addEventListener('click', (event) => {
+  if (!systemMapSuppressClick || event.detail === 0) return
+  event.preventDefault()
+  event.stopImmediatePropagation()
+  systemMapSuppressClick = false
+}, true)
 systemPois.forEach((poi) => poi.addEventListener('click', () => selectPoi(poi.dataset.poi as PoiName)))
 warpAction?.addEventListener('click', () => {
-  if (locationTransitionPending) return
-  const destination = poiDetails[selectedPoi].position
-  if (scene.warpTo(new Vector3(destination.x, destination.y, destination.z))) closeSystemMap()
+  warpToPoi(selectedPoi)
 })
 
 function toggleHardpoint(slot: HTMLButtonElement) {
@@ -1875,16 +2246,6 @@ function updateHardpointAvailability() {
   })
 }
 
-function mapCoordinate(value: number): string {
-  return systemMapCoordinate(value)
-}
-
-function positionMapMarker(marker: HTMLElement | null, x: number, z: number) {
-  if (!marker) return
-  marker.style.left = mapCoordinate(x)
-  marker.style.top = mapCoordinate(-z)
-}
-
 function updateTargetWindow() {
   if (!targetWindow || !targetName || !targetRange || !targetLockLabel || !targetLockProgress) return
   if (!lockedTarget) {
@@ -1916,7 +2277,7 @@ function updateTargetList() {
   const sensorRangeMeters = typeof configuredSensorRange === 'number'
     && Number.isFinite(configuredSensorRange) && configuredSensorRange >= 0
     ? configuredSensorRange
-    : 50_000
+    : 0
   const targets = (scene.getTargetables?.() ?? [])
     .filter((target) => targetListFilter === 'all' || target.kind === targetListFilter)
     .filter((target) => Vector3.Distance(new Vector3(playerMapPosition.x, playerMapPosition.y, playerMapPosition.z), target.position) <= sensorRangeMeters)
@@ -1995,22 +2356,6 @@ document.querySelector<HTMLButtonElement>('#pickup-jettisoned-item')?.addEventLi
     if (feedback) feedback.textContent = collected ? 'Cargo collected.' : 'Collection failed or outcome unknown. Refresh inventory before trying again.'
   })
 })
-
-function updateMinimapMarkers() {
-  if (minimapWorld) minimapWorld.style.transform = `scale(${minimapZoom})`
-  positionMapMarker(mapPrimaryStar, 0, 0)
-  positionMapMarker(mapStarterWorld, 3_000_000_000, 0)
-  positionMapMarker(mapKeplerStation, 3_000_000_000, -50_000)
-  positionMapMarker(playerMapMarker, playerMapPosition.x, playerMapPosition.z)
-}
-
-minimapField?.addEventListener('wheel', (event) => {
-  event.preventDefault()
-  const zoomFactor = event.deltaY > 0 ? 0.8 : 1.25
-  minimapZoom = Math.max(1, Math.min(100, minimapZoom * zoomFactor))
-  updateMinimapMarkers()
-}, { passive: false })
-updateMinimapMarkers()
 
 function createFlightScene(
   initialLaunchSpeed = 0,
@@ -2145,12 +2490,14 @@ function createFlightScene(
       if (coordinateYDisplay) coordinateYDisplay.textContent = position.y.toFixed(0)
       if (coordinateZDisplay) coordinateZDisplay.textContent = position.z.toFixed(0)
       playerMapPosition = { x: position.x, y: position.y, z: position.z }
-      positionMapMarker(playerMapMarker, position.x, position.z)
+      playerMapYaw = yaw
       positionSystemMapMarker(systemMapPlayer, playerMapPosition)
+      systemMapPlayer?.style.setProperty('--heading-degrees', `${playerMapYaw * 180 / Math.PI}deg`)
       updateTargetWindow()
       if (performance.now() - lastTargetListUpdateAt >= 250) {
         lastTargetListUpdateAt = performance.now()
         updateTargetList()
+        updateSystemMapMarkers()
       }
       updateSelectedPoiDetails()
       if (performance.now() - lastAsteroidSnapshotAt >= 3_000) {
@@ -2212,6 +2559,7 @@ function revealDiscoveredFields(fields: DiscoveredField[]) {
     }
   })
   updateSystemMapMarkers()
+  if (systemMapModal?.hidden === false) renderSystemMapDestinations()
 }
 
 async function loadDiscoveryBootstrap() {
@@ -2276,10 +2624,13 @@ async function refreshNearbyJettisonedItems() {
 
 async function runSensorScan() {
   const sensorButton = document.querySelector<HTMLButtonElement>('[data-core-system="sensors"]')
-  if (sensorButton?.disabled || !isInSystemSpace) return
+  const mapScanButton = document.querySelector<HTMLButtonElement>('#system-map-scan')
+  if (sensorButton?.disabled || sensorButton?.getAttribute('aria-busy') === 'true' || !isInSystemSpace) return
   sensorButton?.setAttribute('aria-busy', 'true')
+  mapScanButton?.setAttribute('aria-busy', 'true')
+  const survey = { ...playerMapPosition, radius: currentSensorRange() }
   try {
-    await saveShipState(null)
+    await saveShipState(null, survey)
     const response = await fetch(`${apiBaseUrl}/mining/scan`, {
       method: 'POST',
       headers: { authorization: `Bearer ${pilotAccessToken}` },
@@ -2293,13 +2644,22 @@ async function runSensorScan() {
     shipPowerMegajoules = payload.power_megajoules
     renderSavedShipState()
     scene.emitSensorPing?.()
+    systemMapSurveys.push(survey)
+    const footprint = document.createElement('div')
+    footprint.className = 'system-map-survey'
+    document.querySelector('#system-map-surveys')?.append(footprint)
+    const surveyStatus = document.querySelector('#system-map-survey-status')
+    if (surveyStatus) surveyStatus.textContent = `${systemMapSurveys.length} SESSION SCAN${systemMapSurveys.length === 1 ? '' : 'S'}`
     revealDiscoveredFields(payload.newly_discovered_fields)
     showGameToast(payload.newly_discovered_fields.length > 0
       ? `SCAN COMPLETE: ${payload.newly_discovered_fields.length} FIELD${payload.newly_discovered_fields.length === 1 ? '' : 'S'} DISCOVERED`
       : 'SCAN COMPLETE: NO NEW SIGNALS')
     void refreshNearbyAsteroids()
+  } catch {
+    showGameToast('SENSOR SCAN FAILED: CONNECTION UNAVAILABLE')
   } finally {
     sensorButton?.removeAttribute('aria-busy')
+    mapScanButton?.removeAttribute('aria-busy')
   }
 }
 

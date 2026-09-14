@@ -8,7 +8,7 @@ import math
 import random
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, update
 
 from .config import settings
 from .db import session_factory
@@ -19,6 +19,7 @@ from .models import (
     AsteroidField,
     InventoryItem,
     InventoryLedgerEntry,
+    JettisonedItem,
     ManufacturingJob,
     ManufacturingJobInput,
     ManufacturingService,
@@ -35,12 +36,60 @@ from .npc import NpcController, NpcMotion, ensure_miner_equipment, run_economic_
 from .redis import publish_event, remove_system_presence, set_system_presence
 
 SYSTEM_ID = "kepler"
+KEPLER_STATION_POSITION = (3_000_000_000.0, 480.0, -50_000.0)
+SYSTEM_MAP_CELL_SIZE_METERS = 100_000_000.0
+SYSTEM_POINTS_OF_INTEREST = (
+    ("PRIMARY STAR", (0.0, 0.0, 0.0)),
+    ("STARTER WORLD", (3_000_000_000.0, 0.0, 0.0)),
+    ("KEPLER STATION", KEPLER_STATION_POSITION),
+)
+LOCAL_BELT_MINIMUM_DISTANCE_METERS = 50_000.0
+LOCAL_BELT_MAXIMUM_DISTANCE_METERS = 60_000.0
+KEPLER_STATION_LOCAL_FIELD_MINIMUM = 10
 DEFAULT_FIELD_PROFILE = {
     "composition": "ferrous",
     "variants": [
         {"weight": 1, "minerals": (("iron", 55, 75), ("nickel", 15, 30))},
     ],
 }
+
+
+def poi_field_cells(position: tuple[float, float, float]) -> tuple[tuple[int, int], ...]:
+    """Return the four map cells that meet at a point of interest."""
+    cell_x = math.floor(position[0] / SYSTEM_MAP_CELL_SIZE_METERS)
+    cell_z = math.floor(position[2] / SYSTEM_MAP_CELL_SIZE_METERS)
+    return (
+        (cell_x - 1, cell_z - 1),
+        (cell_x, cell_z - 1),
+        (cell_x - 1, cell_z),
+        (cell_x, cell_z),
+    )
+
+
+def random_poi_field_position(generator: random.Random) -> tuple[float, float, float]:
+    """Choose a field from cells bordering a fixed Kepler point of interest."""
+    _, poi_position = generator.choice(SYSTEM_POINTS_OF_INTEREST)
+    cell_x, cell_z = generator.choice(poi_field_cells(poi_position))
+    return (
+        generator.uniform(cell_x * SYSTEM_MAP_CELL_SIZE_METERS, (cell_x + 1) * SYSTEM_MAP_CELL_SIZE_METERS),
+        poi_position[1] + generator.uniform(-50_000, 50_000),
+        generator.uniform(cell_z * SYSTEM_MAP_CELL_SIZE_METERS, (cell_z + 1) * SYSTEM_MAP_CELL_SIZE_METERS),
+    )
+
+
+def random_local_belt_position(
+    generator: random.Random, center: tuple[float, float, float] = KEPLER_STATION_POSITION
+) -> tuple[float, float, float]:
+    """Choose an ordinary field center in a compact shell outside station render range."""
+    direction = generator.uniform(-1, 1)
+    angle = generator.uniform(0, math.tau)
+    radius = generator.uniform(LOCAL_BELT_MINIMUM_DISTANCE_METERS, LOCAL_BELT_MAXIMUM_DISTANCE_METERS)
+    horizontal_radius = math.sqrt(1 - direction**2)
+    return (
+        center[0] + radius * horizontal_radius * math.cos(angle),
+        center[1] + radius * direction,
+        center[2] + radius * horizontal_radius * math.sin(angle),
+    )
 
 
 def mineral_assay_for_profile(profile: dict[str, object], spawn_seed: int) -> str:
@@ -109,6 +158,7 @@ async def replenish_asteroid_fields(now: datetime | None = None) -> int:
             )
         )
         active_profiles = []
+        local_station_fields = 0
         for field in fields:
             has_mineable_asteroid = await session.scalar(
                 select(Asteroid.id).where(
@@ -122,43 +172,38 @@ async def replenish_asteroid_fields(now: datetime | None = None) -> int:
                 field.next_spawn_at = None
                 continue
             active_profiles.append(json.loads(field.spawn_profile))
-        active_count = len(active_profiles)
-        for _ in range(max(0, settings.asteroid_system_maximum_active_fields - active_count)):
-            profile = random.choice(active_profiles) if active_profiles else DEFAULT_FIELD_PROFILE
-            seed = random.randrange(2**31)
+            station_distance = math.dist(
+                (field.position_x, field.position_y, field.position_z), KEPLER_STATION_POSITION
+            )
+            if LOCAL_BELT_MINIMUM_DISTANCE_METERS <= station_distance <= LOCAL_BELT_MAXIMUM_DISTANCE_METERS:
+                local_station_fields += 1
+
+        async def create_field(
+            field_key: str,
+            display_name: str,
+            position: tuple[float, float, float],
+            profile: dict[str, object],
+            seed: int,
+            field: AsteroidField | None = None,
+        ) -> int:
             generator = random.Random(seed)
-            direction = generator.uniform(-1, 1)
-            angle = generator.uniform(0, math.tau)
-            radius = generator.uniform(
-                settings.sensor_default_range_meters,
-                system.radius_meters * 0.9,
-            )
-            horizontal_radius = math.sqrt(1 - direction**2)
-            field = AsteroidField(
-                system_id=system.id,
-                field_key=f"dynamic-{seed:08x}",
-                display_name=f"UNSURVEYED ASTEROID FIELD {seed:08X}",
-                position_x=radius * horizontal_radius * math.cos(angle),
-                position_y=radius * direction,
-                position_z=radius * horizontal_radius * math.sin(angle),
-                discovery_signature=generator.uniform(0.6, 1),
-                spawn_profile=json.dumps(profile, sort_keys=True),
-            )
-            session.add(field)
-            await session.flush()
+            if field is None:
+                field = AsteroidField(system_id=system.id, field_key=field_key)
+                session.add(field)
+            field.display_name = display_name
+            field.position_x, field.position_y, field.position_z = position
+            field.discovery_signature = generator.uniform(0.6, 1)
+            field.spawn_profile = json.dumps(profile, sort_keys=True)
+            field.active = True
+            field.next_spawn_at = None
+            if field.id is None:
+                await session.flush()
             asteroid_count = min(
-                max(
-                    1,
-                    int(
-                        profile.get(
-                            "maximum_active", settings.asteroid_field_maximum_active_asteroids
-                        )
-                    ),
-                ),
+                max(1, int(profile.get("maximum_active", settings.asteroid_field_maximum_active_asteroids))),
                 settings.asteroid_field_maximum_active_asteroids,
             )
             for _ in range(asteroid_count):
-                asteroid_seed = random.randrange(2**31)
+                asteroid_seed = generator.randrange(2**31)
                 asteroid_generator = random.Random(asteroid_seed)
                 asteroid_angle = asteroid_generator.uniform(0, math.tau)
                 asteroid_distance = asteroid_generator.uniform(800, 6_000)
@@ -168,9 +213,7 @@ async def replenish_asteroid_fields(now: datetime | None = None) -> int:
                     Asteroid(
                         field_id=field.id,
                         spawn_seed=asteroid_seed,
-                        position_x=(
-                            field.position_x + math.cos(asteroid_angle) * asteroid_distance
-                        ),
+                        position_x=field.position_x + math.cos(asteroid_angle) * asteroid_distance,
                         position_y=field.position_y + asteroid_generator.uniform(-900, 900),
                         position_z=field.position_z + math.sin(asteroid_angle) * asteroid_distance,
                         radius_meters=asteroid_radius,
@@ -180,8 +223,65 @@ async def replenish_asteroid_fields(now: datetime | None = None) -> int:
                         remaining_volume_cubic_meters=volume,
                     )
                 )
-                created += 1
+            return asteroid_count
+
+        for _ in range(
+            min(
+                KEPLER_STATION_LOCAL_FIELD_MINIMUM - local_station_fields,
+                settings.asteroid_system_maximum_active_fields - len(active_profiles),
+            )
+        ):
+            seed = random.randrange(2**31)
+            created += await create_field(
+                f"dynamic-{seed:08x}",
+                f"UNSURVEYED ASTEROID FIELD {seed:08X}",
+                random_local_belt_position(random.Random(seed)),
+                DEFAULT_FIELD_PROFILE,
+                seed,
+            )
+            active_profiles.append(DEFAULT_FIELD_PROFILE)
+        active_count = len(active_profiles)
+        for _ in range(max(0, settings.asteroid_system_maximum_active_fields - active_count)):
+            profile = random.choice(active_profiles) if active_profiles else DEFAULT_FIELD_PROFILE
+            seed = random.randrange(2**31)
+            generator = random.Random(seed)
+            position_x, position_y, position_z = random_poi_field_position(generator)
+            created += await create_field(
+                f"dynamic-{seed:08x}",
+                f"UNSURVEYED ASTEROID FIELD {seed:08X}",
+                (position_x, position_y, position_z),
+                profile,
+                seed,
+            )
     return created
+
+
+async def reset_asteroid_fields() -> int:
+    """Remove all Kepler asteroid data and refill the configured active-field capacity."""
+    async with session_factory.begin() as session:
+        system_id = await session.scalar(
+            select(SolarSystem.id).where(SolarSystem.system_key == SYSTEM_ID)
+        )
+        if system_id is None:
+            return 0
+        field_ids = select(AsteroidField.id).where(AsteroidField.system_id == system_id)
+        asteroid_ids = select(Asteroid.id).where(Asteroid.field_id.in_(field_ids))
+        ore_lot_ids = select(MinedOreLot.id).where(MinedOreLot.asteroid_id.in_(asteroid_ids))
+        await session.execute(
+            delete(RefineryJob).where(RefineryJob.source_ore_lot_id.in_(ore_lot_ids))
+        )
+        await session.execute(delete(MinedOreLot).where(MinedOreLot.id.in_(ore_lot_ids)))
+        await session.execute(
+            delete(JettisonedItem).where(JettisonedItem.ore_asteroid_id.in_(asteroid_ids))
+        )
+        await session.execute(
+            update(NpcRuntime)
+            .where(NpcRuntime.mining_target_asteroid_id.in_(asteroid_ids))
+            .values(mining_target_asteroid_id=None)
+        )
+        await session.execute(delete(Asteroid).where(Asteroid.id.in_(asteroid_ids)))
+        await session.execute(delete(AsteroidField).where(AsteroidField.system_id == system_id))
+    return await replenish_asteroid_fields()
 
 
 async def _deliver_refinery_outputs(

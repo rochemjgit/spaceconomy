@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .auth import _pilot_id_from_authorization
 from .config import settings
 from .db import get_session
+from .fitting_api import active_ship_statistics
 from .inventory import (
     VOLUME_EPSILON,
     _ensure_containers,
@@ -210,7 +211,11 @@ async def deactivate_exhausted_asteroid_field(
 
 
 async def scan_nearby_asteroid_fields(
-    session: AsyncSession, pilot_id: UUID, ship_state: ShipState, now: datetime
+    session: AsyncSession,
+    pilot_id: UUID,
+    ship_state: ShipState,
+    sensor_range_meters: float,
+    now: datetime,
 ) -> list[tuple[AsteroidField, float, float]]:
     """Spend sensor power to persist every active asteroid field in scan range."""
     if ship_state.power_megajoules < settings.sensor_default_power_cost_megajoules:
@@ -242,14 +247,14 @@ async def scan_nearby_asteroid_fields(
     discovered = []
     for field in fields:
         distance_meters = _distance(ship_state, field)
-        if distance_meters > settings.sensor_default_range_meters or field.id in existing_ids:
+        if distance_meters > sensor_range_meters or field.id in existing_ids:
             continue
         quality = max(
             0.1,
             min(
                 1.0,
                 field.discovery_signature
-                * (1 - distance_meters / settings.sensor_default_range_meters),
+                * (1 - distance_meters / sensor_range_meters),
             ),
         )
         session.add(
@@ -316,13 +321,19 @@ async def scan(
         ship_state = await _pilot_state(session, pilot_id)
         if ship_state.docked_station_name:
             raise HTTPException(status.HTTP_409_CONFLICT, "undock before using sensors")
+        statistics = await active_ship_statistics(session, pilot_id)
+        sensor_range_meters = statistics.get("sensor_range_meters", 0.0)
+        if sensor_range_meters <= 0:
+            raise HTTPException(status.HTTP_409_CONFLICT, "fit a sensor module before scanning")
         if ship_state.power_megajoules < settings.sensor_default_power_cost_megajoules:
             raise HTTPException(status.HTTP_409_CONFLICT, "insufficient power for sensor scan")
         if ship_state.sensor_last_scan_at and now < ship_state.sensor_last_scan_at + timedelta(
             seconds=settings.sensor_default_cooldown_seconds
         ):
             raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "sensor scan is recharging")
-        discoveries = await scan_nearby_asteroid_fields(session, pilot_id, ship_state, now)
+        discoveries = await scan_nearby_asteroid_fields(
+            session, pilot_id, ship_state, sensor_range_meters, now
+        )
     return ScanResponse(
             newly_discovered_fields=[
                 _field_response(field, distance_meters, quality)

@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     asteroid_spawn_interval_seconds: int = 300
     asteroid_spawn_batch_size: int = 6
     asteroid_field_maximum_active_asteroids: int = 36
-    asteroid_system_maximum_active_fields: int = 10
+    asteroid_system_maximum_active_fields: int = 120
     world_spawn_tick_seconds: int = 30
     refinery_tick_seconds: float = 1
     manufacturing_recipe_catalog_path: str = "catalog/manufacturing_recipes.json"

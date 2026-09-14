@@ -378,7 +378,7 @@ async def _npc_listing_price(
     if lowest_competitor_price is None:
         return NPC_MARKET_REFERENCE_PRICE_CREDITS
     if lowest_competitor_price <= NPC_MARKET_MINIMUM_PRICE_CREDITS:
-        return None
+        return NPC_MARKET_MINIMUM_PRICE_CREDITS
     return min(NPC_MARKET_REFERENCE_PRICE_CREDITS, lowest_competitor_price - 1)
 
 

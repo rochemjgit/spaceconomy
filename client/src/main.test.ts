@@ -4,13 +4,13 @@ import { Vector3 } from '@babylonjs/core'
 import type { SceneOptions, TargetableObject } from './game/scene'
 import type { InventoryContainer } from './inventory'
 
-const scenes = vi.hoisted(() => ({ flight: vi.fn(), station: vi.fn(), options: [] as SceneOptions[], targets: [] as TargetableObject[], selectTarget: vi.fn(), approachTarget: vi.fn(() => true) }))
+const scenes = vi.hoisted(() => ({ flight: vi.fn(), station: vi.fn(), options: [] as SceneOptions[], targets: [] as TargetableObject[], selectTarget: vi.fn(), approachTarget: vi.fn(() => true), warpTo: vi.fn(() => true) }))
 vi.mock('./game/scene', () => ({
   createSystemScene: scenes.flight.mockImplementation((_canvas: unknown, options: SceneOptions) => {
     scenes.options.push(options)
     // Exercise a synchronous callback to catch socket declaration TDZ regressions.
     options.onMiningLaserUpdate?.(false)
-    return { dispose: vi.fn(), setCargoCubicMeters: vi.fn(), setModuleActive: vi.fn(), getTargetables: () => scenes.targets, selectTarget: scenes.selectTarget, approachTarget: scenes.approachTarget }
+    return { dispose: vi.fn(), setCargoCubicMeters: vi.fn(), setModuleActive: vi.fn(), getTargetables: () => scenes.targets, selectTarget: scenes.selectTarget, approachTarget: scenes.approachTarget, warpTo: scenes.warpTo }
   }),
   createStationInteriorScene: scenes.station.mockImplementation(() => ({ dispose: vi.fn(), setModuleActive: vi.fn() })),
 }))
@@ -91,6 +91,7 @@ beforeEach(() => {
     if (path.endsWith('/inventory/docked')) return dockedLoad()
     if (path.endsWith('/inventory/ship')) return json(ship)
     if (path.endsWith('/mining/bootstrap')) return json({ discovered_fields: [] })
+    if (path.endsWith('/fitting/active')) return json({ statistics: { sensor_range_meters: 500_000 } })
     if (path.endsWith('/market/wallet')) return json({ wallet_balance_credits: 10_000 })
     if (path.endsWith('/inventory/split') || path.endsWith('/inventory/merge-all')) return mutation()
     return json([])
@@ -259,16 +260,16 @@ describe('target list', () => {
     expect(requestCount('/auth/ship-state')).toBe(1)
   })
 
-  it('filters nearby targets and selects the clicked row', async () => {
+  it('filters targets using the equipped survey range and selects the clicked row', async () => {
     scenes.targets = [
       { id: 'ore-1', name: 'Silicate Asteroid', kind: 'asteroid', position: new Vector3(123200, 480, -2691), locked: false, locking: false },
       { id: 'player-1', name: 'Prospector', kind: 'player', position: new Vector3(123300, 480, -2691), locked: false, locking: false },
-      { id: 'ore-far', name: 'Distant Asteroid', kind: 'asteroid', position: new Vector3(173_079, 480, -2691), locked: false, locking: false },
+      { id: 'ore-far', name: 'Distant Asteroid', kind: 'asteroid', position: new Vector3(423_079, 480, -2691), locked: false, locking: false },
     ]
     await launch(true)
     expect(element('#target-list-items').textContent).toContain('Silicate Asteroid')
     expect(element('#target-list-items').textContent).toContain('Prospector')
-    expect(element('#target-list-items').textContent).not.toContain('Distant Asteroid')
+    expect(element('#target-list-items').textContent).toContain('Distant Asteroid')
     click('[data-target-filter="asteroid"]')
     expect(element('#target-list-items').textContent).toContain('Silicate Asteroid')
     expect(element('#target-list-items').textContent).not.toContain('Prospector')
@@ -371,6 +372,173 @@ describe('inventory dialog and mutation ownership', () => {
 })
 
 describe('top-bar major functions', () => {
+  function openMap() {
+    const display = element('.system-map-display')
+    Object.defineProperties(display, {
+      clientWidth: { configurable: true, value: 800 }, clientHeight: { configurable: true, value: 600 },
+    })
+    click('#topbar-map')
+    return display
+  }
+
+  it('uses equal axis scales and renders contacts within the scan radius', async () => {
+    scenes.targets = [
+      { id: 'near', name: 'Nearby', kind: 'asteroid', position: new Vector3(123088, 480, -2691), locked: false, locking: false },
+      { id: 'far', name: 'Beyond sensors', kind: 'asteroid', position: new Vector3(423078, 480, -2691), locked: false, locking: false },
+      { id: 'above', name: 'Above sensors', kind: 'player', position: new Vector3(123078, 300480, -2691), locked: false, locking: false },
+    ]
+    await launch(true)
+    const display = openMap()
+    expect(element('#system-map-world').dataset.detail).toBe('local')
+    expect(document.querySelectorAll('.system-map-contact')).toHaveLength(3)
+    expect(parseFloat(element('.system-map-contact').style.left)).toBeCloseTo(400.006, 8)
+    click('#system-map-overview')
+    expect(document.querySelectorAll('.system-map-contact')).toHaveLength(0)
+    expect(element('#system-map-world').dataset.detail).toBe('system')
+    expect(element('#system-map-boundary').style.width).toBe('600px')
+    expect(element('#system-map-boundary').style.height).toBe('600px')
+    expect(element('[data-poi="primary-star"]').style.left).toBe('400px')
+    expect(element('[data-poi="primary-star"]').style.top).toBe('300px')
+    click('#system-map-recenter')
+    Object.defineProperties(display, { clientWidth: { value: 400 }, clientHeight: { value: 800 } })
+    window.dispatchEvent(new Event('resize'))
+    expect(parseFloat(element('#system-map-player').style.left)).toBeCloseTo(200, 8)
+    expect(parseFloat(element('#system-map-player').style.top)).toBeCloseTo(400, 8)
+  })
+
+  it('shows the player heading when the map is zoomed into five thousand kilometers', async () => {
+    await launch(true)
+    openMap()
+    const player = element('#system-map-player')
+    expect(player.classList.contains('show-heading')).toBe(true)
+    scenes.options[0]!.onFlightUpdate(new Vector3(123078, 480, -2691), 0, true, Math.PI / 2, 0, 0)
+    expect(player.classList.contains('show-heading')).toBe(true)
+    expect(player.style.getPropertyValue('--heading-degrees')).toBe('90deg')
+  })
+
+  it('labels local cells from the stellar origin with positive up/right coordinates', async () => {
+    await launch(true)
+    const display = openMap()
+    const labels = [...document.querySelectorAll<HTMLElement>('#system-map-cell-labels span')]
+    expect(labels.some((label) => label.textContent === 'X +0\nZ +0')).toBe(true)
+    expect(labels.some((label) => label.textContent === 'X +0\nZ -1')).toBe(true)
+    expect(element('#system-map-grid-label').textContent).toContain('CELL X +0 / Z -1')
+    click('#system-map-overview')
+    expect(document.querySelectorAll('#system-map-cell-labels span')).toHaveLength(0)
+    expect(element('#system-map-grid-label').textContent).toContain('CELL X +0 / Z +0')
+    expect(display.clientWidth).toBe(800)
+  })
+
+  it('draws and names 25 irregular space sectors across the system grid', async () => {
+    await launch(true)
+    openMap()
+    const sectors = [...document.querySelectorAll<SVGPathElement>('#system-map-sectors path')]
+    const labels = [...document.querySelectorAll<HTMLElement>('#system-map-sector-labels span')]
+    expect(sectors).toHaveLength(25)
+    expect(labels).toHaveLength(25)
+    expect(labels.map((label) => label.textContent)).toContain('AURORA REACH')
+    expect(labels.map((label) => label.textContent)).toContain('ZENITH CROWN')
+    expect(sectors.some((sector) => !sector.getAttribute('d')?.match(/^M0 0 L/))).toBe(true)
+  })
+
+  it('reveals only successful scans, retains discoveries, and warps to the selected 3D coordinates', async () => {
+    const fallback = requests.getMockImplementation()!
+    const scan = deferred<Response>()
+    requests.mockImplementation((input, init) => String(input).endsWith('/mining/scan') ? scan.promise : fallback(input, init))
+    await launch(true)
+    openMap()
+    click('#system-map-scan')
+    click('#system-map-scan')
+    await vi.waitFor(() => expect(requestCount('/mining/scan')).toBe(1))
+    expect(document.querySelectorAll('.system-map-survey')).toHaveLength(0)
+    scan.resolve(json({ newly_discovered_fields: [{ id: 'scanned', display_name: 'Surveyed field', position_x: 250000, position_y: 1400, position_z: -40000, scan_quality: 0.9 }], power_megajoules: 90, cooldown_seconds: 5 }))
+    await vi.waitFor(() => expect(document.querySelectorAll('.system-map-survey')).toHaveLength(1))
+    click('#system-map-close')
+    click('#topbar-map')
+    click('[data-poi="discovered-field-scanned"]')
+    expect(element('[data-poi="discovered-field-scanned"]').getAttribute('aria-pressed')).toBe('true')
+    expect(element('#poi-description').textContent).toContain('90%')
+    expect(element<HTMLButtonElement>('#warp-action').hidden).toBe(false)
+    click('#warp-action')
+    expect(scenes.warpTo).toHaveBeenCalledWith(new Vector3(250000, 1400, -40000))
+    expect(element('#system-map-modal').hidden).toBe(true)
+  })
+
+  it('does not reveal a survey after a rejected scan and disables scans and warp while docked', async () => {
+    const fallback = requests.getMockImplementation()!
+    requests.mockImplementation((input, init) => String(input).endsWith('/mining/scan') ? Promise.resolve(json({ detail: 'insufficient power' }, 409)) : fallback(input, init))
+    await launch(true)
+    openMap()
+    click('#system-map-scan')
+    await vi.waitFor(() => expect(element('#game-toast').textContent).toContain('INSUFFICIENT POWER'))
+    expect(document.querySelectorAll('.system-map-survey')).toHaveLength(0)
+    click('#system-map-close')
+    click('#dock-action')
+    await vi.advanceTimersByTimeAsync(250)
+    click('#topbar-map')
+    expect(element<HTMLButtonElement>('#system-map-scan').disabled).toBe(true)
+    expect(element('#warp-action').hidden).toBe(true)
+  })
+
+  it('pans without selecting a dragged POI and supports keyboard navigation', async () => {
+    await launch(true)
+    const display = openMap()
+    Object.assign(display, { setPointerCapture: vi.fn(), hasPointerCapture: () => true, releasePointerCapture: vi.fn() })
+    const pointer = (target: HTMLElement | Window, type: string, clientX: number) => {
+      const event = new MouseEvent(type, { bubbles: true, button: 0, clientX, clientY: 200 })
+      Object.defineProperty(event, 'pointerId', { value: 1 })
+      target.dispatchEvent(event)
+    }
+    const planet = element('[data-poi="starter-world"]')
+    const initial = Number(element('#system-map-world').dataset.panX)
+    pointer(planet, 'pointerdown', 200)
+    pointer(display, 'pointermove', 260)
+    pointer(window, 'pointerup', 260)
+    planet.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }))
+    expect(element('#poi-name').textContent).toBe('PRIMARY STAR')
+    expect(Number(element('#system-map-world').dataset.panX)).toBeCloseTo(initial + 60)
+    display.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }))
+    expect(Number(element('#system-map-world').dataset.panX)).toBeCloseTo(initial + 140)
+    pointer(planet, 'pointerdown', 200)
+    pointer(window, 'pointerup', 200)
+    planet.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }))
+    expect(element('#poi-name').textContent).toBe('STARTER WORLD')
+    click('[data-destination="kepler-station"]')
+    expect(element('[data-poi="kepler-station"]').hidden).toBe(false)
+  })
+
+  it('preserves local position precision and anchors wheel zoom to the cursor', async () => {
+    await launch(true)
+    const display = element('.system-map-display')
+    Object.defineProperties(display, {
+      clientWidth: { value: 800 }, clientHeight: { value: 600 },
+    })
+    vi.spyOn(display, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, width: 800, height: 600 } as DOMRect)
+    click('#topbar-map')
+    await vi.advanceTimersByTimeAsync(20)
+    expect(parseFloat(element('#system-map-player').style.left)).toBeCloseTo(400, 8)
+    expect(parseFloat(element('#system-map-player').style.top)).toBeCloseTo(300, 8)
+    const camera = () => {
+      const values = element('#system-map-world').dataset
+      return { x: Number(values.panX), y: Number(values.panY), zoom: Number(values.zoom) }
+    }
+    const before = camera()
+    display.dispatchEvent(new WheelEvent('wheel', { deltaY: -120, clientX: 600, clientY: 200, cancelable: true }))
+    await vi.advanceTimersByTimeAsync(800)
+    const after = camera()
+    expect(after.zoom).toBeGreaterThan(before.zoom)
+    expect((200 - after.x) / after.zoom).toBeCloseTo((200 - before.x) / before.zoom, 8)
+    expect((-100 - after.y) / after.zoom).toBeCloseTo((-100 - before.y) / before.zoom, 8)
+    display.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, clientX: 600, clientY: 200 }))
+    await vi.advanceTimersByTimeAsync(32)
+    const during = camera()
+    display.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, clientX: 200, clientY: 400 }))
+    await vi.advanceTimersByTimeAsync(800)
+    const final = camera()
+    expect((-200 - final.x) / final.zoom).toBeCloseTo((-200 - during.x) / during.zoom, 8)
+    expect((100 - final.y) / final.zoom).toBeCloseTo((100 - during.y) / during.zoom, 8)
+  })
+
   it('renders a scanned dynamic field as a selectable system map destination', async () => {
     requests.mockImplementation(async (input) => {
       const path = new URL(String(input)).pathname
@@ -378,11 +546,26 @@ describe('top-bar major functions', () => {
       if (path.endsWith('/auth/select-pilot')) return json({ access_token: 'test-pilot', ship_state: { position_x: 123078, position_y: 480, position_z: -2691, docked_station_name: null, power_megajoules: 100, shields: 100, hull: 100, fuel_liters: 80, cargo_cubic_meters: 1 } })
       if (path.endsWith('/inventory/ship')) return json(ship)
       if (path.endsWith('/mining/bootstrap')) return json({ discovered_fields: [{ id: 'field-1', display_name: 'UNSURVEYED ASTEROID FIELD A1B2C3D4', position_x: 200_000, position_y: 120, position_z: -80_000, distance_meters: 110_000, scan_quality: 0.8 }] })
-      if (path.endsWith('/fitting/active')) return json({ statistics: { sensor_range_meters: 50_000 } })
+      if (path.endsWith('/fitting/active')) return json({ statistics: { sensor_range_meters: 500_000 } })
       return json([])
     })
     await launch(true)
+    Object.defineProperties(element('.system-map-display'), { clientWidth: { value: 800 }, clientHeight: { value: 600 } })
     click('#topbar-map')
+    const sensorRange = element('#system-map-sensor-range')
+    expect(sensorRange.hidden).toBe(false)
+    expect(sensorRange.title).toBe('Equipped sensor range: 500 km')
+    expect(parseFloat(sensorRange.style.width)).toBeCloseTo(600, 8)
+    expect(parseFloat(sensorRange.style.left)).toBeCloseTo(400, 8)
+    expect(parseFloat(sensorRange.style.top)).toBeCloseTo(300, 8)
+    const sensorRangeToggle = element<HTMLButtonElement>('#system-map-sensor-range-toggle')
+    expect(sensorRangeToggle.getAttribute('aria-pressed')).toBe('true')
+    click('#system-map-sensor-range-toggle')
+    expect(sensorRange.hidden).toBe(true)
+    expect(sensorRangeToggle.getAttribute('aria-label')).toBe('Show sensor range')
+    click('#system-map-sensor-range-toggle')
+    expect(sensorRange.hidden).toBe(false)
+    expect(sensorRangeToggle.getAttribute('aria-label')).toBe('Hide sensor range')
     const field = element<HTMLButtonElement>('[data-poi="discovered-field-field-1"]')
     expect(field.textContent).toContain('UNSURVEYED ASTEROID FIELD A1B2C3D4')
     field.click()

@@ -1,7 +1,19 @@
 import json
+import math
+import random
 
 from spaceconomy.seed import FIELD_PROFILES
-from spaceconomy.world import mineral_assay_for_profile
+from spaceconomy.world import (
+    SYSTEM_POINTS_OF_INTEREST,
+    SYSTEM_MAP_CELL_SIZE_METERS,
+    KEPLER_STATION_POSITION,
+    LOCAL_BELT_MAXIMUM_DISTANCE_METERS,
+    LOCAL_BELT_MINIMUM_DISTANCE_METERS,
+    mineral_assay_for_profile,
+    poi_field_cells,
+    random_local_belt_position,
+    random_poi_field_position,
+)
 
 
 EXOTIC_MINERALS = {"aetherium", "gravimetric_crystal", "nullite"}
@@ -39,3 +51,30 @@ def test_rare_field_eventually_yields_an_exotic_anomaly() -> None:
     }
 
     assert mineral_ids & EXOTIC_MINERALS
+
+
+def test_asteroid_fields_spawn_in_cells_bordering_fixed_points_of_interest() -> None:
+    poi_cells = {
+        cell
+        for _, position in SYSTEM_POINTS_OF_INTEREST
+        for cell in poi_field_cells(position)
+    }
+    spawned_cells = {
+        (
+            int(position[0] // SYSTEM_MAP_CELL_SIZE_METERS),
+            int(position[2] // SYSTEM_MAP_CELL_SIZE_METERS),
+        )
+        for seed in range(1_000)
+        for position in [random_poi_field_position(random.Random(seed))]
+    }
+
+    assert spawned_cells <= poi_cells
+    assert spawned_cells == poi_cells
+
+
+def test_station_local_belts_spawn_in_a_condensed_shell_outside_station_visibility() -> None:
+    for seed in range(100):
+        distance = math.dist(
+            random_local_belt_position(random.Random(seed)), KEPLER_STATION_POSITION
+        )
+        assert LOCAL_BELT_MINIMUM_DISTANCE_METERS <= distance <= LOCAL_BELT_MAXIMUM_DISTANCE_METERS
