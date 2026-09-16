@@ -616,6 +616,24 @@ async def test_mining_only_ship_and_exact_assay_source(game):
         assert (await session.get(MinedOreLot, old)).mineral_assay == "[]"
 
 
+async def test_map_bootstrap_hides_unsurveyed_zone_geometry(game):
+
+    async with game.sessions.begin() as session:
+        system = await session.scalar(select(SolarSystem))
+        hidden = AsteroidField(
+            system_id=system.id, field_key="undiscovered", display_name="Secret belt",
+            **POSITION, discovery_signature=1, spawn_profile="{}",
+        )
+        session.add(hidden)
+    response = await game.client.get("/api/v1/mining/bootstrap")
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {"system", "discovered_fields", "resource_zones"}
+    assert len(body["discovered_fields"]) == 1
+    assert hidden.id not in {UUID(field["id"]) for field in body["discovered_fields"]}
+    assert body["resource_zones"] == []
+
+
 async def test_depleted_asteroid_is_persisted_and_published_to_redis(game, monkeypatch):
     updates: list[tuple[str, str, dict[str, object]]] = []
     events: list[tuple[str, str, str, dict[str, object]]] = []
@@ -648,6 +666,83 @@ async def test_depleted_asteroid_is_persisted_and_published_to_redis(game, monke
         ("asteroid", str(game.asteroid), {**updates[0][2], "remaining_volume_cubic_meters": 0, "depleted": True})
     ]
     assert events == [("system", "kepler", "asteroid_depleted", updates[0][2])]
+    assert "mineral_assay" not in updates[0][2]
+
+
+async def test_asteroid_assay_is_private_and_scan_spends_sensor_power(game, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(mining, "active_ship_statistics", AsyncMock(return_value={"sensor_range_meters": 1000}))
+    publish = AsyncMock()
+    monkeypatch.setattr(mining, "publish_event", publish)
+    await game.dock(False)
+    async with game.sessions.begin() as session:
+        state = await session.get(ShipState, game.pilot)
+        state.power_megajoules = 100
+    public = await game.client.get("/api/v1/mining/asteroids")
+    assert public.status_code == 200
+    assert len(public.json()) == 1
+    assert "mineral_assay" not in public.json()[0]
+    route = f"/api/v1/mining/asteroids/{game.asteroid}/scan"
+    scanned = await game.client.post(route)
+    assert scanned.status_code == 200
+    assert scanned.json()["mineral_assay"] == json.loads(ASSAY)
+    assert scanned.json()["power_megajoules"] == 100 - mining.settings.sensor_default_power_cost_megajoules
+    publish.assert_not_called()
+    assert (await game.client.post(route)).status_code == 429
+    assert (await game.client.post("/api/v1/mining/scan")).status_code == 429
+    assert "mineral_assay" not in (await game.client.get("/api/v1/mining/asteroids")).json()[0]
+    async with game.sessions() as session:
+        state = await session.get(ShipState, game.pilot)
+        assert state.power_megajoules == scanned.json()["power_megajoules"]
+        assert state.sensor_last_scan_at is not None
+
+
+async def test_field_scan_blocks_asteroid_scan_and_requires_authentication(game, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(mining, "active_ship_statistics", AsyncMock(return_value={"sensor_range_meters": 1000}))
+    await game.dock(False)
+    scan = await game.client.post("/api/v1/mining/scan")
+    assert scan.status_code == 200
+    revealed_regions = sum(len(zone["regions"]) for zone in scan.json()["resource_zones"])
+    assert 1 <= revealed_regions <= 4
+    bootstrap = await game.client.get("/api/v1/mining/bootstrap")
+    assert bootstrap.json()["resource_zones"] == scan.json()["resource_zones"]
+    route = f"/api/v1/mining/asteroids/{game.asteroid}/scan"
+    assert (await game.client.post(route)).status_code == 429
+    game.client.headers.pop("authorization")
+    assert (await game.client.post(route)).status_code == 401
+
+
+@pytest.mark.parametrize("failure, expected", [
+    ("docked", 409), ("undiscovered", 404), ("depleted", 404),
+    ("remote", 409), ("no_sensor", 409), ("no_power", 409), ("inactive_field", 404),
+])
+async def test_asteroid_scan_rejects_inaccessible_targets_without_charge(game, monkeypatch, failure, expected):
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(mining, "active_ship_statistics", AsyncMock(return_value={"sensor_range_meters": 0 if failure == "no_sensor" else 1000}))
+    await game.dock(failure == "docked")
+    async with game.sessions.begin() as session:
+        state = await session.get(ShipState, game.pilot)
+        state.power_megajoules = 0 if failure == "no_power" else 100
+        if failure == "remote":
+            state.position_x = 2000
+        asteroid = await session.get(Asteroid, game.asteroid)
+        if failure == "depleted":
+            asteroid.remaining_volume_cubic_meters = 0
+        if failure == "inactive_field":
+            (await session.get(AsteroidField, asteroid.field_id)).active = False
+        if failure == "undiscovered":
+            await session.execute(delete(PilotDiscovery).where(PilotDiscovery.pilot_id == game.pilot))
+    response = await game.client.post(f"/api/v1/mining/asteroids/{game.asteroid}/scan", json=POSITION)
+    assert response.status_code == expected
+    assert "mineral_assay" not in response.json()
+    async with game.sessions() as session:
+        state = await session.get(ShipState, game.pilot)
+        assert state.power_megajoules == (0 if failure == "no_power" else 100)
+        assert state.sensor_last_scan_at is None
 
 
 async def test_checkpoint_cannot_overwrite_cargo(game):

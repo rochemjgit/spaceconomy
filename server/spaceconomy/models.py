@@ -217,9 +217,9 @@ class ShipState(TimestampedModel, Base):
     __tablename__ = "ship_states"
 
     pilot_id: Mapped[UUID] = mapped_column(ForeignKey("pilots.id"), primary_key=True)
-    position_x: Mapped[float] = mapped_column(Float, nullable=False, default=3_000_000_000)
+    position_x: Mapped[float] = mapped_column(Float, nullable=False, default=-2_600_000_000)
     position_y: Mapped[float] = mapped_column(Float, nullable=False, default=480)
-    position_z: Mapped[float] = mapped_column(Float, nullable=False, default=-50_000)
+    position_z: Mapped[float] = mapped_column(Float, nullable=False, default=-4_500_050_000)
     docked_station_name: Mapped[str | None] = mapped_column(String(128))
     power_megajoules: Mapped[float] = mapped_column(Float, nullable=False, default=100)
     shields: Mapped[float] = mapped_column(Float, nullable=False, default=100)
@@ -285,6 +285,34 @@ class SolarSystem(TimestampedModel, Base):
     radius_meters: Mapped[float] = mapped_column(Float, nullable=False)
 
 
+class ResourceCellOverride(TimestampedModel, Base):
+    """Administrator-authored resource class override for one Kepler map cell."""
+
+    __tablename__ = "resource_cell_overrides"
+    __table_args__ = (UniqueConstraint("system_id", "cell_x", "cell_z"),)
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    system_id: Mapped[UUID] = mapped_column(ForeignKey("solar_systems.id"), index=True, nullable=False)
+    cell_x: Mapped[int] = mapped_column(Integer, nullable=False)
+    cell_z: Mapped[int] = mapped_column(Integer, nullable=False)
+    zone_class: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class PilotResourceSurvey(TimestampedModel, Base):
+    """A resource map cell revealed privately by a pilot sensor scan."""
+
+    __tablename__ = "pilot_resource_surveys"
+    __table_args__ = (UniqueConstraint("pilot_id", "system_id", "cell_x", "cell_z"),)
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    pilot_id: Mapped[UUID] = mapped_column(ForeignKey("pilots.id"), index=True, nullable=False)
+    system_id: Mapped[UUID] = mapped_column(
+        ForeignKey("solar_systems.id"), index=True, nullable=False
+    )
+    cell_x: Mapped[int] = mapped_column(Integer, nullable=False)
+    cell_z: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
 class AsteroidField(TimestampedModel, Base):
     """A finite discoverable asteroid-field site retained after its depletion."""
 
@@ -303,6 +331,7 @@ class AsteroidField(TimestampedModel, Base):
     discovery_signature: Mapped[float] = mapped_column(Float, nullable=False)
     spawn_profile: Mapped[str] = mapped_column(Text, nullable=False)
     next_spawn_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
@@ -318,6 +347,9 @@ class MineralDefinition(TimestampedModel, Base):
     display_name: Mapped[str] = mapped_column(String(128), nullable=False)
     classification: Mapped[str] = mapped_column(String(16), nullable=False)
     rarity_tier: Mapped[str] = mapped_column(String(16), nullable=False)
+    industrial_role: Mapped[str] = mapped_column(String(256), default="", nullable=False)
+    visual_family: Mapped[str] = mapped_column(String(16), default="rocky", nullable=False)
+    display_color: Mapped[str] = mapped_column(String(7), default="#888888", nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
@@ -374,6 +406,21 @@ class MinedOreLot(TimestampedModel, Base):
     composition: Mapped[str] = mapped_column(String(64), nullable=False)
     mineral_assay: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     volume_cubic_meters: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class StationService(TimestampedModel, Base):
+    """A station capability that can be enabled or disabled by administrators."""
+
+    __tablename__ = "station_services"
+    __table_args__ = (
+        UniqueConstraint("station_id", "service_key", name="uq_station_service_station_key"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    station_id: Mapped[UUID] = mapped_column(Uuid, index=True, nullable=False)
+    service_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    available: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
 class RefineryService(TimestampedModel, Base):

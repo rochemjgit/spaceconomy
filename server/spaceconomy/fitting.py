@@ -360,7 +360,7 @@ STARTER_MINER: Final = HullDefinition(
         "heat_tolerance": 100.0,
         "heat_dissipation_per_second": 4.0,
         "mining_yield": 1.0,
-        "maximum_speed": 120.0,
+        "maximum_speed": 300.0,
         "shield_capacity": 60.0,
         "armor": 25.0,
         "hull_durability": 100.0,

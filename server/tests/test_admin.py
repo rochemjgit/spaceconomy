@@ -9,6 +9,129 @@ from spaceconomy import admin
 from spaceconomy.config import settings
 
 
+async def test_station_service_availability_updates_persist() -> None:
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from spaceconomy.models import StationService
+    from spaceconomy.seed import KEPLER_STATION_UUID
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(StationService.__table__.create)
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        async with sessions.begin() as session:
+            session.add(
+                StationService(
+                    station_id=KEPLER_STATION_UUID,
+                    service_key="market",
+                    display_name="Market",
+                    available=True,
+                )
+            )
+        async with sessions() as session:
+            snapshot = await admin.get_kepler_station_services(session, None)
+            assert [(service.display_name, service.available) for service in snapshot.services] == [("Market", True)]
+            service_id = snapshot.services[0].id
+        async with sessions() as session:
+            updated = await admin.update_kepler_station_service(
+                service_id, admin.AdminStationServiceUpdate(available=False), session, None
+            )
+            assert not updated.available
+        async with sessions() as session:
+            snapshot = await admin.get_kepler_station_services(session, None)
+            assert not snapshot.services[0].available
+    finally:
+        await engine.dispose()
+
+
+async def test_deleting_an_npc_enables_transaction_scoped_ledger_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pilot_id = uuid4()
+    statements: list[str] = []
+
+    class Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+    class Session:
+        def begin(self) -> Transaction:
+            return Transaction()
+
+        async def execute(self, statement: object) -> None:
+            statements.append(str(statement))
+
+        async def scalar(self, _: object) -> int:
+            return 0
+
+    async def npc_row(_: object, __: object) -> tuple[object, object, object]:
+        return SimpleNamespace(account_id=uuid4()), object(), object()
+
+    monkeypatch.setattr(admin, "_npc_row", npc_row)
+
+    await admin.delete_npc(pilot_id, Session(), None)
+
+    setting_index = next(index for index, statement in enumerate(statements) if "set_config" in statement)
+    ledger_index = next(index for index, statement in enumerate(statements) if "DELETE FROM wallet_transactions" in statement)
+    assert setting_index < ledger_index
+
+
+@pytest.mark.parametrize("payload", [
+    {"definition_id": "changed"}, {"version": 2}, {"display_name": "  "},
+    {"industrial_role": None}, {"active": None}, {"display_color": "red"},
+    {"visual_family": "unknown"},
+])
+def test_mineral_updates_reject_invalid_metadata(payload) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        admin.AdminMineralDefinitionUpdate.model_validate(payload)
+
+
+async def test_mineral_admin_updates_persist_and_keep_identity() -> None:
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from spaceconomy.minerals import load_mineral_catalog
+    from spaceconomy.models import MineralDefinition
+    from spaceconomy.seed import _upsert_mineral
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(MineralDefinition.__table__.create)
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        async with sessions.begin() as session:
+            for mineral in load_mineral_catalog().minerals:
+                await _upsert_mineral(session, mineral)
+        async with sessions() as session:
+            definitions = await admin.list_mineral_definitions(session, None)
+            assert len(definitions) == 13
+            assert all(definition.in_spawn_catalog for definition in definitions)
+        original = definitions[0]
+        async with sessions() as session:
+            updated = await admin.update_mineral_definition(original.id,
+                admin.AdminMineralDefinitionUpdate(display_name=" Revised name ", industrial_role="Revised role", display_color="#123456", visual_family="icy", active=False), session, None)
+            assert updated.definition_id == original.definition_id
+            assert updated.version == original.version
+        async with sessions() as session:
+            persisted = await session.get(MineralDefinition, original.id)
+            assert persisted.display_name == "Revised name"
+            assert persisted.industrial_role == "Revised role"
+            assert persisted.display_color == "#123456"
+            assert persisted.visual_family == "icy"
+            assert not persisted.active
+        async with sessions() as session:
+            with pytest.raises(HTTPException) as missing:
+                await admin.update_mineral_definition(uuid4(), admin.AdminMineralDefinitionUpdate(active=True), session, None)
+            assert missing.value.status_code == 404
+    finally:
+        await engine.dispose()
+
+
 @pytest.mark.asyncio
 async def test_foundry_test_prompt_uses_selected_model(monkeypatch: pytest.MonkeyPatch) -> None:
     captured_request: dict[str, object] = {}

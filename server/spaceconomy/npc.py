@@ -37,7 +37,7 @@ from .models import (
 )
 from .refinery import crush_outputs, purify_output
 
-KEPLER_POSITION = (3_000_000_000.0, 480.0, -50_000.0)
+KEPLER_POSITION = (-2_600_000_000.0, 480.0, -4_500_050_000.0)
 DECISION_INTERVAL = timedelta(seconds=30)
 MOVEMENT_SPEED_METERS_PER_SECOND = 65.0
 WARP_MINIMUM_DISTANCE_METERS = 100_000
@@ -46,6 +46,11 @@ WARP_ENTRY_CAPACITY_COST = 10.0
 WARP_CAPACITY_RECHARGE_PER_SECOND = 2.0
 WARP_CAPACITY_DRAIN_PER_SECOND = 2.0
 WARP_CRUISE_SPEED_METERS_PER_SECOND = 10_000.0
+WARP_MAXIMUM_RANGE_METERS = (
+    (WARP_MAXIMUM_CAPACITY - WARP_ENTRY_CAPACITY_COST)
+    / WARP_CAPACITY_DRAIN_PER_SECOND
+    * WARP_CRUISE_SPEED_METERS_PER_SECOND
+)
 WARP_ALIGN_SECONDS = 1.2
 WARP_ACCELERATION_SECONDS = 4.0
 WARP_TRANSIT_SECONDS = 0.9
@@ -482,7 +487,9 @@ async def _run_space_miner_action(
         return await _warp_or_move(
             session, pilot_id, runtime, ship_state, KEPLER_POSITION, now, "returning"
         )
-    await scan_nearby_asteroid_fields(session, pilot_id, ship_state, now)
+    await scan_nearby_asteroid_fields(
+        session, pilot_id, ship_state, settings.sensor_default_range_meters, now
+    )
     asteroids = await _discovered_asteroids(session, pilot_id)
     asteroid = next(
         (
@@ -609,25 +616,29 @@ def _select_mining_asteroid(
     asteroids: list[Asteroid],
     claimed_targets: set[UUID],
 ) -> Asteroid | None:
-    """Choose a stable random unclaimed asteroid in the nearest discovered field."""
+    """Choose a stable random asteroid from the least-contested discovered belt."""
     if not asteroids:
         return None
-    field_id = min(
-        {asteroid.field_id for asteroid in asteroids},
-        key=lambda candidate_field_id: min(
-            math.dist(
-                position,
-                (asteroid.position_x, asteroid.position_y, asteroid.position_z),
-            )
-            for asteroid in asteroids
-            if asteroid.field_id == candidate_field_id
-        ),
+    candidates_by_field: dict[UUID, list[Asteroid]] = {}
+    for asteroid in asteroids:
+        if asteroid.id not in claimed_targets:
+            candidates_by_field.setdefault(asteroid.field_id, []).append(asteroid)
+    if not candidates_by_field:
+        candidates_by_field = {}
+        for asteroid in asteroids:
+            candidates_by_field.setdefault(asteroid.field_id, []).append(asteroid)
+    competition_by_field = {
+        field_id: sum(asteroid.id in claimed_targets for asteroid in asteroids if asteroid.field_id == field_id)
+        for field_id in candidates_by_field
+    }
+    lowest_competition = min(competition_by_field.values())
+    least_contested_fields = sorted(
+        field_id
+        for field_id, competition in competition_by_field.items()
+        if competition == lowest_competition
     )
-    candidates = [asteroid for asteroid in asteroids if asteroid.field_id == field_id]
-    unclaimed_candidates = [
-        asteroid for asteroid in candidates if asteroid.id not in claimed_targets
-    ]
-    choices = unclaimed_candidates or candidates
+    field_id = random.Random(pilot_id.int).choice(least_contested_fields)
+    choices = candidates_by_field[field_id]
     choices.sort(key=lambda asteroid: asteroid.id.int)
     return random.Random(pilot_id.int ^ field_id.int).choice(choices)
 
@@ -686,7 +697,9 @@ async def _warp_or_move(
         runtime.warp_capacity -= WARP_ENTRY_CAPACITY_COST
         runtime.warp_phase = "aligning"
         runtime.warp_phase_started_at = now
-        runtime.warp_destination_x, runtime.warp_destination_y, runtime.warp_destination_z = target
+        runtime.warp_destination_x, runtime.warp_destination_y, runtime.warp_destination_z = (
+            _directional_warp_destination(position, target)
+        )
     warp_target = (
         runtime.warp_destination_x,
         runtime.warp_destination_y,
@@ -694,14 +707,21 @@ async def _warp_or_move(
     )
     if any(component is None for component in warp_target):
         warp_target = target
-    if runtime.warp_phase != "decelerating" and math.dist(warp_target, target) > 1:
-        _begin_warp_egress(runtime, position, warp_target, now)
-        warp_target = (
-            runtime.warp_destination_x,
-            runtime.warp_destination_y,
-            runtime.warp_destination_z,
-        )
     return _advance_warp(runtime, position, warp_target, now, state)
+
+
+def _directional_warp_destination(
+    position: tuple[float, float, float], target: tuple[float, float, float]
+) -> tuple[float, float, float]:
+    """Set a player-like forward warp leg toward the current navigation target."""
+    offset = tuple(target[axis] - position[axis] for axis in range(3))
+    distance = math.sqrt(sum(component * component for component in offset))
+    if distance <= WARP_MAXIMUM_RANGE_METERS:
+        return target
+    return tuple(
+        position[axis] + offset[axis] / distance * WARP_MAXIMUM_RANGE_METERS
+        for axis in range(3)
+    )
 
 
 async def _has_working_warp_drive(session: AsyncSession, pilot_id: UUID) -> bool:
@@ -792,6 +812,9 @@ def _advance_warp(
             WARP_ENTRY_CAPACITY_COST,
             runtime.warp_capacity - WARP_CAPACITY_DRAIN_PER_SECOND * elapsed,
         )
+        if runtime.warp_capacity <= WARP_ENTRY_CAPACITY_COST:
+            _begin_warp_egress(runtime, position, target, now)
+            return _advance_warp(runtime, position, target, now, state)
         runtime.warp_phase_started_at = now
         return _move_warp_cruise(runtime, position, target, now, state)
     if phase == "decelerating":

@@ -5,12 +5,13 @@ import type { SceneOptions, TargetableObject } from './game/scene'
 import type { InventoryContainer } from './inventory'
 
 const scenes = vi.hoisted(() => ({ flight: vi.fn(), station: vi.fn(), options: [] as SceneOptions[], targets: [] as TargetableObject[], selectTarget: vi.fn(), approachTarget: vi.fn(() => true), warpTo: vi.fn(() => true) }))
+const powerSync = vi.hoisted(() => vi.fn())
 vi.mock('./game/scene', () => ({
   createSystemScene: scenes.flight.mockImplementation((_canvas: unknown, options: SceneOptions) => {
     scenes.options.push(options)
     // Exercise a synchronous callback to catch socket declaration TDZ regressions.
     options.onMiningLaserUpdate?.(false)
-    return { dispose: vi.fn(), setCargoCubicMeters: vi.fn(), setModuleActive: vi.fn(), getTargetables: () => scenes.targets, selectTarget: scenes.selectTarget, approachTarget: scenes.approachTarget, warpTo: scenes.warpTo }
+    return { dispose: vi.fn(), setCargoCubicMeters: vi.fn(), setPowerMegajoules: powerSync, setModuleActive: vi.fn(), getTargetables: () => scenes.targets, selectTarget: scenes.selectTarget, approachTarget: scenes.approachTarget, warpTo: scenes.warpTo }
   }),
   createStationInteriorScene: scenes.station.mockImplementation(() => ({ dispose: vi.fn(), setModuleActive: vi.fn() })),
 }))
@@ -23,6 +24,10 @@ const ship: InventoryContainer = {
   ], raw_ore_lots: [],
 }
 const station: InventoryContainer = { id: 'station', name: 'Station storage', capacity_cubic_meters: null, used_volume_cubic_meters: 0, items: [], raw_ore_lots: [] }
+const resourceZones = Array.from({ length: 10 }, (_, index) => ({
+  zone_id: `class-${index + 1}`, zone_class: index + 1, display_color: '#368bc1',
+  regions: [{ min_x: (index - 5) * 1_000_000_000, max_x: (index - 4) * 1_000_000_000, min_z: -5_000_000_000, max_z: 5_000_000_000 }],
+}))
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -82,6 +87,7 @@ beforeEach(() => {
   requests.mockImplementation(async (input) => {
     const path = new URL(String(input)).pathname
     if (path.endsWith('/auth/login')) return json({ access_token: 'test-account', refresh_token: 'test-refresh', pilots: [{ id: 'pilot', display_name: 'Test pilot', balance_credits: 10_000 }] })
+    if (path.endsWith('/auth/refresh')) return json({ access_token: 'refreshed-account', refresh_token: 'refreshed-refresh', pilots: [{ id: 'pilot', display_name: 'Test pilot', balance_credits: 10_000 }] })
     if (path.endsWith('/auth/select-pilot')) return json({ access_token: 'test-pilot', ship_state: {
       position_x: 123078, position_y: 480, position_z: -2691,
       docked_station_name: initiallyDocked ? 'KEPLER STATION' : null,
@@ -90,7 +96,7 @@ beforeEach(() => {
     if (path.endsWith('/auth/ship-state')) return checkpoint()
     if (path.endsWith('/inventory/docked')) return dockedLoad()
     if (path.endsWith('/inventory/ship')) return json(ship)
-    if (path.endsWith('/mining/bootstrap')) return json({ discovered_fields: [] })
+    if (path.endsWith('/mining/bootstrap')) return json({ discovered_fields: [], system: { radius_meters: 3_100_000_000 }, resource_zones: resourceZones })
     if (path.endsWith('/fitting/active')) return json({ statistics: { sensor_range_meters: 500_000 } })
     if (path.endsWith('/market/wallet')) return json({ wallet_balance_credits: 10_000 })
     if (path.endsWith('/inventory/split') || path.endsWith('/inventory/merge-all')) return mutation()
@@ -120,6 +126,30 @@ async function launch(inSpace = false) {
   click('#pilot-select-launch')
   await vi.waitFor(() => expect(document.querySelector('.game-shell')).not.toBeNull())
 }
+
+describe('stored authentication', () => {
+  it('restores and rotates a remembered session after a client reload', async () => {
+    localStorage.setItem('spaceconomy.refresh-token', 'stored-refresh')
+
+    await import('./main')
+
+    await vi.waitFor(() => expect(document.querySelector('#pilot-select-launch')).not.toBeNull())
+    expect(requestCount('/auth/refresh')).toBe(1)
+    expect(localStorage.getItem('spaceconomy.refresh-token')).toBe('refreshed-refresh')
+  })
+})
+
+describe('page lifecycle checkpoint', () => {
+  it('persists the active ship state with a keepalive request on page hide', async () => {
+    await launch(true)
+
+    window.dispatchEvent(new Event('pagehide'))
+
+    await vi.waitFor(() => expect(requestCount('/auth/ship-state')).toBe(1))
+    const [, options] = requests.mock.calls.find(([url]) => String(url).endsWith('/auth/ship-state'))!
+    expect(options).toMatchObject({ method: 'PUT', keepalive: true })
+  })
+})
 
 describe('checkpoint-gated location transitions', () => {
   it('shows the docked station services as compact icon controls with hover descriptions', async () => {
@@ -239,7 +269,7 @@ describe('checkpoint-gated location transitions', () => {
     await vi.advanceTimersByTimeAsync(0)
     expect(element('#ship-cargo').textContent).toBe('1.00 / 24.00 M3')
     expect(scenes.flight).toHaveBeenCalledTimes(2)
-    expect(scenes.options[1]!.initialPosition).toMatchObject({ x: 3_000_000_000, y: 480, z: -49_990.5 })
+    expect(scenes.options[1]!.initialPosition).toMatchObject({ x: -2_600_000_000, y: 480, z: -4_500_049_990.5 })
   })
 })
 
@@ -381,22 +411,24 @@ describe('top-bar major functions', () => {
     return display
   }
 
-  it('uses equal axis scales and renders contacts within the scan radius', async () => {
+  it('uses equal axis scales and renders only asteroid contacts within the scan radius', async () => {
     scenes.targets = [
       { id: 'near', name: 'Nearby', kind: 'asteroid', position: new Vector3(123088, 480, -2691), locked: false, locking: false },
-      { id: 'far', name: 'Beyond sensors', kind: 'asteroid', position: new Vector3(423078, 480, -2691), locked: false, locking: false },
+      { id: 'far', name: 'Beyond sensors', kind: 'asteroid', position: new Vector3(723078, 480, -2691), locked: false, locking: false },
       { id: 'above', name: 'Above sensors', kind: 'player', position: new Vector3(123078, 300480, -2691), locked: false, locking: false },
     ]
     await launch(true)
     const display = openMap()
     expect(element('#system-map-world').dataset.detail).toBe('local')
-    expect(document.querySelectorAll('.system-map-contact')).toHaveLength(3)
+    expect(document.querySelectorAll('.system-map-contact')).toHaveLength(1)
+    expect(document.querySelector('.system-map-contact-player')).toBeNull()
+    expect(element('#system-map-contacts').textContent).not.toContain('Above sensors')
     expect(parseFloat(element('.system-map-contact').style.left)).toBeCloseTo(400.006, 8)
     click('#system-map-overview')
     expect(document.querySelectorAll('.system-map-contact')).toHaveLength(0)
     expect(element('#system-map-world').dataset.detail).toBe('system')
-    expect(element('#system-map-boundary').style.width).toBe('600px')
-    expect(element('#system-map-boundary').style.height).toBe('600px')
+    expect(parseFloat(element('#system-map-boundary').style.width)).toBeCloseTo(372)
+    expect(parseFloat(element('#system-map-boundary').style.height)).toBeCloseTo(372)
     expect(element('[data-poi="primary-star"]').style.left).toBe('400px')
     expect(element('[data-poi="primary-star"]').style.top).toBe('300px')
     click('#system-map-recenter')
@@ -429,16 +461,38 @@ describe('top-bar major functions', () => {
     expect(display.clientWidth).toBe(800)
   })
 
-  it('draws and names 25 irregular space sectors across the system grid', async () => {
+  it('projects class regions across the whole grid and preserves them on element resize', async () => {
+    let resize: (() => void) | undefined
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(callback: () => void) { resize = callback }
+      observe() {}
+    })
     await launch(true)
-    openMap()
-    const sectors = [...document.querySelectorAll<SVGPathElement>('#system-map-sectors path')]
-    const labels = [...document.querySelectorAll<HTMLElement>('#system-map-sector-labels span')]
-    expect(sectors).toHaveLength(25)
-    expect(labels).toHaveLength(25)
-    expect(labels.map((label) => label.textContent)).toContain('AURORA REACH')
-    expect(labels.map((label) => label.textContent)).toContain('ZENITH CROWN')
-    expect(sectors.some((sector) => !sector.getAttribute('d')?.match(/^M0 0 L/))).toBe(true)
+    const display = openMap()
+    click('#system-map-overview')
+    const circles = () => [...document.querySelectorAll<SVGPathElement>('#system-map-zones [data-zone-id]')]
+    expect(circles()).toHaveLength(10)
+    expect(circles().map((circle) => circle.dataset.zoneId)).toEqual([...resourceZones].reverse().map((zone) => zone.zone_id))
+    expect([...document.querySelectorAll('#system-map-zone-legend span')].map((label) => label.textContent)).toEqual(resourceZones.map((zone) => `Class ${zone.zone_class}`))
+    const inner = circles().at(-1)!
+    const coordinates = () => circles().at(-1)!.getAttribute('d')!.match(/-?\d+(?:\.\d+)?/g)!.map(Number)
+    coordinates().forEach((value, index) => expect(value).toBeCloseTo([100, 0, 60, 600, -60][index]!))
+    expect(inner.tagName).toBe('path')
+    expect(document.querySelector('#system-map-zones clipPath')).toBeNull()
+    click('#system-map-zoom-in')
+    await vi.advanceTimersByTimeAsync(800)
+    expect(coordinates()[2]).toBeGreaterThan(60)
+    scenes.options[0]!.onFlightUpdate(new Vector3(3_000_000_000, 480, -50_000), 0, true, 0, 0, 0)
+    click('#system-map-recenter')
+    Object.defineProperties(display, { clientWidth: { value: 780 }, clientHeight: { value: 400 } })
+    resize!()
+    expect(parseFloat(element('#system-map-player').style.left)).toBeCloseTo(390, 6)
+    expect(parseFloat(element('#system-map-player').style.top)).toBeCloseTo(200, 6)
+    const [left, top, width] = coordinates()
+    const scale = width! / 1_000_000_000
+    expect(left! + 8_000_000_000 * scale).toBeCloseTo(390, 6)
+    expect(top! + 5_000_050_000 * scale).toBeCloseTo(200, 6)
+    expect(requests.mock.calls.some(([url]) => String(url).includes('/admin/'))).toBe(false)
   })
 
   it('reveals only successful scans, retains discoveries, and warps to the selected 3D coordinates', async () => {
@@ -451,15 +505,16 @@ describe('top-bar major functions', () => {
     click('#system-map-scan')
     await vi.waitFor(() => expect(requestCount('/mining/scan')).toBe(1))
     expect(document.querySelectorAll('.system-map-survey')).toHaveLength(0)
-    scan.resolve(json({ newly_discovered_fields: [{ id: 'scanned', display_name: 'Surveyed field', position_x: 250000, position_y: 1400, position_z: -40000, scan_quality: 0.9 }], power_megajoules: 90, cooldown_seconds: 5 }))
+    scan.resolve(json({ newly_discovered_fields: [{ id: 'scanned', display_name: 'Surveyed field', position_x: 250000, position_y: 1400, position_z: -40000, scan_quality: 0.9 }], resource_zones: [{ zone_id: 'class-4', zone_class: 4, display_color: '#be8a38', regions: [{ min_x: 200000, max_x: 300000, min_z: -100000, max_z: 0 }] }], power_megajoules: 90, cooldown_seconds: 5 }))
     await vi.waitFor(() => expect(document.querySelectorAll('.system-map-survey')).toHaveLength(1))
+    expect(document.querySelectorAll('#system-map-zones [data-zone-id]')).toHaveLength(1)
+    expect(element('#system-map-zone-legend').textContent).toContain('Class 4')
     click('#system-map-close')
     click('#topbar-map')
     click('[data-poi="discovered-field-scanned"]')
     expect(element('[data-poi="discovered-field-scanned"]').getAttribute('aria-pressed')).toBe('true')
-    expect(element('#poi-description').textContent).toContain('90%')
-    expect(element<HTMLButtonElement>('#warp-action').hidden).toBe(false)
-    click('#warp-action')
+    expect(element('[data-destination="discovered-field-scanned"]').getAttribute('aria-pressed')).toBe('true')
+    click('[data-warp-destination="discovered-field-scanned"]')
     expect(scenes.warpTo).toHaveBeenCalledWith(new Vector3(250000, 1400, -40000))
     expect(element('#system-map-modal').hidden).toBe(true)
   })
@@ -477,7 +532,7 @@ describe('top-bar major functions', () => {
     await vi.advanceTimersByTimeAsync(250)
     click('#topbar-map')
     expect(element<HTMLButtonElement>('#system-map-scan').disabled).toBe(true)
-    expect(element('#warp-action').hidden).toBe(true)
+    expect(element<HTMLButtonElement>('[data-warp-destination="primary-star"]').disabled).toBe(true)
   })
 
   it('pans without selecting a dragged POI and supports keyboard navigation', async () => {
@@ -495,14 +550,14 @@ describe('top-bar major functions', () => {
     pointer(display, 'pointermove', 260)
     pointer(window, 'pointerup', 260)
     planet.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }))
-    expect(element('#poi-name').textContent).toBe('PRIMARY STAR')
+    expect(element('[data-poi="primary-star"]').getAttribute('aria-pressed')).toBe('true')
     expect(Number(element('#system-map-world').dataset.panX)).toBeCloseTo(initial + 60)
     display.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }))
     expect(Number(element('#system-map-world').dataset.panX)).toBeCloseTo(initial + 140)
     pointer(planet, 'pointerdown', 200)
     pointer(window, 'pointerup', 200)
     planet.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }))
-    expect(element('#poi-name').textContent).toBe('STARTER WORLD')
+    expect(element('[data-poi="starter-world"]').getAttribute('aria-pressed')).toBe('true')
     click('[data-destination="kepler-station"]')
     expect(element('[data-poi="kepler-station"]').hidden).toBe(false)
   })
@@ -567,10 +622,12 @@ describe('top-bar major functions', () => {
     expect(sensorRange.hidden).toBe(false)
     expect(sensorRangeToggle.getAttribute('aria-label')).toBe('Hide sensor range')
     const field = element<HTMLButtonElement>('[data-poi="discovered-field-field-1"]')
+    expect(document.querySelectorAll('#system-map-zones [data-zone-id]')).toHaveLength(0)
+    expect(element('#system-map-zone-legend').textContent).toBe('')
+    expect(field.title).not.toContain('Class')
     expect(field.textContent).toContain('UNSURVEYED ASTEROID FIELD A1B2C3D4')
     field.click()
-    expect(element('#poi-type').textContent).toBe('SCANNED ASTEROID FIELD')
-    expect(element('#poi-description').textContent).toContain('80% quality')
+    expect(element('[data-destination="discovered-field-field-1"]').getAttribute('aria-pressed')).toBe('true')
   })
 
   it('opens the system map and the current pilot wallet', async () => {
@@ -581,5 +638,74 @@ describe('top-bar major functions', () => {
     click('#topbar-wallet')
     await vi.waitFor(() => expect(element('#game-modal-content').textContent).toContain('10,000 CR'))
     expect(element('#game-modal-title').textContent).toBe('WALLET')
+  })
+
+  it('opens the current ship dossier from the top navigation', async () => {
+    await launch(true)
+    click('#topbar-ship')
+    await vi.waitFor(() => expect(element('#game-modal-content').textContent).toContain('SHIP STATISTICS'))
+    expect(element('#game-modal-title').textContent).toBe('SHIP DOSSIER')
+    expect(element('#game-modal-content').textContent).toContain('SENSOR RANGE')
+    expect(element('#game-modal-content').textContent).toContain('500,000 m')
+  })
+})
+
+describe('asteroid scans', () => {
+  function selectAsteroid(id = 'asteroid') {
+    scenes.options[0]!.onTargetSelectionChange?.({
+      id, name: `Asteroid ${id}`, kind: 'asteroid', position: new Vector3(123078, 480, -2691),
+      oreRemainingCubicMeters: 50, initialOreCubicMeters: 100,
+      locked: true, locking: false, lockProgress: 1,
+    })
+  }
+
+  it('shows exact composition only after an authenticated asteroid scan', async () => {
+    await launch(true)
+    selectAsteroid()
+    click('#view-target-details')
+    expect(element('#target-details-content').textContent).toContain('Not scanned')
+    requests.mockImplementationOnce(async () => json({}))
+    requests.mockImplementationOnce(async () => json({
+      asteroid_id: 'asteroid', mineral_assay: [{ definition_id: 'iron', definition_version: 2, percentage: 100 }], power_megajoules: 90,
+    }))
+    click('#scan-target-assay')
+    expect(element<HTMLButtonElement>('#scan-target-assay').disabled).toBe(true)
+    await vi.waitFor(() => expect(element('#target-scan-status').textContent).toBe('Scan complete.'))
+    expect(element('#target-details-content').textContent).toContain('iron (v2)100%')
+    expect(powerSync).toHaveBeenCalledWith(90)
+    expect(element('#target-details-content').textContent).not.toContain('Not scanned')
+    const [, options] = requests.mock.calls.find(([url]) => String(url).endsWith('/asteroids/asteroid/scan'))!
+    expect(options).toMatchObject({ method: 'POST', headers: { authorization: 'Bearer test-pilot' } })
+    selectAsteroid('other')
+    expect(element('#target-details-content').textContent).not.toContain('100%')
+    expect(element('#target-details-content').textContent).toContain('Not scanned')
+  })
+
+  it('does not attach a delayed scan result to a different target', async () => {
+    await launch(true)
+    selectAsteroid()
+    click('#view-target-details')
+    const pending = deferred<Response>()
+    requests.mockImplementationOnce(async () => json({}))
+    requests.mockImplementationOnce(() => pending.promise)
+    click('#scan-target-assay')
+    await vi.waitFor(() => expect(requestCount('/asteroids/asteroid/scan')).toBe(1))
+    selectAsteroid('other')
+    pending.resolve(json({ asteroid_id: 'asteroid', mineral_assay: [{ definition_id: 'gold', definition_version: 1, percentage: 100 }], power_megajoules: 90 }))
+    await vi.waitFor(() => expect(element<HTMLButtonElement>('#scan-target-assay').disabled).toBe(false))
+    expect(element('#target-details-title').textContent).toBe('Asteroid other')
+    expect(element('#target-details-content').textContent).not.toContain('gold')
+  })
+
+  it('shows scan failures and keeps composition undisclosed', async () => {
+    await launch(true)
+    selectAsteroid()
+    click('#view-target-details')
+    requests.mockImplementationOnce(async () => json({}))
+    requests.mockImplementationOnce(async () => json({ detail: 'sensor scan is recharging' }, 429))
+    click('#scan-target-assay')
+    await vi.waitFor(() => expect(element('#target-scan-status').textContent).toContain('recharging'))
+    expect(element('#target-details-content').textContent).toContain('Not scanned')
+    expect(element<HTMLButtonElement>('#scan-target-assay').disabled).toBe(false)
   })
 })

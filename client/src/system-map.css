@@ -11,17 +11,16 @@
 .system-map-refresh:hover, .system-map-refresh:focus-visible { border-color: #53ffc6; color: #53ffc6; outline: none; }
 .system-map-refresh:disabled { opacity: .35; cursor: default; }
 .system-map-refresh[aria-busy='true'] { cursor: wait; opacity: .62; }
-.system-map-layout { grid-template-columns: minmax(0, 1fr) 300px; min-height: 0; overflow: hidden; }
+.system-map-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; min-height: 0; overflow: hidden; }
 .system-map-display { min-width: 0; min-height: 0; cursor: grab; overflow: hidden; touch-action: none; user-select: none; background: #080f13; }
 .system-map-display:active { cursor: grabbing; }
 .system-map-display:focus-visible { outline: 1px solid #53ffc6; outline-offset: -2px; }
 .system-map-grid { background-color: #06152b; background-image: linear-gradient(to right, rgb(109 220 247 / 16%) 1px, transparent 1px), linear-gradient(to bottom, rgb(109 220 247 / 16%) 1px, transparent 1px); background-size: 1% 1%; }
 .system-map-world { transform: none; transition: none; will-change: auto; background-image: linear-gradient(to right, #28404755 1px, transparent 1px), linear-gradient(to bottom, #28404755 1px, transparent 1px); }
-.system-map-boundary { position: absolute; border: 1px solid #718b8c; pointer-events: none; }
-.system-map-sectors { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
-.system-map-sectors path { fill: #7ea5a006; stroke: #8ca9a640; stroke-width: 1; vector-effect: non-scaling-stroke; }
-.system-map-sector-labels { position: absolute; inset: 0; pointer-events: none; }
-.system-map-sector-labels span { position: absolute; color: #9ab6b2; font: 700 11px/1.2 ui-monospace, monospace; letter-spacing: .08em; opacity: .34; white-space: nowrap; transform: translate(-50%, -50%) rotate(-18deg); text-align: center; }
+.system-map-boundary { position: absolute; border: 1px solid #718b8c; border-radius: 50%; pointer-events: none; }
+.system-map-zones { position: absolute; inset: 0; width: 100%; height: 100%; overflow: hidden; pointer-events: none; }
+.system-map-zone-legend { position: absolute; top: 44px; left: 16px; right: 16px; display: flex; flex-wrap: wrap; gap: 6px 12px; pointer-events: none; z-index: 4; }
+.system-map-zone-legend span { border-left: 3px solid var(--zone-color); padding-left: 5px; color: #e7eeee; font: 10px 'DM Mono', monospace; background: #102126; }
 .system-map-cell-labels { position: absolute; inset: 0; pointer-events: none; }
 .system-map-cell-labels span { position: absolute; width: 1px; color: #708a8c; font: 9px/1.35 ui-monospace, monospace; white-space: pre; transform: translate(-50%, -50%); text-align: center; }
 .system-map-sensor-range, .system-map-survey { position: absolute; border-radius: 50%; transform: translate(-50%, -50%); pointer-events: none; }
@@ -40,7 +39,7 @@
 .system-map-world .system-poi-station { color: #deeded; }
 .system-map-world .system-poi-station::before { width: 9px; height: 9px; border-radius: 0; background: #263c41; }
 .system-map-world .system-poi-discovery { color: #d9ab6f; }
-.system-map-world .system-poi-discovery::before { width: 8px; height: 8px; border-radius: 0; transform: rotate(45deg); background: #4d3922; }
+.system-map-world .system-poi-discovery::before { width: 10px; height: 10px; border-radius: 50%; background: currentColor; }
 .system-map-world .system-poi.is-selected { z-index: 3; outline: 1px solid #53ffc6; outline-offset: 2px; }
 .system-map-world .system-poi span { color: #c2d3d3; font: 10px/16px ui-monospace, monospace; white-space: normal; overflow-wrap: anywhere; transform: none; max-height: 32px; overflow: hidden; background: #080f13da; pointer-events: none; text-align: left; }
 .system-map-world .system-poi.is-selected span { color: #53ffc6; }
@@ -51,15 +50,9 @@
 .system-map-player.show-heading .system-map-player-heading { display: block; }
 .system-map-contact { z-index: 1; width: 4px; height: 4px; border-radius: 50%; }
 .system-map-contact-asteroid { background: #d9ab6f; }
-.system-map-contact-player { width: 6px; height: 6px; border: 1px solid #d9edff; background: #4d8cb3; }
-.poi-details { display: flex; flex-direction: column; min-height: 0; min-width: 0; padding: 22px; overflow-y: auto; background: #111b20; }
-.poi-details h2 { font-size: 17px; overflow-wrap: anywhere; }
-.poi-details .modal-copy { font-size: 12px; }
-.poi-details .poi-distance { color: #53ffc6; font: 20px ui-monospace, monospace; overflow-wrap: anywhere; }
-.poi-coordinates { color: #95abad; font: 10px/1.8 ui-monospace, monospace; overflow-wrap: anywhere; }
-.poi-details .warp-action { flex: 0 0 auto; width: 100%; min-width: 0; margin-top: 12px; white-space: normal; }
-.poi-details .poi-chart-heading { margin: 28px 0 10px; color: #95abad; }
-#system-map-destinations { display: grid; gap: 0; }
+.system-map-destinations-cabinet { position: absolute; z-index: 8; top: 0; right: 0; bottom: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); width: min(310px, 82vw); border-left: 1px solid #456064; background: #0d1519f2; box-shadow: -16px 0 28px rgb(0 0 0 / 42%); transform: translateX(100%); transition: transform 180ms ease-out; pointer-events: none; }
+.system-map-destinations-cabinet.is-open { transform: translateX(0); pointer-events: auto; }.system-map-destinations-cabinet header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; border-bottom: 1px solid #32464c; background: #111e23; }.system-map-destinations-cabinet header p { margin: 0; color: #a1bab9; }.system-map-destinations-cabinet header button { display: grid; place-items: center; width: 30px; height: 30px; padding: 5px; border: 1px solid #456064; background: transparent; color: #c4d5d5; cursor: pointer; }.system-map-destinations-cabinet header button:hover, .system-map-destinations-cabinet header button:focus-visible { border-color: #53ffc6; color: #53ffc6; outline: none; }
+#system-map-destinations { display: grid; align-content: start; gap: 0; overflow-y: auto; }
 .system-map-destination { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: stretch; border-top: 1px solid #32464c; }
 #system-map-destinations [data-destination] { display: grid; gap: 5px; width: 100%; padding: 12px 6px; text-align: left; border: 0; color: #c9d8d7; background: transparent; font: 11px/1.5 ui-monospace, monospace; cursor: pointer; overflow-wrap: anywhere; }
 #system-map-destinations small { color: #95abad; font-size: 10px; }
@@ -73,11 +66,8 @@
   .system-map-heading .eyebrow { font-size: 9px; }
   .system-map-actions { gap: 5px; }
   .system-map-refresh, .system-map-heading .game-modal-close { flex-basis: 32px; width: 32px; height: 32px; padding: 6px; }
-  .system-map-layout { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) minmax(0, 210px); }
+  .system-map-layout { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) minmax(0, 170px); }
   .system-map-display { border-right: 0; }
-  .poi-details { padding: 14px 16px; border-top: 1px solid #32464c; }
-  .poi-details h2 { margin: 6px 0; }
-  .poi-details .poi-distance { margin: 8px 0; font-size: 17px; }
   .system-map-footer { padding: 8px 16px; gap: 4px 16px; font-size: 8px; }
 }
 @media (max-height: 550px) and (max-width: 640px) {

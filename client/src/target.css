@@ -95,6 +95,12 @@
 .target-lock-progress span { display: block; height: 100%; background: #ffbd4a; transition: width 80ms linear; }
 .target-details-dialog { width: min(340px, calc(100vw - 32px)); border: 1px solid rgb(255 189 74 / 65%); padding: 16px; color: #e9f7fa; background: #0b1521; box-shadow: 0 20px 50px rgb(0 0 0 / 55%); }
 .target-details-dialog::backdrop { background: rgb(0 5 12 / 68%); }
+#scan-target-assay { display: grid; place-items: center; width: 40px; height: 40px; padding: 0; margin-top: 14px; border: 1px solid rgb(255 189 74 / 65%); color: #ffcf78; background: transparent; cursor: pointer; }
+#scan-target-assay[hidden] { display: none; }
+#scan-target-assay:disabled { opacity: .45; cursor: default; }
+#scan-target-assay:focus-visible { outline: 2px solid #fff4d9; outline-offset: 3px; }
+#target-scan-status { min-height: 16px; margin: 8px 0 0; font-size: 12px; letter-spacing: 0; overflow-wrap: anywhere; }
+#target-details-content dt, #target-details-content dd { overflow-wrap: anywhere; min-width: 0; }
 .target-details-dialog header { display: flex; align-items: start; justify-content: space-between; gap: 16px; border-bottom: 1px solid rgb(255 189 74 / 22%); padding-bottom: 12px; }
 .target-details-dialog .eyebrow { margin: 0; color: #ffbd4a; }.target-details-dialog h2 { margin: 5px 0 0; color: #fff4d9; font-size: 16px; letter-spacing: 0; }.target-details-dialog header button { width: 28px; height: 28px; border: 1px solid rgb(255 189 74 / 42%); color: #ffcf78; background: transparent; font-size: 18px; cursor: pointer; }.target-details-dialog dl { display: grid; gap: 0; margin: 14px 0 0; }.target-details-dialog dl div { display: flex; justify-content: space-between; gap: 16px; border-bottom: 1px solid rgb(115 207 255 / 14%); padding: 9px 0; font: 700 10px ui-monospace, monospace; letter-spacing: .04em; }.target-details-dialog dt { color: #8ca8b7; }.target-details-dialog dd { margin: 0; color: #eafff8; text-align: right; }
 

@@ -7,6 +7,7 @@ import json
 import math
 import random
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 from sqlalchemy import delete, func, select, update
 
@@ -14,6 +15,7 @@ from .config import settings
 from .db import session_factory
 from .inventory import expire_jettisoned_items
 from .market import expire_market_listings
+from .minerals import generate_assay, load_mineral_catalog, resource_zones, zone_for_position
 from .models import (
     Asteroid,
     AsteroidField,
@@ -24,9 +26,12 @@ from .models import (
     ManufacturingJobInput,
     ManufacturingService,
     MinedOreLot,
+    MineralDefinition,
     NpcProfile,
     NpcRuntime,
     Pilot,
+    PilotDiscovery,
+    ResourceCellOverride,
     RefineryJob,
     RefineryService,
     ShipState,
@@ -36,22 +41,43 @@ from .npc import NpcController, NpcMotion, ensure_miner_equipment, run_economic_
 from .redis import publish_event, remove_system_presence, set_system_presence
 
 SYSTEM_ID = "kepler"
-KEPLER_STATION_POSITION = (3_000_000_000.0, 480.0, -50_000.0)
+KEPLER_STATION_POSITION = (-2_600_000_000.0, 480.0, -4_500_050_000.0)
 SYSTEM_MAP_CELL_SIZE_METERS = 100_000_000.0
-SYSTEM_POINTS_OF_INTEREST = (
-    ("PRIMARY STAR", (0.0, 0.0, 0.0)),
-    ("STARTER WORLD", (3_000_000_000.0, 0.0, 0.0)),
-    ("KEPLER STATION", KEPLER_STATION_POSITION),
+KEPLER_PLANET_POINTS = (
+    ("LUNARA", (-2_600_000_000.0, 0.0, -4_500_000_000.0)),
+    ("CINDER", (420_000_000.0, 0.0, 160_000_000.0)),
+    ("MERIDIAN", (1_000_000_000.0, 0.0, -3_900_000_000.0)),
+    ("VERDANCE", (-2_000_000_000.0, 0.0, 4_600_000_000.0)),
+    ("CALYX", (-600_000_000.0, 0.0, -2_300_000_000.0)),
+    ("PELAGOS", (-3_900_000_000.0, 0.0, 2_900_000_000.0)),
+    ("EMBERFALL", (-4_500_000_000.0, 0.0, -500_000_000.0)),
+    ("NACRE", (2_220_000_000.0, 0.0, 1_370_000_000.0)),
+    ("HELIOS", (2_510_000_000.0, 0.0, -1_550_000_000.0)),
+    ("UMBRA", (3_100_000_000.0, 0.0, 2_300_000_000.0)),
+    ("KESTREL", (-2_860_000_000.0, 0.0, 620_000_000.0)),
+    ("AURORA", (-2_530_000_000.0, 0.0, -1_480_000_000.0)),
+    ("SILICA", (-1_820_000_000.0, 0.0, 1_880_000_000.0)),
+    ("NOCTURNE", (3_500_000_000.0, 0.0, 4_700_000_000.0)),
 )
+KEPLER_STATION_POINTS = (
+    ("KEPLER STATION", KEPLER_STATION_POSITION),
+    ("CINDER GATE", (420_000_000.0, 480.0, 159_950_000.0)),
+    ("MERIDIAN EXCHANGE", (1_000_000_000.0, 480.0, -3_900_050_000.0)),
+    ("VERDANCE HAVEN", (-2_000_000_000.0, 480.0, 4_599_950_000.0)),
+    ("PELAGOS ANCHORAGE", (-3_900_000_000.0, 480.0, 2_899_950_000.0)),
+    ("EMBERFALL FORGE", (-4_500_000_000.0, 480.0, -500_050_000.0)),
+    ("NACRE RELAY", (2_220_000_000.0, 480.0, 1_369_950_000.0)),
+    ("HELIOS CROWN", (2_510_000_000.0, 480.0, -1_550_050_000.0)),
+    ("UMBRA WATCH", (3_100_000_000.0, 480.0, 2_299_950_000.0)),
+    ("AURORA SPIRE", (-2_530_000_000.0, 480.0, -1_480_050_000.0)),
+    ("FARPOINT DEPOT", (-4_450_000_000.0, 480.0, -2_950_000_000.0)),
+    ("SOLACE ARRAY", (2_050_000_000.0, 480.0, -2_950_000_000.0)),
+    ("NORTHWIND RELAY", (-1_950_000_000.0, 480.0, 2_150_000_000.0)),
+)
+SYSTEM_POINTS_OF_INTEREST = (("PRIMARY STAR", (0.0, 0.0, 0.0)), *KEPLER_PLANET_POINTS, *KEPLER_STATION_POINTS)
 LOCAL_BELT_MINIMUM_DISTANCE_METERS = 50_000.0
 LOCAL_BELT_MAXIMUM_DISTANCE_METERS = 60_000.0
 KEPLER_STATION_LOCAL_FIELD_MINIMUM = 10
-DEFAULT_FIELD_PROFILE = {
-    "composition": "ferrous",
-    "variants": [
-        {"weight": 1, "minerals": (("iron", 55, 75), ("nickel", 15, 30))},
-    ],
-}
 
 
 def poi_field_cells(position: tuple[float, float, float]) -> tuple[tuple[int, int], ...]:
@@ -66,6 +92,28 @@ def poi_field_cells(position: tuple[float, float, float]) -> tuple[tuple[int, in
     )
 
 
+def asteroid_field_cell(position_x: float, position_z: float) -> tuple[int, int]:
+    """Return the 100,000 km map cell that contains a field center."""
+    return (
+        math.floor(position_x / SYSTEM_MAP_CELL_SIZE_METERS),
+        math.floor(position_z / SYSTEM_MAP_CELL_SIZE_METERS),
+    )
+
+
+def eligible_asteroid_field_cells(system_radius: float | None = None) -> tuple[tuple[int, int], ...]:
+    """Return every 100,000 km cell whose center is inside the Kepler system radius."""
+    radius = settings.system_radius_meters if system_radius is None else system_radius
+    outer_cell = math.ceil(radius / SYSTEM_MAP_CELL_SIZE_METERS)
+    cells = []
+    for cell_x in range(-outer_cell, outer_cell):
+        for cell_z in range(-outer_cell, outer_cell):
+            center_x = (cell_x + 0.5) * SYSTEM_MAP_CELL_SIZE_METERS
+            center_z = (cell_z + 0.5) * SYSTEM_MAP_CELL_SIZE_METERS
+            if math.hypot(center_x, center_z) <= radius:
+                cells.append((cell_x, cell_z))
+    return tuple(cells)
+
+
 def random_poi_field_position(generator: random.Random) -> tuple[float, float, float]:
     """Choose a field from cells bordering a fixed Kepler point of interest."""
     _, poi_position = generator.choice(SYSTEM_POINTS_OF_INTEREST)
@@ -74,6 +122,17 @@ def random_poi_field_position(generator: random.Random) -> tuple[float, float, f
         generator.uniform(cell_x * SYSTEM_MAP_CELL_SIZE_METERS, (cell_x + 1) * SYSTEM_MAP_CELL_SIZE_METERS),
         poi_position[1] + generator.uniform(-50_000, 50_000),
         generator.uniform(cell_z * SYSTEM_MAP_CELL_SIZE_METERS, (cell_z + 1) * SYSTEM_MAP_CELL_SIZE_METERS),
+    )
+
+
+def random_cell_field_position(
+    cell: tuple[int, int], generator: random.Random
+) -> tuple[float, float, float]:
+    """Choose a field position inside one eligible 100,000 km cell."""
+    return (
+        generator.uniform(cell[0] * SYSTEM_MAP_CELL_SIZE_METERS, (cell[0] + 1) * SYSTEM_MAP_CELL_SIZE_METERS),
+        KEPLER_STATION_POSITION[1] + generator.uniform(-50_000, 50_000),
+        generator.uniform(cell[1] * SYSTEM_MAP_CELL_SIZE_METERS, (cell[1] + 1) * SYSTEM_MAP_CELL_SIZE_METERS),
     )
 
 
@@ -92,61 +151,41 @@ def random_local_belt_position(
     )
 
 
-def mineral_assay_for_profile(profile: dict[str, object], spawn_seed: int) -> str:
-    """Create a normalized immutable mineral assay from a durable spawn seed."""
-    generator = random.Random(spawn_seed)
-    variants = profile.get("variants", [])
-    if not isinstance(variants, list) or not variants:
-        return "[]"
-    weights = [
-        max(0, float(variant.get("weight", 0))) for variant in variants if isinstance(variant, dict)
-    ]
-    valid_variants = [variant for variant in variants if isinstance(variant, dict)]
-    if not valid_variants or not any(weights):
-        return "[]"
-    variant = generator.choices(valid_variants, weights=weights, k=1)[0]
-    minerals = variant.get("minerals", [])
-    if not isinstance(minerals, (list, tuple)):
-        return "[]"
-    rolled = [
-        (str(entry[0]), generator.uniform(float(entry[1]), float(entry[2])))
-        for entry in minerals
-        if isinstance(entry, (list, tuple)) and len(entry) == 3
-    ]
-    total = sum(value for _, value in rolled)
-    if total <= 0:
-        return "[]"
-    filtered = [
-        (definition_id, value) for definition_id, value in rolled if value / total * 100 >= 0.1
-    ]
-    filtered_total = sum(value for _, value in filtered)
-    if filtered_total <= 0:
-        return "[]"
-    return json.dumps(
-        [
-            {
-                "definition_id": definition_id,
-                "definition_version": 1,
-                "percentage": round(value / filtered_total * 100, 3),
-            }
-            for definition_id, value in filtered
-        ],
-        separators=(",", ":"),
-    )
-
-
 async def replenish_asteroid_fields(now: datetime | None = None) -> int:
-    """Retire exhausted fields and create finite random fields up to the system limit."""
+    """Expire fields and fill eligible map cells without exceeding their density cap."""
     now = now or datetime.now(UTC)
     created = 0
     async with session_factory.begin() as session:
         await expire_jettisoned_items(session, now)
         await expire_market_listings(session, now)
+        if not settings.asteroid_spawning_enabled:
+            return 0
         system = await session.scalar(
             select(SolarSystem).where(SolarSystem.system_key == SYSTEM_ID)
         )
         if system is None:
             return 0
+        catalog = load_mineral_catalog()
+        overrides = {
+            (override.cell_x, override.cell_z): override.zone_class
+            for override in await session.scalars(
+                select(ResourceCellOverride).where(ResourceCellOverride.system_id == system.id)
+            )
+        }
+        zones = resource_zones(
+            catalog, system.radius_meters, KEPLER_STATION_POSITION[0], KEPLER_STATION_POSITION[2],
+            cell_class_overrides=overrides,
+        )
+        definitions = list(await session.scalars(
+            select(MineralDefinition).where(MineralDefinition.active.is_(True))
+            .order_by(MineralDefinition.version)
+        ))
+        versions = {
+            definition.definition_id: definition.version for definition in definitions
+            if definition.definition_id in catalog.weights(1)
+        }
+        if set(versions) != set(catalog.weights(1)):
+            raise ValueError("Spawning requires all configured mineral definitions to be active")
         fields = list(
             await session.scalars(
                 select(AsteroidField)
@@ -157,8 +196,14 @@ async def replenish_asteroid_fields(now: datetime | None = None) -> int:
                 .with_for_update(skip_locked=True)
             )
         )
-        active_profiles = []
-        local_station_fields = 0
+        expired_field_ids = [
+            field.id for field in fields
+            if field.expires_at is not None and field.expires_at <= now
+        ]
+        if expired_field_ids:
+            await _remove_asteroid_fields(session, expired_field_ids)
+        fields = [field for field in fields if field.id not in expired_field_ids]
+        exhausted_field_ids = []
         for field in fields:
             has_mineable_asteroid = await session.scalar(
                 select(Asteroid.id).where(
@@ -168,15 +213,11 @@ async def replenish_asteroid_fields(now: datetime | None = None) -> int:
                 )
             )
             if has_mineable_asteroid is None:
-                field.active = False
-                field.next_spawn_at = None
+                exhausted_field_ids.append(field.id)
                 continue
-            active_profiles.append(json.loads(field.spawn_profile))
-            station_distance = math.dist(
-                (field.position_x, field.position_y, field.position_z), KEPLER_STATION_POSITION
-            )
-            if LOCAL_BELT_MINIMUM_DISTANCE_METERS <= station_distance <= LOCAL_BELT_MAXIMUM_DISTANCE_METERS:
-                local_station_fields += 1
+        if exhausted_field_ids:
+            await _remove_asteroid_fields(session, exhausted_field_ids)
+        fields = [field for field in fields if field.id not in exhausted_field_ids]
 
         async def create_field(
             field_key: str,
@@ -196,6 +237,7 @@ async def replenish_asteroid_fields(now: datetime | None = None) -> int:
             field.spawn_profile = json.dumps(profile, sort_keys=True)
             field.active = True
             field.next_spawn_at = None
+            field.expires_at = now + timedelta(seconds=settings.asteroid_field_lifetime_seconds)
             if field.id is None:
                 await session.flush()
             asteroid_count = min(
@@ -209,6 +251,7 @@ async def replenish_asteroid_fields(now: datetime | None = None) -> int:
                 asteroid_distance = asteroid_generator.uniform(800, 6_000)
                 asteroid_radius = asteroid_generator.uniform(18, 95)
                 volume = round(asteroid_radius * asteroid_generator.uniform(1.8, 3.2), 2)
+                assay = generate_assay(catalog, int(profile["zone_class"]), asteroid_seed, versions)
                 session.add(
                     Asteroid(
                         field_id=field.id,
@@ -217,71 +260,95 @@ async def replenish_asteroid_fields(now: datetime | None = None) -> int:
                         position_y=field.position_y + asteroid_generator.uniform(-900, 900),
                         position_z=field.position_z + math.sin(asteroid_angle) * asteroid_distance,
                         radius_meters=asteroid_radius,
-                        composition=str(profile.get("composition", "ferrous")),
-                        mineral_assay=mineral_assay_for_profile(profile, asteroid_seed),
+                        composition=str(assay[0]["definition_id"]),
+                        mineral_assay=json.dumps(assay, separators=(",", ":")),
                         initial_volume_cubic_meters=volume,
                         remaining_volume_cubic_meters=volume,
                     )
                 )
             return asteroid_count
 
-        for _ in range(
-            min(
-                KEPLER_STATION_LOCAL_FIELD_MINIMUM - local_station_fields,
-                settings.asteroid_system_maximum_active_fields - len(active_profiles),
-            )
-        ):
-            seed = random.randrange(2**31)
-            created += await create_field(
-                f"dynamic-{seed:08x}",
-                f"UNSURVEYED ASTEROID FIELD {seed:08X}",
-                random_local_belt_position(random.Random(seed)),
-                DEFAULT_FIELD_PROFILE,
-                seed,
-            )
-            active_profiles.append(DEFAULT_FIELD_PROFILE)
-        active_count = len(active_profiles)
-        for _ in range(max(0, settings.asteroid_system_maximum_active_fields - active_count)):
-            profile = random.choice(active_profiles) if active_profiles else DEFAULT_FIELD_PROFILE
+        cells = eligible_asteroid_field_cells(system.radius_meters)
+        fields_by_cell = {cell: 0 for cell in cells}
+        for field in fields:
+            cell = asteroid_field_cell(field.position_x, field.position_z)
+            if cell in fields_by_cell:
+                fields_by_cell[cell] += 1
+        maximum_active_fields = min(
+            settings.asteroid_system_maximum_active_fields,
+            settings.asteroid_field_cell_capacity * len(cells),
+        )
+        creation_budget = min(
+            settings.asteroid_spawn_batch_size,
+            max(0, maximum_active_fields - len(fields)),
+        )
+        for _ in range(creation_budget):
+            available_cells = [
+                cell for cell, count in fields_by_cell.items()
+                if count < settings.asteroid_field_cell_capacity
+            ]
+            if not available_cells:
+                break
+            lowest_density = min(fields_by_cell[cell] for cell in available_cells)
+            cell = random.choice([candidate for candidate in available_cells if fields_by_cell[candidate] == lowest_density])
             seed = random.randrange(2**31)
             generator = random.Random(seed)
-            position_x, position_y, position_z = random_poi_field_position(generator)
+            position = random_cell_field_position(cell, generator)
+            if math.hypot(position[0], position[2]) > system.radius_meters:
+                continue
+            zone = zone_for_position(zones, position[0], position[2])
+            profile = {"zone_class": zone.zone_class, "catalog_version": catalog.version, "zone_id": zone.zone_id}
             created += await create_field(
                 f"dynamic-{seed:08x}",
                 f"UNSURVEYED ASTEROID FIELD {seed:08X}",
-                (position_x, position_y, position_z),
+                position,
                 profile,
                 seed,
             )
+            fields_by_cell[cell] += 1
     return created
 
 
-async def reset_asteroid_fields() -> int:
-    """Remove all Kepler asteroid data and refill the configured active-field capacity."""
-    async with session_factory.begin() as session:
-        system_id = await session.scalar(
-            select(SolarSystem.id).where(SolarSystem.system_key == SYSTEM_ID)
-        )
-        if system_id is None:
-            return 0
-        field_ids = select(AsteroidField.id).where(AsteroidField.system_id == system_id)
-        asteroid_ids = select(Asteroid.id).where(Asteroid.field_id.in_(field_ids))
+async def _remove_asteroid_fields(session, field_ids: list[UUID]) -> None:
+    """Remove fields and every durable record retaining their asteroid references."""
+    if not field_ids:
+        return
+    asteroid_ids = list(
+        await session.scalars(select(Asteroid.id).where(Asteroid.field_id.in_(field_ids)))
+    )
+    if asteroid_ids:
         ore_lot_ids = select(MinedOreLot.id).where(MinedOreLot.asteroid_id.in_(asteroid_ids))
-        await session.execute(
-            delete(RefineryJob).where(RefineryJob.source_ore_lot_id.in_(ore_lot_ids))
-        )
+        await session.execute(delete(RefineryJob).where(RefineryJob.source_ore_lot_id.in_(ore_lot_ids)))
         await session.execute(delete(MinedOreLot).where(MinedOreLot.id.in_(ore_lot_ids)))
-        await session.execute(
-            delete(JettisonedItem).where(JettisonedItem.ore_asteroid_id.in_(asteroid_ids))
-        )
+        await session.execute(delete(JettisonedItem).where(JettisonedItem.ore_asteroid_id.in_(asteroid_ids)))
         await session.execute(
             update(NpcRuntime)
             .where(NpcRuntime.mining_target_asteroid_id.in_(asteroid_ids))
             .values(mining_target_asteroid_id=None)
         )
         await session.execute(delete(Asteroid).where(Asteroid.id.in_(asteroid_ids)))
-        await session.execute(delete(AsteroidField).where(AsteroidField.system_id == system_id))
-    return await replenish_asteroid_fields()
+    await session.execute(
+        delete(PilotDiscovery).where(
+            PilotDiscovery.discoverable_kind == "asteroid_field",
+            PilotDiscovery.discoverable_id.in_(field_ids),
+        )
+    )
+    await session.execute(delete(AsteroidField).where(AsteroidField.id.in_(field_ids)))
+
+
+async def reset_asteroid_fields() -> int:
+    """Remove all Kepler asteroid data; normal replenishment repopulates it gradually."""
+    async with session_factory.begin() as session:
+        system_id = await session.scalar(
+            select(SolarSystem.id).where(SolarSystem.system_key == SYSTEM_ID)
+        )
+        if system_id is None:
+            return 0
+        field_ids = list(
+            await session.scalars(select(AsteroidField.id).where(AsteroidField.system_id == system_id))
+        )
+        await _remove_asteroid_fields(session, field_ids)
+    return 0
 
 
 async def _deliver_refinery_outputs(

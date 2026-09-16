@@ -9,7 +9,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,8 +30,19 @@ from .models import (
     MinedOreLot,
     ModuleDefinition,
     PilotDiscovery,
+    PilotResourceSurvey,
+    ResourceCellOverride,
     ShipState,
     SolarSystem,
+)
+from .minerals import (
+    ZONE_CELL_SIZE_METERS,
+    ZONE_GRID_MAXIMUM_CELL,
+    ZONE_GRID_MINIMUM_CELL,
+    ResourceZone,
+    ZoneRegion,
+    load_mineral_catalog,
+    resource_zone_classes,
 )
 from .redis import publish_event, set_snapshot
 
@@ -68,12 +79,14 @@ class DiscoveryBootstrapResponse(BaseModel):
 
     system: SystemDefinitionResponse
     discovered_fields: list[DiscoveredFieldResponse]
+    resource_zones: list[ResourceZone] = Field(default_factory=list)
 
 
 class ScanResponse(BaseModel):
     """The fields newly revealed by a completed sensor ping."""
 
     newly_discovered_fields: list[DiscoveredFieldResponse]
+    resource_zones: list[ResourceZone] = Field(default_factory=list)
     power_megajoules: float
     cooldown_seconds: float
 
@@ -88,9 +101,15 @@ class AsteroidResponse(BaseModel):
     position_z: float
     radius_meters: float
     composition: str
-    mineral_assay: list[dict[str, object]]
     initial_volume_cubic_meters: float
     remaining_volume_cubic_meters: float
+
+
+class AsteroidScanResponse(BaseModel):
+    asteroid_id: UUID
+    mineral_assay: list[dict[str, object]]
+    power_megajoules: float
+    cooldown_seconds: float
 
 
 class ExtractionRequest(BaseModel):
@@ -179,6 +198,69 @@ def _field_response(
         distance_meters=distance_meters,
         scan_quality=scan_quality,
     )
+
+
+def _cells_intersecting_sensor_range(
+    position_x: float, position_z: float, sensor_range_meters: float
+) -> set[tuple[int, int]]:
+    minimum_x = max(ZONE_GRID_MINIMUM_CELL, math.floor((position_x - sensor_range_meters) / ZONE_CELL_SIZE_METERS))
+    maximum_x = min(ZONE_GRID_MAXIMUM_CELL - 1, math.floor((position_x + sensor_range_meters) / ZONE_CELL_SIZE_METERS))
+    minimum_z = max(ZONE_GRID_MINIMUM_CELL, math.floor((position_z - sensor_range_meters) / ZONE_CELL_SIZE_METERS))
+    maximum_z = min(ZONE_GRID_MAXIMUM_CELL - 1, math.floor((position_z + sensor_range_meters) / ZONE_CELL_SIZE_METERS))
+    return {
+        (cell_x, cell_z)
+        for cell_x in range(minimum_x, maximum_x + 1)
+        for cell_z in range(minimum_z, maximum_z + 1)
+        if math.dist(
+            (position_x, position_z),
+            (
+                min(max(position_x, cell_x * ZONE_CELL_SIZE_METERS), (cell_x + 1) * ZONE_CELL_SIZE_METERS),
+                min(max(position_z, cell_z * ZONE_CELL_SIZE_METERS), (cell_z + 1) * ZONE_CELL_SIZE_METERS),
+            ),
+        ) <= sensor_range_meters
+    }
+
+
+async def _surveyed_resource_zones(
+    session: AsyncSession, pilot_id: UUID, system: SolarSystem
+) -> list[ResourceZone]:
+    surveyed_cells = set(
+        (await session.execute(
+            select(PilotResourceSurvey.cell_x, PilotResourceSurvey.cell_z).where(
+                PilotResourceSurvey.pilot_id == pilot_id,
+                PilotResourceSurvey.system_id == system.id,
+            )
+        )).tuples().all()
+    )
+    if not surveyed_cells:
+        return []
+    overrides = {
+        (override.cell_x, override.cell_z): override.zone_class
+        for override in await session.scalars(
+            select(ResourceCellOverride).where(ResourceCellOverride.system_id == system.id)
+        )
+    }
+    classes = resource_zone_classes(cell_class_overrides=overrides)
+    catalog = load_mineral_catalog()
+    return [
+        ResourceZone(
+            zone_id=f"kepler-class-{zone.zone_class}",
+            zone_class=zone.zone_class,
+            display_color=zone.display_color,
+            regions=[
+                ZoneRegion(
+                    min_x=cell_x * ZONE_CELL_SIZE_METERS,
+                    max_x=(cell_x + 1) * ZONE_CELL_SIZE_METERS,
+                    min_z=cell_z * ZONE_CELL_SIZE_METERS,
+                    max_z=(cell_z + 1) * ZONE_CELL_SIZE_METERS,
+                )
+                for cell_x, cell_z in sorted(surveyed_cells)
+                if classes[cell_x, cell_z] == zone.zone_class
+            ],
+        )
+        for zone in catalog.zone_classes
+        if any(classes[cell] == zone.zone_class for cell in surveyed_cells)
+    ]
 
 
 async def _pilot_state(session: AsyncSession, pilot_id: UUID) -> ShipState:
@@ -306,6 +388,7 @@ async def discovery_bootstrap(
             object_render_radius_meters=settings.object_render_radius_meters,
         ),
         discovered_fields=fields,
+        resource_zones=await _surveyed_resource_zones(session, pilot_id, system),
     )
 
 
@@ -327,18 +410,39 @@ async def scan(
             raise HTTPException(status.HTTP_409_CONFLICT, "fit a sensor module before scanning")
         if ship_state.power_megajoules < settings.sensor_default_power_cost_megajoules:
             raise HTTPException(status.HTTP_409_CONFLICT, "insufficient power for sensor scan")
-        if ship_state.sensor_last_scan_at and now < ship_state.sensor_last_scan_at + timedelta(
+        last_scan_at = ship_state.sensor_last_scan_at
+        if last_scan_at is not None and last_scan_at.tzinfo is None:
+            last_scan_at = last_scan_at.replace(tzinfo=UTC)
+        if last_scan_at and now < last_scan_at + timedelta(
             seconds=settings.sensor_default_cooldown_seconds
         ):
             raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "sensor scan is recharging")
         discoveries = await scan_nearby_asteroid_fields(
             session, pilot_id, ship_state, sensor_range_meters, now
         )
+        surveyed_cells = _cells_intersecting_sensor_range(
+            ship_state.position_x, ship_state.position_z, sensor_range_meters
+        )
+        existing_cells = set(
+            (await session.execute(
+                select(PilotResourceSurvey.cell_x, PilotResourceSurvey.cell_z).where(
+                    PilotResourceSurvey.pilot_id == pilot_id,
+                    PilotResourceSurvey.system_id == (system := await _kepler(session)).id,
+                )
+            )).tuples().all()
+        )
+        session.add_all(
+            PilotResourceSurvey(
+                pilot_id=pilot_id, system_id=system.id, cell_x=cell_x, cell_z=cell_z
+            )
+            for cell_x, cell_z in surveyed_cells - existing_cells
+        )
     return ScanResponse(
             newly_discovered_fields=[
                 _field_response(field, distance_meters, quality)
                 for field, distance_meters, quality in discoveries
             ],
+        resource_zones=await _surveyed_resource_zones(session, pilot_id, system),
         power_megajoules=ship_state.power_megajoules,
         cooldown_seconds=settings.sensor_default_cooldown_seconds,
     )
@@ -393,12 +497,65 @@ async def local_asteroids(
                 position_z=asteroid.position_z,
                 radius_meters=asteroid.radius_meters,
                 composition=asteroid.composition,
-                mineral_assay=json.loads(asteroid.mineral_assay),
                 initial_volume_cubic_meters=asteroid.initial_volume_cubic_meters,
                 remaining_volume_cubic_meters=asteroid.remaining_volume_cubic_meters,
             )
         )
     return asteroids
+
+
+@router.post("/asteroids/{asteroid_id}/scan", response_model=AsteroidScanResponse)
+async def scan_asteroid(
+    asteroid_id: UUID,
+    session: SessionDependency,
+    authorization: Annotated[str | None, Header()] = None,
+) -> AsteroidScanResponse:
+    """Return exact composition only to a nearby, equipped, authenticated pilot."""
+    pilot_id = _pilot_id_from_authorization(authorization)
+    now = datetime.now(UTC)
+    async with session.begin():
+        ship_state = await _pilot_state(session, pilot_id)
+        if ship_state.docked_station_name:
+            raise HTTPException(status.HTTP_409_CONFLICT, "undock before using sensors")
+        asteroid = await session.scalar(
+            select(Asteroid).where(Asteroid.id == asteroid_id).with_for_update()
+        )
+        if asteroid is None or asteroid.depleted_at or asteroid.remaining_volume_cubic_meters < 1:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "asteroid is unavailable")
+        field = await session.get(AsteroidField, asteroid.field_id)
+        discovery = await session.scalar(select(PilotDiscovery.id).where(
+            PilotDiscovery.pilot_id == pilot_id,
+            PilotDiscovery.discoverable_kind == "asteroid_field",
+            PilotDiscovery.discoverable_id == asteroid.field_id,
+        ))
+        if field is None or not field.active or discovery is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "asteroid is unavailable")
+        statistics = await active_ship_statistics(session, pilot_id)
+        sensor_range = statistics.get("sensor_range_meters", 0.0)
+        if sensor_range <= 0:
+            raise HTTPException(status.HTTP_409_CONFLICT, "fit a sensor module before scanning")
+        distance = math.dist(
+            (ship_state.position_x, ship_state.position_y, ship_state.position_z),
+            (asteroid.position_x, asteroid.position_y, asteroid.position_z),
+        )
+        if distance > sensor_range:
+            raise HTTPException(status.HTTP_409_CONFLICT, "asteroid is out of sensor range")
+        last_scan = ship_state.sensor_last_scan_at
+        if last_scan is not None:
+            last_scan = last_scan.replace(tzinfo=UTC) if last_scan.tzinfo is None else last_scan
+            if now < last_scan + timedelta(seconds=settings.sensor_default_cooldown_seconds):
+                raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "sensor scan is recharging")
+        if ship_state.power_megajoules < settings.sensor_default_power_cost_megajoules:
+            raise HTTPException(status.HTTP_409_CONFLICT, "insufficient power for sensor scan")
+        ship_state.power_megajoules -= settings.sensor_default_power_cost_megajoules
+        ship_state.sensor_last_scan_at = now
+        result = AsteroidScanResponse(
+            asteroid_id=asteroid.id,
+            mineral_assay=json.loads(asteroid.mineral_assay),
+            power_megajoules=ship_state.power_megajoules,
+            cooldown_seconds=settings.sensor_default_cooldown_seconds,
+        )
+    return result
 
 
 @router.get("/ore", response_model=list[MinedOreLotResponse])
@@ -530,7 +687,6 @@ async def extract_asteroid(
             position_z=asteroid.position_z,
             radius_meters=asteroid.radius_meters,
             composition=asteroid.composition,
-            mineral_assay=json.loads(asteroid.mineral_assay),
             initial_volume_cubic_meters=asteroid.initial_volume_cubic_meters,
             remaining_volume_cubic_meters=asteroid.remaining_volume_cubic_meters,
         ).model_dump(mode="json")

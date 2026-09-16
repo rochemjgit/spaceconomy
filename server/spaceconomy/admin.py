@@ -14,14 +14,24 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
-from sqlalchemy import delete, func, select, update
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import settings
 from .db import get_session
 from .inventory import _ensure_containers
+from .minerals import (
+    ZONE_CELL_SIZE_METERS,
+    ZONE_GRID_MAXIMUM_CELL,
+    ZONE_GRID_MINIMUM_CELL,
+    ResourceZone,
+    load_mineral_catalog,
+    resource_zone_classes,
+    resource_zones,
+)
 from .redis import get_system_presence
+from .seed import KEPLER_STATION_UUID, STATION_DEFINITIONS
 from .models import (
     Account,
     AccountActivation,
@@ -31,12 +41,19 @@ from .models import (
     InventoryItem,
     MarketListing,
     MarketBuyOrder,
+    ManufacturingRecipe,
+    ManufacturingRecipeInput,
     MinedOreLot,
+    MineralDefinition,
+    ModuleDefinition,
+    ModuleEffect,
     NpcProfile,
     NpcRuntime,
     Pilot,
     PilotDiscovery,
     PilotWallet,
+    HullDefinition,
+    ResourceCellOverride,
     RefreshSession,
     RefineryJob,
     RefineryService,
@@ -44,12 +61,13 @@ from .models import (
     ShipLocation,
     ShipState,
     SolarSystem,
+    StationService,
     WalletTransaction,
 )
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 SessionDependency = Annotated[AsyncSession, Depends(get_session)]
-KEPLER_STATION_POSITION = (3_000_000_000, 480, -50_000)
+KEPLER_STATION_POSITION = (-2_600_000_000, 480, -4_500_050_000)
 SYSTEM_ID = "kepler"
 
 
@@ -67,9 +85,12 @@ AdminDependency = Annotated[None, Depends(require_admin_access)]
 class RuntimeConfiguration(BaseModel):
     simulation_tick_hz: int = Field(ge=1, le=60)
     snapshot_tick_hz: int = Field(ge=1, le=60)
+    asteroid_spawning_enabled: bool
     asteroid_spawn_interval_seconds: int = Field(ge=10, le=3_600)
     asteroid_field_maximum_active_asteroids: int = Field(1, le=500)
-    asteroid_system_maximum_active_fields: int = Field(1, le=100)
+    asteroid_system_maximum_active_fields: int = Field(1, le=500)
+    asteroid_field_cell_capacity: int = Field(1, le=100)
+    asteroid_field_lifetime_seconds: int = Field(60, le=604_800)
     refinery_tick_seconds: float = Field(gt=0, le=60)
     llm_provider: Literal["ollama", "azure_foundry"]
     llm_model: str
@@ -80,13 +101,57 @@ class RuntimeConfiguration(BaseModel):
 class RuntimeConfigurationUpdate(BaseModel):
     simulation_tick_hz: int | None = Field(default=None, ge=1, le=60)
     snapshot_tick_hz: int | None = Field(default=None, ge=1, le=60)
+    asteroid_spawning_enabled: bool | None = None
     asteroid_spawn_interval_seconds: int | None = Field(default=None, ge=10, le=3_600)
     asteroid_field_maximum_active_asteroids: int | None = Field(default=None, ge=1, le=500)
-    asteroid_system_maximum_active_fields: int | None = Field(default=None, ge=1, le=100)
+    asteroid_system_maximum_active_fields: int | None = Field(default=None, ge=1, le=500)
+    asteroid_field_cell_capacity: int | None = Field(default=None, ge=1, le=100)
+    asteroid_field_lifetime_seconds: int | None = Field(default=None, ge=60, le=604_800)
     refinery_tick_seconds: float | None = Field(default=None, gt=0, le=60)
     llm_provider: Literal["ollama", "azure_foundry"] | None = None
     ollama_model: str | None = Field(default=None, min_length=1, max_length=128)
     ollama_timeout_seconds: float | None = Field(default=None, gt=0, le=300)
+
+
+class AdminMineralDefinition(BaseModel):
+    id: UUID
+    definition_id: str
+    version: int
+    display_name: str
+    classification: str
+    rarity_tier: str
+    active: bool
+    industrial_role: str
+    visual_family: str
+    display_color: str
+    in_spawn_catalog: bool
+
+
+class AdminMineralDefinitionUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    display_name: str | None = Field(default=None, min_length=1, max_length=128)
+    classification: str | None = Field(default=None, min_length=1, max_length=16)
+    rarity_tier: str | None = Field(default=None, min_length=1, max_length=16)
+    active: bool | None = None
+    industrial_role: str | None = Field(default=None, min_length=1, max_length=256)
+    visual_family: Literal["metallic", "crystalline", "rocky", "icy"] | None = None
+    display_color: str | None = Field(default=None, pattern=r"^#[0-9a-fA-F]{6}$")
+
+
+class ResourceCellResponse(BaseModel):
+    cell_x: int
+    cell_z: int
+    zone_class: int = Field(ge=1, le=10)
+    overridden: bool
+    min_x: float
+    max_x: float
+    min_z: float
+    max_z: float
+
+
+class ResourceCellUpdate(BaseModel):
+    zone_class: int = Field(ge=1, le=10)
 
 
 class AdminRefineryJob(BaseModel):
@@ -107,6 +172,56 @@ class AdminRefineryJob(BaseModel):
 
 class AdminRefineryResponse(BaseModel):
     jobs: list[AdminRefineryJob]
+
+
+class AdminItemMaterial(BaseModel):
+    definition_id: str
+    definition_version: int
+    quantity: int
+
+
+class AdminItem(BaseModel):
+    id: str
+    display_name: str
+    category: str
+    subcategory: str
+    version: int
+    active: bool
+    image_kind: str
+    stats: dict[str, float | int | str]
+    materials: list[AdminItemMaterial]
+
+
+class AdminStationService(BaseModel):
+    id: UUID
+    service_key: str
+    display_name: str
+    available: bool
+
+
+class AdminRefineryConfiguration(BaseModel):
+    id: UUID
+    first_pass_efficiency: float
+    second_pass_efficiency: float
+
+
+class AdminStationServices(BaseModel):
+    station_name: str
+    services: list[AdminStationService]
+    refinery: AdminRefineryConfiguration | None
+
+
+class AdminStations(BaseModel):
+    stations: list[AdminStationServices]
+
+
+class AdminStationServiceUpdate(BaseModel):
+    available: bool
+
+
+class AdminRefineryConfigurationUpdate(BaseModel):
+    first_pass_efficiency: float = Field(ge=0, le=1)
+    second_pass_efficiency: float = Field(ge=0, le=1)
 
 
 class NpcResponse(BaseModel):
@@ -183,6 +298,7 @@ class SystemStateResponse(BaseModel):
     players: list[PlayerMapPresence]
     asteroid_fields: list[AsteroidFieldMapPresence]
     system_radius_meters: float
+    resource_zones: list[ResourceZone] = Field(default_factory=list)
 
 
 class NpcMarketOrder(BaseModel):
@@ -286,9 +402,12 @@ def _runtime_configuration() -> RuntimeConfiguration:
     return RuntimeConfiguration(
         simulation_tick_hz=settings.simulation_tick_hz,
         snapshot_tick_hz=settings.snapshot_tick_hz,
+        asteroid_spawning_enabled=settings.asteroid_spawning_enabled,
         asteroid_spawn_interval_seconds=settings.asteroid_spawn_interval_seconds,
         asteroid_field_maximum_active_asteroids=settings.asteroid_field_maximum_active_asteroids,
         asteroid_system_maximum_active_fields=settings.asteroid_system_maximum_active_fields,
+        asteroid_field_cell_capacity=settings.asteroid_field_cell_capacity,
+        asteroid_field_lifetime_seconds=settings.asteroid_field_lifetime_seconds,
         refinery_tick_seconds=settings.refinery_tick_seconds,
         llm_provider=settings.llm_provider,
         llm_model=(
@@ -557,6 +676,281 @@ async def update_configuration(
     return _runtime_configuration()
 
 
+def _station_service_response(service: StationService) -> AdminStationService:
+    return AdminStationService.model_validate(service, from_attributes=True)
+
+
+@router.get("/stations/services", response_model=AdminStations)
+async def get_station_services(
+    session: SessionDependency, _: AdminDependency
+) -> AdminStations:
+    services = list(await session.scalars(
+        select(StationService).order_by(StationService.station_id, StationService.service_key)
+    ))
+    services_by_station = {}
+    for service in services:
+        services_by_station.setdefault(service.station_id, []).append(_station_service_response(service))
+    refineries = list(await session.scalars(
+        select(RefineryService).where(RefineryService.service_key == "starter_refinery")
+    ))
+    refineries_by_station = {refinery.station_id: refinery for refinery in refineries}
+    return AdminStations(stations=[
+        AdminStationServices(
+            station_name=station_name,
+            services=services_by_station.get(station_id, []),
+            refinery=AdminRefineryConfiguration.model_validate(
+                refineries_by_station[station_id], from_attributes=True
+            ) if station_id in refineries_by_station else None,
+        )
+        for _, station_name, station_id in STATION_DEFINITIONS
+    ])
+
+
+@router.get("/stations/kepler/services", response_model=AdminStationServices)
+async def get_kepler_station_services(
+    session: SessionDependency, _: AdminDependency
+) -> AdminStationServices:
+    services = await session.scalars(
+        select(StationService)
+        .where(StationService.station_id == KEPLER_STATION_UUID)
+        .order_by(StationService.service_key)
+    )
+    return AdminStationServices(
+        station_name="KEPLER STATION",
+        services=[_station_service_response(service) for service in services],
+        refinery=None,
+    )
+
+
+@router.patch(
+    "/stations/kepler/services/{service_id}", response_model=AdminStationService
+)
+async def update_kepler_station_service(
+    service_id: UUID,
+    payload: AdminStationServiceUpdate,
+    session: SessionDependency,
+    _: AdminDependency,
+) -> AdminStationService:
+    async with session.begin():
+        service = await session.get(StationService, service_id, with_for_update=True)
+        if service is None or service.station_id != KEPLER_STATION_UUID:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "station service was not found")
+        service.available = payload.available
+        return _station_service_response(service)
+
+
+@router.patch("/stations/services/{service_id}", response_model=AdminStationService)
+async def update_station_service(
+    service_id: UUID,
+    payload: AdminStationServiceUpdate,
+    session: SessionDependency,
+    _: AdminDependency,
+) -> AdminStationService:
+    async with session.begin():
+        service = await session.get(StationService, service_id, with_for_update=True)
+        if service is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "station service was not found")
+        service.available = payload.available
+        return _station_service_response(service)
+
+
+@router.patch("/stations/refineries/{refinery_id}", response_model=AdminRefineryConfiguration)
+async def update_station_refinery(
+    refinery_id: UUID,
+    payload: AdminRefineryConfigurationUpdate,
+    session: SessionDependency,
+    _: AdminDependency,
+) -> AdminRefineryConfiguration:
+    async with session.begin():
+        refinery = await session.get(RefineryService, refinery_id, with_for_update=True)
+        if refinery is None or refinery.service_key != "starter_refinery":
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "station refinery was not found")
+        refinery.first_pass_efficiency = payload.first_pass_efficiency
+        refinery.second_pass_efficiency = payload.second_pass_efficiency
+        return AdminRefineryConfiguration.model_validate(refinery, from_attributes=True)
+
+
+def _mineral_definition_response(definition: MineralDefinition) -> AdminMineralDefinition:
+    return AdminMineralDefinition(
+        id=definition.id,
+        definition_id=definition.definition_id,
+        version=definition.version,
+        display_name=definition.display_name,
+        classification=definition.classification,
+        rarity_tier=definition.rarity_tier,
+        active=definition.active,
+        industrial_role=definition.industrial_role,
+        visual_family=definition.visual_family,
+        display_color=definition.display_color,
+        in_spawn_catalog=definition.definition_id in load_mineral_catalog().weights(1),
+    )
+
+
+async def _resource_cell_overrides(
+    session: AsyncSession, system_id: UUID
+) -> dict[tuple[int, int], int]:
+    rows = await session.scalars(
+        select(ResourceCellOverride).where(ResourceCellOverride.system_id == system_id)
+    )
+    return {(row.cell_x, row.cell_z): row.zone_class for row in rows}
+
+
+def _resource_cell_response(
+    cell_x: int, cell_z: int, zone_class: int, overridden: bool
+) -> ResourceCellResponse:
+    return ResourceCellResponse(
+        cell_x=cell_x,
+        cell_z=cell_z,
+        zone_class=zone_class,
+        overridden=overridden,
+        min_x=cell_x * ZONE_CELL_SIZE_METERS,
+        max_x=(cell_x + 1) * ZONE_CELL_SIZE_METERS,
+        min_z=cell_z * ZONE_CELL_SIZE_METERS,
+        max_z=(cell_z + 1) * ZONE_CELL_SIZE_METERS,
+    )
+
+
+async def _kepler_resource_cell(
+    session: AsyncSession, cell_x: int, cell_z: int
+) -> tuple[SolarSystem, dict[tuple[int, int], int], dict[tuple[int, int], int]]:
+    if not (
+        ZONE_GRID_MINIMUM_CELL <= cell_x < ZONE_GRID_MAXIMUM_CELL
+        and ZONE_GRID_MINIMUM_CELL <= cell_z < ZONE_GRID_MAXIMUM_CELL
+    ):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "resource cell is outside the Kepler map")
+    system = await session.scalar(select(SolarSystem).where(SolarSystem.system_key == SYSTEM_ID))
+    if system is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Kepler system is not seeded")
+    overrides = await _resource_cell_overrides(session, system.id)
+    return system, resource_zone_classes(), overrides
+
+
+@router.get("/resource-cells/{cell_x}/{cell_z}", response_model=ResourceCellResponse)
+async def get_resource_cell(
+    cell_x: int, cell_z: int, session: SessionDependency, _: AdminDependency
+) -> ResourceCellResponse:
+    _, base_classes, overrides = await _kepler_resource_cell(session, cell_x, cell_z)
+    return _resource_cell_response(
+        cell_x, cell_z, overrides.get((cell_x, cell_z), base_classes[cell_x, cell_z]), (cell_x, cell_z) in overrides
+    )
+
+
+@router.patch("/resource-cells/{cell_x}/{cell_z}", response_model=ResourceCellResponse)
+async def update_resource_cell(
+    cell_x: int, cell_z: int, payload: ResourceCellUpdate,
+    session: SessionDependency, _: AdminDependency,
+) -> ResourceCellResponse:
+    async with session.begin():
+        system, base_classes, overrides = await _kepler_resource_cell(session, cell_x, cell_z)
+        effective_classes = resource_zone_classes(
+            cell_class_overrides={**overrides, (cell_x, cell_z): payload.zone_class}
+        )
+        for neighbor in ((cell_x - 1, cell_z), (cell_x + 1, cell_z), (cell_x, cell_z - 1), (cell_x, cell_z + 1)):
+            if neighbor in effective_classes and abs(payload.zone_class - effective_classes[neighbor]) > 1:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    "resource class must be within one class of each adjacent cell",
+                )
+        existing = await session.scalar(
+            select(ResourceCellOverride)
+            .where(
+                ResourceCellOverride.system_id == system.id,
+                ResourceCellOverride.cell_x == cell_x,
+                ResourceCellOverride.cell_z == cell_z,
+            )
+            .with_for_update()
+        )
+        if payload.zone_class == base_classes[cell_x, cell_z]:
+            if existing is not None:
+                await session.delete(existing)
+            overridden = False
+        elif existing is None:
+            session.add(ResourceCellOverride(
+                system_id=system.id, cell_x=cell_x, cell_z=cell_z, zone_class=payload.zone_class
+            ))
+            overridden = True
+        else:
+            existing.zone_class = payload.zone_class
+            overridden = True
+        return _resource_cell_response(cell_x, cell_z, payload.zone_class, overridden)
+
+
+@router.get("/minerals", response_model=list[AdminMineralDefinition])
+async def list_mineral_definitions(
+    session: SessionDependency, _: AdminDependency
+) -> list[AdminMineralDefinition]:
+    definitions = await session.scalars(
+        select(MineralDefinition).order_by(MineralDefinition.definition_id, MineralDefinition.version)
+    )
+    return [_mineral_definition_response(definition) for definition in definitions]
+
+
+@router.get("/items", response_model=list[AdminItem])
+async def list_items(session: SessionDependency, _: AdminDependency) -> list[AdminItem]:
+    minerals = list(await session.scalars(select(MineralDefinition)))
+    hulls = list(await session.scalars(select(HullDefinition)))
+    modules = list(await session.scalars(select(ModuleDefinition)))
+    effects = list(await session.scalars(select(ModuleEffect)))
+    recipes = list(await session.scalars(select(ManufacturingRecipe)))
+    recipe_inputs = list(await session.scalars(
+        select(ManufacturingRecipeInput).order_by(ManufacturingRecipeInput.input_index)
+    ))
+    effects_by_module: dict[UUID, list[ModuleEffect]] = {}
+    for effect in effects:
+        effects_by_module.setdefault(effect.module_definition_id, []).append(effect)
+    materials_by_recipe: dict[UUID, list[AdminItemMaterial]] = {}
+    for item in recipe_inputs:
+        materials_by_recipe.setdefault(item.manufacturing_recipe_id, []).append(
+            AdminItemMaterial(definition_id=item.definition_id, definition_version=item.definition_version, quantity=item.quantity)
+        )
+    materials_by_module = {
+        recipe.output_module_definition_id: materials_by_recipe.get(recipe.id, [])
+        for recipe in recipes
+    }
+    return [
+        *[AdminItem(id=definition.definition_id, display_name=definition.display_name, category="Materials", subcategory=definition.classification.title(), version=definition.version, active=definition.active, image_kind=definition.visual_family, stats={"rarity": definition.rarity_tier, "industrial role": definition.industrial_role}, materials=[]) for definition in minerals],
+        *[AdminItem(id=definition.definition_id, display_name=definition.display_name, category="Ships", subcategory="Hull", version=definition.version, active=definition.active, image_kind="ship", stats={**json.loads(definition.base_statistics), "hardpoints": definition.universal_hardpoint_count, "core slots": definition.core_system_slot_count}, materials=[]) for definition in hulls],
+        *[AdminItem(id=definition.definition_id, display_name=definition.display_name, category="Modules", subcategory=definition.family.replace("_", " ").title(), version=definition.version, active=definition.active, image_kind="module", stats={"fit location": definition.fit_location, "CPU demand": definition.cpu_demand, "powergrid demand": definition.powergrid_demand, "durability": definition.durability_maximum, "mass kg": definition.mass_kg, "volume m3": definition.volume_cubic_meters, "effective range m": definition.effective_range_meters, **{f"{effect.statistic} ({effect.operation.lower()})": effect.value for effect in effects_by_module.get(definition.id, [])}}, materials=materials_by_module.get(definition.id, [])) for definition in modules],
+    ]
+
+
+@router.get("/resource-zones")
+async def list_resource_zones(session: SessionDependency, _: AdminDependency) -> dict:
+    system = await session.scalar(select(SolarSystem).where(SolarSystem.system_key == SYSTEM_ID))
+    if system is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Kepler system is not seeded")
+    catalog = load_mineral_catalog()
+    zones = resource_zones(
+        catalog, system.radius_meters, KEPLER_STATION_POSITION[0], KEPLER_STATION_POSITION[2],
+        cell_class_overrides=await _resource_cell_overrides(session, system.id),
+    )
+    return {
+        "catalog_version": catalog.version,
+        "spawning_enabled": settings.asteroid_spawning_enabled,
+        "zones": [
+            {**zone.model_dump(), "mineral_weights": catalog.weights(zone.zone_class),
+             "component_weights": catalog.zone(zone.zone_class).component_weights}
+            for zone in zones
+        ],
+    }
+
+
+@router.patch("/minerals/{mineral_id}", response_model=AdminMineralDefinition)
+async def update_mineral_definition(
+    mineral_id: UUID,
+    payload: AdminMineralDefinitionUpdate,
+    session: SessionDependency,
+    _: AdminDependency,
+) -> AdminMineralDefinition:
+    async with session.begin():
+        definition = await session.get(MineralDefinition, mineral_id, with_for_update=True)
+        if definition is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "mineral definition was not found")
+        for field, value in payload.model_dump(exclude_none=True).items():
+            setattr(definition, field, value)
+        return _mineral_definition_response(definition)
+
+
 @router.get("/npcs", response_model=list[NpcResponse])
 async def list_npcs(session: SessionDependency, _: AdminDependency) -> list[NpcResponse]:
     async with session.begin():
@@ -580,10 +974,8 @@ async def list_npc_states(session: SessionDependency, _: AdminDependency) -> lis
 async def get_system_state(session: SessionDependency, _: AdminDependency) -> SystemStateResponse:
     live_presence = await get_system_presence(SYSTEM_ID)
     async with session.begin():
-        system_radius_meters = await session.scalar(
-            select(SolarSystem.radius_meters).where(SolarSystem.system_key == SYSTEM_ID)
-        )
-        if system_radius_meters is None:
+        system = await session.scalar(select(SolarSystem).where(SolarSystem.system_key == SYSTEM_ID))
+        if system is None:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Kepler system is not seeded")
         npc_rows = await session.execute(
             select(Pilot, NpcProfile, NpcRuntime, ShipState)
@@ -606,7 +998,11 @@ async def get_system_state(session: SessionDependency, _: AdminDependency) -> Sy
             .order_by(AsteroidField.display_name)
         )
         return SystemStateResponse(
-            system_radius_meters=system_radius_meters,
+            system_radius_meters=system.radius_meters,
+            resource_zones=resource_zones(
+                load_mineral_catalog(), system.radius_meters, KEPLER_STATION_POSITION[0], KEPLER_STATION_POSITION[2],
+                cell_class_overrides=await _resource_cell_overrides(session, system.id),
+            ),
             npcs=[await _npc_state_response(session, *row) for row in npc_rows.all()],
             players=[
                 PlayerMapPresence(
@@ -756,6 +1152,9 @@ async def delete_npc(
         pilot, _, _ = await _npc_row(session, pilot_id)
         account_id = pilot.account_id
         ship_ids = select(Ship.id).where(Ship.pilot_id == pilot_id)
+        await session.execute(
+            text("SELECT set_config('spaceconomy.allow_wallet_transaction_delete', 'on', true)")
+        )
         await session.execute(
             update(WalletTransaction)
             .where(WalletTransaction.counterparty_pilot_id == pilot_id)

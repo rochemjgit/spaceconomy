@@ -9,9 +9,11 @@ import './station-services.css'
 import './hardpoints.css'
 import './inventory.css'
 import { Vector3 } from '@babylonjs/core'
-import { createElement, Crosshair, Eye, EyeOff, Maximize2, Minus, Plus, RefreshCw, ScanLine, X } from 'lucide'
+import { createElement, Crosshair, Eye, EyeOff, Maximize2, Minus, PanelRightClose, PanelRightOpen, Plus, RefreshCw, ScanLine, X } from 'lucide'
 import { createStationInteriorScene, createSystemScene } from './game/scene'
 import type { MiningExtractionResult, ServerAsteroid, ServerJettisonedItem } from './game/scene'
+import { resourceZoneAt, resourceZonePath, type ResourceZone as MapResourceZone } from './resource-zones'
+import { systemPois as systemPoiDefinitions } from './system-pois'
 import stationInteriorUrl from './assets/station-interior.svg'
 import refineryUrl from './assets/refinery.png'
 import rawOreIconUrl from './assets/items/raw ore.png'
@@ -26,7 +28,7 @@ if (!app) {
 }
 const appRoot = app
 
-const apiBaseUrl = 'http://127.0.0.1:8000/api/v1'
+const apiBaseUrl = '/api/v1'
 const refreshTokenStorageKey = 'spaceconomy.refresh-token'
 const rememberedEmailStorageKey = 'spaceconomy.remembered-email'
 // Remove this local sign-in shortcut before any non-development distribution.
@@ -404,9 +406,41 @@ function renderPilotSelection(
 
 function clearStoredSession() {
   sessionStorage.removeItem(refreshTokenStorageKey)
+  localStorage.removeItem(refreshTokenStorageKey)
+  localStorage.removeItem(rememberedEmailStorageKey)
 }
 
-renderAuthentication()
+async function restoreStoredSession() {
+  const refreshToken = localStorage.getItem(refreshTokenStorageKey) ?? sessionStorage.getItem(refreshTokenStorageKey)
+  if (!refreshToken) {
+    renderAuthentication()
+    return
+  }
+  const persistent = localStorage.getItem(refreshTokenStorageKey) === refreshToken
+  try {
+    const response = await fetch(`${apiBaseUrl}/auth/refresh`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    })
+    const payload = await response.json() as {
+      access_token?: string
+      pilots?: PilotSummary[]
+      refresh_token?: string
+    }
+    if (!response.ok || !payload.access_token || !payload.refresh_token || !payload.pilots) {
+      throw new Error('Stored session could not be restored')
+    }
+    const storage = persistent ? localStorage : sessionStorage
+    storage.setItem(refreshTokenStorageKey, payload.refresh_token)
+    renderPilotSelection(payload.access_token, payload.pilots)
+  } catch {
+    clearStoredSession()
+    renderAuthentication()
+  }
+}
+
+void restoreStoredSession()
 
 function launchGame(
   pilotAccessToken: string,
@@ -456,6 +490,7 @@ appRoot.innerHTML = `
       <div id="system-status" class="status"><span class="status-dot"></span> LOCAL SYSTEM · PROTOTYPE</div>
       <nav class="topbar-actions" aria-label="Major functions">
         <button id="topbar-map" type="button" title="Open system map">MAP</button>
+        <button id="topbar-ship" type="button" title="View current ship">SHIP</button>
         <button id="topbar-wallet" type="button" title="View wallet">WALLET</button>
       </nav>
     </header>
@@ -499,7 +534,7 @@ appRoot.innerHTML = `
       <p id="cargo-pickup-feedback" class="inventory-feedback" role="status"></p>
       <span id="target-lock-progress" class="target-lock-progress"><span></span></span>
     </section>
-    <dialog id="target-details" class="target-details-dialog" aria-labelledby="target-details-title"><header><div><p class="eyebrow">TARGET INTEL</p><h2 id="target-details-title"></h2></div><button id="close-target-details" type="button" aria-label="Close target details">×</button></header><dl id="target-details-content"></dl></dialog>
+    <dialog id="target-details" class="target-details-dialog" aria-labelledby="target-details-title"><header><div><p class="eyebrow">TARGET INTEL</p><h2 id="target-details-title"></h2></div><button id="close-target-details" type="button" aria-label="Close target details">×</button></header><dl id="target-details-content"></dl><button id="scan-target-assay" type="button" aria-label="Scan asteroid composition" title="Scan asteroid composition" hidden>${createElement(ScanLine, { width: 20, height: 20, 'aria-hidden': 'true' }).outerHTML}</button><p id="target-scan-status" role="status"></p></dialog>
     <section id="target-list" class="target-list" aria-label="Nearby targets">
       <div class="target-list-heading"><p class="eyebrow">TARGETS</p></div>
       <div class="target-list-filters" role="group" aria-label="Target filters"><button type="button" data-target-filter="all" aria-pressed="true">ALL</button><button type="button" data-target-filter="asteroid" aria-pressed="false">ORES</button><button type="button" data-target-filter="player" aria-pressed="false">SHIPS</button></div>
@@ -554,6 +589,7 @@ appRoot.innerHTML = `
           <button id="system-map-scan" class="system-map-refresh" type="button" aria-label="Scan surrounding space" title="Scan surrounding space">${createElement(ScanLine).outerHTML}</button>
           <button id="system-map-sensor-range-toggle" class="system-map-refresh" type="button" aria-label="Hide sensor range" aria-pressed="true" title="Hide sensor range">${createElement(Eye).outerHTML}</button>
           <button id="system-map-refresh" class="system-map-refresh" type="button" aria-label="Refresh system map" title="Refresh system map">${createElement(RefreshCw).outerHTML}</button>
+          <button id="system-map-destinations-toggle" class="system-map-refresh" type="button" aria-label="Open destinations" aria-expanded="false" title="Open destinations">${createElement(PanelRightOpen).outerHTML}</button>
           <button id="system-map-close" class="game-modal-close" type="button" aria-label="Close system map" title="Close system map">${createElement(X).outerHTML}</button>
         </div></header>
         <div class="system-map-layout">
@@ -563,20 +599,18 @@ appRoot.innerHTML = `
               <div id="system-map-surveys" aria-hidden="true"></div>
               <div id="system-map-sensor-range" class="system-map-sensor-range" title="Current sensor range"></div>
               <div id="system-map-boundary" class="system-map-boundary" aria-hidden="true"></div>
-              <svg id="system-map-sectors" class="system-map-sectors" aria-label="Kepler space sectors"></svg>
-              <div id="system-map-sector-labels" class="system-map-sector-labels" aria-hidden="true"></div>
+              <svg id="system-map-zones" class="system-map-zones" role="img" aria-label="Resource class boundaries"></svg>
               <div id="system-map-cell-labels" class="system-map-cell-labels" aria-hidden="true"></div>
-              <button class="system-poi system-poi-star is-selected" type="button" data-poi="primary-star" aria-pressed="true"><span>PRIMARY STAR</span></button>
-              <button class="system-poi system-poi-world" type="button" data-poi="starter-world" aria-pressed="false"><span>STARTER WORLD</span></button>
-              <button class="system-poi system-poi-station" type="button" data-poi="kepler-station" aria-pressed="false"><span>KEPLER STATION</span></button>
+              ${systemPoiDefinitions.map((poi) => `<button class="system-poi system-poi-${poi.mapKind}${poi.id === 'primary-star' ? ' is-selected' : ''}" type="button" data-poi="${poi.id}" aria-pressed="${poi.id === 'primary-star'}"><span>${poi.name}</span></button>`).join('')}
               <div id="system-map-discoveries" class="system-map-discoveries" aria-label="Scanned asteroid fields"></div>
               <span id="system-map-player" class="system-map-player" title="Your ship"><span class="system-map-player-heading" aria-hidden="true"></span></span>
               <div id="system-map-contacts" class="system-map-contacts" aria-label="Live contacts"></div>
             </div>
+            <div id="system-map-zone-legend" class="system-map-zone-legend" aria-label="Resource zone classes"></div>
             <div class="system-map-ruler"><span id="system-map-ruler-label"></span><i id="system-map-ruler-line"></i></div>
             <div id="system-map-grid-label" class="system-map-grid-label"></div>
+            <aside id="system-map-destinations-cabinet" class="system-map-destinations-cabinet" aria-label="Charted destinations" aria-hidden="true"><header><p class="eyebrow">CHARTED DESTINATIONS</p><button id="system-map-destinations-close" type="button" aria-label="Close destinations" title="Close destinations">${createElement(PanelRightClose).outerHTML}</button></header><nav id="system-map-destinations" aria-label="Charted destinations"></nav></aside>
           </div>
-          <aside class="poi-details"><div aria-live="polite"><p id="poi-type" class="eyebrow">STAR</p><h2 id="poi-name">PRIMARY STAR</h2><p id="poi-distance" class="poi-distance">0.0 km</p><p id="poi-description" class="modal-copy">The system's primary stellar body and central navigation reference.</p><p id="poi-coordinates" class="poi-coordinates"></p></div><button id="warp-action" class="warp-action" type="button" hidden>WARP TO SELECTED POI</button><p class="eyebrow poi-chart-heading">CHARTED DESTINATIONS</p><nav id="system-map-destinations" aria-label="Charted destinations"></nav></aside>
         </div>
         <footer class="system-map-footer"><span>100 x 100 CELLS / 100,000 km PER SIDE</span><span id="system-map-survey-status">0 SESSION SCANS</span><span>STAR ORIGIN / 0, 0, 0</span></footer>
       </section>
@@ -623,6 +657,7 @@ const refiningPanel = document.querySelector<HTMLElement>('#refining-panel')
 const gameMenuToggle = document.querySelector<HTMLButtonElement>('#game-menu-toggle')
 const gameMenuActions = document.querySelector<HTMLElement>('#game-menu-actions')
 const topbarMap = document.querySelector<HTMLButtonElement>('#topbar-map')
+const topbarShip = document.querySelector<HTMLButtonElement>('#topbar-ship')
 const topbarWallet = document.querySelector<HTMLButtonElement>('#topbar-wallet')
 const gameModal = document.querySelector<HTMLElement>('#game-modal')
 const gameModalEyebrow = document.querySelector<HTMLElement>('#game-modal-eyebrow')
@@ -637,17 +672,15 @@ const systemMapClose = document.querySelector<HTMLButtonElement>('#system-map-cl
 const systemMapRefresh = document.querySelector<HTMLButtonElement>('#system-map-refresh')
 const systemMapZoomOut = document.querySelector<HTMLButtonElement>('#system-map-zoom-out')
 const systemMapZoomIn = document.querySelector<HTMLButtonElement>('#system-map-zoom-in')
+const systemMapDestinationsToggle = document.querySelector<HTMLButtonElement>('#system-map-destinations-toggle')
+const systemMapDestinationsClose = document.querySelector<HTMLButtonElement>('#system-map-destinations-close')
+const systemMapDestinationsCabinet = document.querySelector<HTMLElement>('#system-map-destinations-cabinet')
 const systemMapDisplay = document.querySelector<HTMLElement>('.system-map-display')
 const systemMapWorld = document.querySelector<HTMLElement>('#system-map-world')
 const systemMapPlayer = document.querySelector<HTMLElement>('#system-map-player')
 const systemMapContacts = document.querySelector<HTMLElement>('#system-map-contacts')
 const systemMapDiscoveries = document.querySelector<HTMLElement>('#system-map-discoveries')
-const poiType = document.querySelector<HTMLElement>('#poi-type')
-const poiName = document.querySelector<HTMLElement>('#poi-name')
-const poiDistance = document.querySelector<HTMLElement>('#poi-distance')
-const poiDescription = document.querySelector<HTMLElement>('#poi-description')
 const systemPois = document.querySelectorAll<HTMLButtonElement>('[data-poi]')
-const warpAction = document.querySelector<HTMLButtonElement>('#warp-action')
 const warpOverlay = document.querySelector<HTMLElement>('#warp-overlay')
 const warpStars = document.querySelector<HTMLElement>('#warp-stars')
 const targetWindow = document.querySelector<HTMLElement>('#target-window')
@@ -663,6 +696,11 @@ const viewTargetDetails = document.querySelector<HTMLButtonElement>('#view-targe
 const targetDetails = document.querySelector<HTMLDialogElement>('#target-details')
 const targetDetailsTitle = document.querySelector<HTMLElement>('#target-details-title')
 const targetDetailsContent = document.querySelector<HTMLElement>('#target-details-content')
+const scanTargetAssay = document.querySelector<HTMLButtonElement>('#scan-target-assay')
+const targetScanStatus = document.querySelector<HTMLElement>('#target-scan-status')
+type ScannedMineral = { definition_id: string; definition_version?: number; version?: number; percentage: number }
+let scannedAsteroid: { id: string; assay: ScannedMineral[] } | undefined
+let sensorScanPending = false
 const targetListItems = document.querySelector<HTMLElement>('#target-list-items')
 const targetFilterButtons = document.querySelectorAll<HTMLButtonElement>('[data-target-filter]')
 const powerDisplay = document.querySelector<HTMLElement>('#ship-power')
@@ -700,7 +738,7 @@ function showGameToast(message: string) {
 }
 const shipDestroyedOverlay = document.querySelector<HTMLElement>('#ship-destroyed-overlay')
 const destructionCause = document.querySelector<HTMLElement>('#destruction-cause')
-let playerMapPosition = { x: 3_000_000_000, y: 480, z: -50_000 }
+let playerMapPosition = { x: -2_600_000_000, y: 480, z: -4_500_050_000 }
 let playerMapYaw = 0
 let selectedTarget: { id?: string; name: string; kind: 'asteroid' | 'pilot' | 'cargo' | 'warpable' | 'station' | 'planet'; shipType?: string; jettisonedItemId?: string; position: Vector3; oreRemainingCubicMeters: number; initialOreCubicMeters: number; locked: boolean; locking: boolean; lockProgress: number } | undefined
 let lockedTarget: typeof selectedTarget
@@ -757,30 +795,15 @@ function closeGameModal() {
   gameModalActions?.replaceChildren()
 }
 
-const poiDetails: Record<PoiName, PoiDetails> = {
-  'primary-star': { type: 'STAR', name: 'PRIMARY STAR', description: 'The system primary and central navigation reference.', position: { x: 0, y: 0, z: 0 } },
-  'starter-world': { type: 'TERRESTRIAL WORLD', name: 'STARTER WORLD', description: 'A temperate starter world supporting Kepler Station operations.', position: { x: 3_000_000_000, y: 0, z: 0 } },
-  'kepler-station': { type: 'ORBITAL STATION', name: 'KEPLER STATION', description: 'A protected orbital outpost. Docking is available inside the station shield.', position: { x: 3_000_000_000, y: 480, z: -50_000 } },
-}
+const poiDetails: Record<PoiName, PoiDetails> = Object.fromEntries(systemPoiDefinitions.map((poi) => [poi.id, {
+  type: poi.type, name: poi.name, description: poi.description, position: poi.position,
+}]))
 let selectedPoi: PoiName = 'primary-star'
 const discoveredFields = new Map<string, DiscoveredField>()
 
 function distanceToPoi(name: PoiName): number {
   const destination = poiDetails[name].position
   return Math.hypot(destination.x - playerMapPosition.x, destination.y - playerMapPosition.y, destination.z - playerMapPosition.z)
-}
-
-function updateSelectedPoiDetails() {
-  const details = poiDetails[selectedPoi]
-  const distance = distanceToPoi(selectedPoi)
-  if (!poiType || !poiName || !poiDistance || !poiDescription || !warpAction) return
-  poiType.textContent = details.type
-  poiName.textContent = details.name
-  poiDistance.textContent = distance >= 1_000 ? `${(distance / 1_000).toFixed(1)} km` : `${distance.toFixed(0)} m`
-  poiDescription.textContent = details.description
-  const coordinates = document.querySelector<HTMLElement>('#poi-coordinates')
-  if (coordinates) coordinates.textContent = `X ${formatMapDistance(details.position.x)} / Y ${formatMapDistance(details.position.y)} / Z ${formatMapDistance(details.position.z)}`
-  warpAction.hidden = distance <= 100_000 || !isInSystemSpace
 }
 
 function closeSystemMap() {
@@ -793,7 +816,6 @@ function openSystemMap() {
   systemMapModal.removeAttribute('hidden')
   resetSystemMapToPlayerCell()
   renderSystemMapDestinations()
-  updateSelectedPoiDetails()
   const scan = document.querySelector<HTMLButtonElement>('#system-map-scan')
   if (scan) scan.disabled = !isInSystemSpace
   systemMapClose?.focus()
@@ -802,21 +824,8 @@ function openSystemMap() {
 const systemMapHalfSpanMeters = 5_000_000_000
 const systemMapCellSizeMeters = 100_000_000
 const systemMapMaximumZoom = 100_000_000
-const systemMapSectorNames = [
-  'AURORA REACH', 'CALDERA DRIFT', 'CINDER VEIL', 'DELPHI EXPANSE', 'ECHO WILDS',
-  'FARADAY SPUR', 'GILDED MARCH', 'HELIX SHROUD', 'IONIAN SHELF', 'JANUS RIFT',
-  'KITEWAY', 'LANTERN DEEP', 'MORROW LINE', 'NADIR FIELDS', 'ORISON BEND',
-  'PEREGRINE WAKE', 'QUARTZ FRONT', 'RADIANT STEPPE', 'SABLE CORRIDOR', 'TIDAL VALE',
-  'UMBRA BASIN', 'VANTAGE MERE', 'WRAITH PASS', 'XENON REACH', 'ZENITH CROWN',
-]
-const systemMapSectorVertices = [
-  [[0, 0], [18, 0], [39, 0], [61, 0], [83, 0], [100, 0]],
-  [[0, 17], [21, 14], [37, 18], [63, 15], [80, 20], [100, 16]],
-  [[0, 38], [16, 42], [42, 35], [58, 41], [85, 37], [100, 43]],
-  [[0, 57], [23, 54], [36, 62], [65, 56], [82, 61], [100, 55]],
-  [[0, 81], [18, 85], [41, 78], [59, 84], [87, 80], [100, 86]],
-  [[0, 100], [20, 100], [38, 100], [62, 100], [81, 100], [100, 100]],
-] as const
+let mapResourceZones: MapResourceZone[] = []
+let mapSystemRadiusMeters = 3_100_000_000
 let systemMapZoom = 1
 let systemMapPan = { x: 0, y: 0 }
 let systemMapDrag: { pointerId: number; startX: number; startY: number; panX: number; panY: number; moved: boolean } | undefined
@@ -826,12 +835,23 @@ let systemMapZoomTarget = 1
 let systemMapPanTarget = { x: 0, y: 0 }
 let systemMapViewportSide = 600
 let systemMapSensorRangeVisible = true
+let systemMapDestinationsOpen = false
 const systemMapSurveys: { x: number; y: number; z: number; radius: number }[] = []
 function isInVisibleSystemMapRange(position: { x: number; z: number }): boolean {
   if (!systemMapDisplay) return true
   const point = projectSystemMapPosition(position)
   return point.x >= 0 && point.x <= systemMapDisplay.clientWidth
     && point.y >= 0 && point.y <= systemMapDisplay.clientHeight
+}
+
+function setSystemMapDestinationsOpen(open: boolean) {
+  systemMapDestinationsOpen = open
+  systemMapDestinationsCabinet?.classList.toggle('is-open', open)
+  systemMapDestinationsCabinet?.setAttribute('aria-hidden', String(!open))
+  systemMapDestinationsToggle?.setAttribute('aria-expanded', String(open))
+  systemMapDestinationsToggle?.setAttribute('aria-label', open ? 'Close destinations' : 'Open destinations')
+  systemMapDestinationsToggle?.setAttribute('title', open ? 'Close destinations' : 'Open destinations')
+  systemMapDestinationsToggle?.replaceChildren(createElement(open ? PanelRightClose : PanelRightOpen))
 }
 
 function systemMapPixelsPerMeter() {
@@ -932,50 +952,43 @@ function updateSystemMapZoom() {
   const boundary = document.querySelector<HTMLElement>('#system-map-boundary')
   if (boundary) {
     boundary.hidden = systemMapZoom > 3
-    const side = systemMapHalfSpanMeters * 2 * scale
+    const side = mapSystemRadiusMeters * 2 * scale
     boundary.style.cssText = `left:${origin.x - side / 2}px;top:${origin.y - side / 2}px;width:${side}px;height:${side}px`
   }
   if (systemMapZoomIn) systemMapZoomIn.disabled = systemMapZoom >= systemMapMaximumZoom
   if (systemMapZoomOut) systemMapZoomOut.disabled = systemMapZoom <= 1
-  updateSystemMapSectors()
+  updateSystemMapZones()
   updateSystemMapCellLabels()
   updateSystemMapMarkers()
 }
 
-function updateSystemMapSectors() {
-  const sectors = document.querySelector<SVGSVGElement>('#system-map-sectors')
-  const labels = document.querySelector<HTMLElement>('#system-map-sector-labels')
-  if (!sectors || !labels) return
+function updateSystemMapZones() {
+  const overlay = document.querySelector<SVGSVGElement>('#system-map-zones')
+  const legend = document.querySelector<HTMLElement>('#system-map-zone-legend')
+  if (!overlay || !legend) return
   const svgNamespace = 'http://www.w3.org/2000/svg'
-  const coordinate = (point: readonly [number, number]) => projectSystemMapPosition({
-    x: (point[0] - 50) * systemMapCellSizeMeters,
-    z: (50 - point[1]) * systemMapCellSizeMeters,
-  })
-  const sectorCells = Array.from({ length: 5 }, (_, row) => Array.from({ length: 5 }, (_, column) => {
-    const points = [
-      systemMapSectorVertices[row]![column]!, systemMapSectorVertices[row]![column + 1]!,
-      systemMapSectorVertices[row + 1]![column + 1]!, systemMapSectorVertices[row + 1]![column]!,
-    ]
-    return { points, name: systemMapSectorNames[row * 5 + column]! }
-  })).flat()
-  sectors.replaceChildren(...sectorCells.map((sector) => {
-    const path = document.createElementNS(svgNamespace, 'path')
-    path.setAttribute('d', `${sector.points.map((point, index) => {
-      const projected = coordinate(point)
-      return `${index === 0 ? 'M' : 'L'}${projected.x} ${projected.y}`
-    }).join(' ')} Z`)
-    return path
-  }))
-  const showLabels = systemMapSectorNames.length > 0 && systemMapCellSizeMeters * systemMapPixelsPerMeter() >= 4
-  labels.replaceChildren(...(showLabels ? sectorCells.map((sector) => {
-    const center = sector.points.reduce((total, point) => ({ x: total.x + point[0], y: total.y + point[1] }), { x: 0, y: 0 })
+  const scale = systemMapPixelsPerMeter()
+  const bands = document.createElementNS(svgNamespace, 'g')
+  for (const zone of [...mapResourceZones].sort((left, right) => right.zone_class - left.zone_class)) {
+    const circle = document.createElementNS(svgNamespace, 'path')
+    circle.setAttribute('d', resourceZonePath(zone, projectSystemMapPosition, scale))
+    circle.dataset.zoneId = zone.zone_id
+    circle.setAttribute('fill', zone.display_color)
+    circle.setAttribute('fill-opacity', '0.16')
+    circle.setAttribute('stroke', zone.display_color)
+    circle.setAttribute('stroke-opacity', '0.6')
+    const title = document.createElementNS(svgNamespace, 'title')
+    title.textContent = `Class ${zone.zone_class}`
+    circle.append(title)
+    bands.append(circle)
+  }
+  overlay.replaceChildren(bands)
+  legend.replaceChildren(...mapResourceZones.map((zone) => {
     const label = document.createElement('span')
-    const point = coordinate([center.x / sector.points.length, center.y / sector.points.length])
-    label.textContent = sector.name
-    label.style.left = `${point.x}px`
-    label.style.top = `${point.y}px`
+    label.style.setProperty('--zone-color', zone.display_color)
+    label.textContent = `Class ${zone.zone_class}`
     return label
-  }) : []))
+  }))
 }
 
 function updateSystemMapCellLabels() {
@@ -1073,6 +1086,9 @@ function updateSystemMapMarkers() {
         systemMapDiscoveries.append(marker)
       }
       const position = { x: field.position_x, z: field.position_z }
+      const zone = resourceZoneAt(mapResourceZones, position.x, position.z)
+      marker.style.color = zone?.display_color ?? ''
+      marker.title = `${field.display_name}${zone ? ` / Class ${zone.zone_class}` : ''}`
       positionSystemMapMarker(marker, position)
       marker.hidden = !isInVisibleSystemMapRange(position)
       marker.classList.toggle('is-selected', selectedPoi === poiId)
@@ -1102,7 +1118,7 @@ function updateSystemMapMarkers() {
   layoutSystemMapLabels()
   if (!systemMapContacts) return
   const contacts = (scene.getTargetables?.() ?? []).filter((target) => (
-    systemMapWorld?.dataset.detail === 'local' && (target.kind === 'asteroid' || target.kind === 'player')
+    systemMapWorld?.dataset.detail === 'local' && target.kind === 'asteroid'
       && Math.hypot(target.position.x - playerMapPosition.x, target.position.y - playerMapPosition.y, target.position.z - playerMapPosition.z) <= currentSensorRange()
       && isInVisibleSystemMapRange({ x: target.position.x, z: target.position.z })
   ))
@@ -1124,7 +1140,9 @@ function layoutSystemMapLabels() {
     const width = Math.min(180, (label.textContent?.length ?? 0) * 6.5)
     for (const offset of [{ x: 18, y: -10 }, { x: -width - 18, y: -10 }, { x: -width / 2, y: 24 }, { x: -width / 2, y: -48 }]) {
       const box = { left: point.x + offset.x, top: point.y + offset.y, right: point.x + offset.x + width, bottom: point.y + offset.y + 34 }
-      if (box.left < 8 || box.top < 42 || box.right > (systemMapDisplay?.clientWidth ?? 0) - 8 || box.bottom > (systemMapDisplay?.clientHeight ?? 0) - 52) continue
+      const legend = document.querySelector<HTMLElement>('#system-map-zone-legend')
+      const labelTop = Math.max(42, (legend?.offsetTop ?? 44) + (legend?.offsetHeight ?? 0) + 12)
+      if (box.left < 8 || box.top < labelTop || box.right > (systemMapDisplay?.clientWidth ?? 0) - 8 || box.bottom > (systemMapDisplay?.clientHeight ?? 0) - 52) continue
       if (occupied.some((other) => box.left < other.right + 8 && box.right > other.left - 8 && box.top < other.bottom + 4 && box.bottom > other.top - 4)) continue
       label.style.cssText = `left:calc(50% + ${offset.x}px);top:calc(50% + ${offset.y}px);width:${width}px`
       label.hidden = false
@@ -1158,7 +1176,7 @@ async function refreshSystemMap() {
   if (systemMapRefresh?.disabled) return
   systemMapRefresh?.setAttribute('aria-busy', 'true')
   try {
-    await Promise.all([refreshNearbyAsteroids(), refreshNearbyJettisonedItems()])
+    await Promise.all([loadDiscoveryBootstrap(), refreshNearbyAsteroids(), refreshNearbyJettisonedItems()])
     updateSystemMapMarkers()
   } finally {
     systemMapRefresh?.removeAttribute('aria-busy')
@@ -1167,7 +1185,6 @@ async function refreshSystemMap() {
 
 function selectPoi(name: PoiName) {
   selectedPoi = name
-  updateSelectedPoiDetails()
   systemMapWorld?.querySelectorAll<HTMLElement>('[data-poi]').forEach((poi) => {
     const isSelected = poi.dataset.poi === name
     poi.classList.toggle('is-selected', isSelected)
@@ -1220,6 +1237,42 @@ async function openWallet() {
     }
   } catch {
     if (gameModal?.dataset.view === 'wallet') gameModalContent.innerHTML = '<p class="modal-copy">Unable to load wallet balance.</p>'
+  }
+}
+
+function shipStatisticLabel(name: string): string {
+  return name.replaceAll('_', ' ').toUpperCase()
+}
+
+function shipStatisticValue(name: string, value: number): string {
+  if (name.includes('range') || name.includes('speed')) return `${value.toLocaleString()} m`
+  if (name.includes('mass')) return `${value.toLocaleString()} kg`
+  return Number.isInteger(value) ? value.toLocaleString() : value.toFixed(2)
+}
+
+function renderShipDossier() {
+  if (!gameModalContent || !fittingSnapshot) return
+  const fittings = fittingSnapshot.fitted_modules?.map((module) => `<li><strong>${module.display_name}</strong><span>${module.slot_location.replaceAll('_', ' ').toUpperCase()} ${module.slot_index + 1}</span><small>${module.durability.toFixed(0)}% integrity · ${module.mass_kg.toLocaleString()} kg</small></li>`).join('') || '<li class="ship-dossier-empty">No modules are fitted.</li>'
+  const statistics = Object.entries(fittingSnapshot.statistics ?? {}).filter(([, value]) => Number.isFinite(value)).map(([name, value]) => `<div><dt>${shipStatisticLabel(name)}</dt><dd>${shipStatisticValue(name, value)}</dd></div>`).join('') || '<p class="ship-dossier-empty">Operational statistics are unavailable.</p>'
+  gameModalContent.innerHTML = `<section class="ship-dossier-overview"><p class="eyebrow">${fittingSnapshot.hull_definition_id?.replace(/^hull\./, '').replaceAll('_', ' ') ?? 'STARTER CORVETTE'}</p><dl><div><dt>STATUS</dt><dd>${isInSystemSpace ? 'IN SPACE' : 'DOCKED'}</dd></div><div><dt>HULL</dt><dd>${Math.ceil(shipHull)}%</dd></div><div><dt>SHIELDS</dt><dd>${Math.ceil(shipShields)}%</dd></div><div><dt>POWER</dt><dd>${shipPowerMegajoules.toFixed(2)} MJ</dd></div><div><dt>FUEL</dt><dd>${shipFuelLiters.toFixed(2)} L</dd></div><div><dt>CARGO</dt><dd>${cargoCubicMeters.toFixed(2)} / ${cargoCapacityCubicMeters.toFixed(2)} M3</dd></div></dl></section><section class="ship-dossier-section"><p class="eyebrow">FITTED MODULES</p><ul class="ship-dossier-fittings">${fittings}</ul></section><section class="ship-dossier-section"><p class="eyebrow">SHIP STATISTICS</p><dl class="ship-dossier-statistics">${statistics}</dl></section>`
+}
+
+async function openShipDossier() {
+  if (locationTransitionPending || !gameModal || !gameModalEyebrow || !gameModalTitle || !gameModalContent || !gameModalActions) return
+  closeSystemMap()
+  invalidateInventoryView()
+  gameModal.dataset.view = 'ship'
+  gameModalEyebrow.textContent = 'CURRENT VESSEL'
+  gameModalTitle.textContent = 'SHIP DOSSIER'
+  gameModalContent.innerHTML = '<p class="modal-copy">Loading ship systems...</p>'
+  gameModalActions.innerHTML = ''
+  gameModal.removeAttribute('hidden')
+  gameModalClose?.focus()
+  try {
+    await loadActiveFitting()
+    renderShipDossier()
+  } catch {
+    gameModalContent.innerHTML = '<p class="modal-copy">Ship systems are temporarily unavailable.</p>'
   }
 }
 
@@ -1281,6 +1334,7 @@ async function saveAdminSettings(configuration: AdminConfiguration) {
 async function saveShipState(dockedStationName: string | null, position = playerMapPosition) {
   const response = await fetch(`${apiBaseUrl}/auth/ship-state`, {
       method: 'PUT',
+      keepalive: true,
       headers: {
         authorization: `Bearer ${pilotAccessToken}`,
         'content-type': 'application/json',
@@ -2059,6 +2113,7 @@ gameMenuToggle?.addEventListener('click', () => {
   gameMenuToggle.setAttribute('aria-expanded', String(!isOpen))
 })
 topbarMap?.addEventListener('click', openSystemMap)
+topbarShip?.addEventListener('click', () => void openShipDossier())
 topbarWallet?.addEventListener('click', () => void openWallet())
 document.querySelectorAll<HTMLButtonElement>('[data-modal]').forEach((button) => {
   button.addEventListener('click', () => {
@@ -2090,6 +2145,8 @@ window.addEventListener('keydown', handleGameNavigationKeyDown)
 systemMapClose?.addEventListener('click', closeSystemMap)
 document.querySelector<HTMLElement>('[data-system-map-close]')?.addEventListener('click', closeSystemMap)
 systemMapRefresh?.addEventListener('click', () => void refreshSystemMap())
+systemMapDestinationsToggle?.addEventListener('click', () => setSystemMapDestinationsOpen(!systemMapDestinationsOpen))
+systemMapDestinationsClose?.addEventListener('click', () => setSystemMapDestinationsOpen(false))
 systemMapZoomOut?.addEventListener('click', () => changeSystemMapZoom(0.5))
 systemMapZoomIn?.addEventListener('click', () => changeSystemMapZoom(2))
 document.querySelector('#system-map-recenter')?.addEventListener('click', resetSystemMapToPlayerCell)
@@ -2189,9 +2246,6 @@ systemMapDisplay?.addEventListener('click', (event) => {
   systemMapSuppressClick = false
 }, true)
 systemPois.forEach((poi) => poi.addEventListener('click', () => selectPoi(poi.dataset.poi as PoiName)))
-warpAction?.addEventListener('click', () => {
-  warpToPoi(selectedPoi)
-})
 
 function toggleHardpoint(slot: HTMLButtonElement) {
   if (!selectedTarget || slot.disabled) {
@@ -2309,15 +2363,68 @@ approachTarget?.addEventListener('click', () => {
   if (scene.approachTarget?.() && collisionAlert) collisionAlert.textContent = 'APPROACHING TARGET'
 })
 
-function openTargetDetails() {
+function renderTargetDetails() {
   if (!selectedTarget || !targetDetails || !targetDetailsTitle || !targetDetailsContent) return
   const distance = Vector3.Distance(new Vector3(playerMapPosition.x, playerMapPosition.y, playerMapPosition.z), selectedTarget.position)
   const range = distance >= 1_000 ? `${(distance / 1_000).toFixed(1)} km` : `${distance.toFixed(0)} m`
   const rows = [['Type', selectedTarget.kind], ['Range', range]]
   if (selectedTarget.kind === 'asteroid') rows.push(['Ore remaining', `${selectedTarget.oreRemainingCubicMeters.toFixed(1)} m3`])
+  if (selectedTarget.kind === 'asteroid') {
+    if (scannedAsteroid && scannedAsteroid.id === selectedTarget.id && selectedTarget.oreRemainingCubicMeters >= 1) {
+      for (const mineral of scannedAsteroid.assay) {
+        rows.push([`${mineral.definition_id.replaceAll('_', ' ')} (v${mineral.definition_version ?? mineral.version ?? 1})`, `${mineral.percentage}%`])
+      }
+    } else rows.push(['Assay', 'Not scanned'])
+  }
+  if (scanTargetAssay) {
+    scanTargetAssay.hidden = selectedTarget.kind !== 'asteroid'
+    scanTargetAssay.disabled = sensorScanPending || !isInSystemSpace || !selectedTarget.id || selectedTarget.oreRemainingCubicMeters < 1
+  }
   targetDetailsTitle.textContent = selectedTarget.name
   targetDetailsContent.innerHTML = rows.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('')
-  targetDetails.showModal()
+}
+
+function openTargetDetails() {
+  if (!selectedTarget) return
+  renderTargetDetails()
+  targetDetails?.showModal()
+}
+
+scanTargetAssay?.addEventListener('click', () => void scanSelectedAsteroid())
+
+async function scanSelectedAsteroid() {
+  const asteroidId = selectedTarget?.kind === 'asteroid' ? selectedTarget.id : undefined
+  if (!asteroidId || sensorScanPending || !isInSystemSpace || scanTargetAssay?.disabled) return
+  sensorScanPending = true
+  renderTargetDetails()
+  if (targetScanStatus) targetScanStatus.textContent = 'Scanning...'
+  try {
+    await saveShipState(null, playerMapPosition)
+    if (!targetDetails?.isConnected) return
+    const response = await fetch(`${apiBaseUrl}/mining/asteroids/${encodeURIComponent(asteroidId)}/scan`, {
+      method: 'POST', headers: { authorization: `Bearer ${pilotAccessToken}` },
+    })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({})) as { detail?: string }
+      throw new Error(error.detail ?? `Scan failed (${response.status})`)
+    }
+    const payload = await response.json() as { asteroid_id: string; mineral_assay: ScannedMineral[]; power_megajoules: number }
+    if (!targetDetails?.isConnected) return
+    shipPowerMegajoules = payload.power_megajoules
+    scene.setPowerMegajoules?.(shipPowerMegajoules)
+    renderSavedShipState()
+    if (selectedTarget?.id === asteroidId && payload.asteroid_id === asteroidId && selectedTarget.oreRemainingCubicMeters >= 1) {
+      scannedAsteroid = { id: asteroidId, assay: payload.mineral_assay }
+      if (targetScanStatus) targetScanStatus.textContent = 'Scan complete.'
+    }
+  } catch (error) {
+    if (targetDetails?.isConnected && selectedTarget?.id === asteroidId && targetScanStatus) {
+      targetScanStatus.textContent = error instanceof Error ? error.message : 'Scan failed.'
+    }
+  } finally {
+    sensorScanPending = false
+    if (targetDetails?.isConnected) renderTargetDetails()
+  }
 }
 
 viewTargetDetails?.addEventListener('click', openTargetDetails)
@@ -2376,6 +2483,7 @@ function createFlightScene(
     initialFuelLiters: shipFuelLiters,
     initialCargoCubicMeters: cargoCubicMeters,
     initialMaximumCargoCubicMeters: cargoCapacityCubicMeters,
+    maximumSublightSpeedMetersPerSecond: 300,
     initialLaunchSpeed,
     initialFlightAssistEnabled,
     onWarpUpdate(isWarping, phase) {
@@ -2384,7 +2492,15 @@ function createFlightScene(
       warpOverlay?.setAttribute('data-phase', phase)
     },
     onTargetSelectionChange(target) {
+      if (selectedTarget?.id !== target?.id || (target?.oreRemainingCubicMeters ?? 0) < 1) {
+        scannedAsteroid = undefined
+        if (targetScanStatus) targetScanStatus.textContent = ''
+      }
       selectedTarget = target
+      if (targetDetails?.open) {
+        if (target) renderTargetDetails()
+        else targetDetails.close()
+      }
       if (target?.locked || target?.locking) lockedTarget = target
       else if (lockedTarget?.id === target?.id) lockedTarget = undefined
       updateTargetWindow()
@@ -2499,7 +2615,6 @@ function createFlightScene(
         updateTargetList()
         updateSystemMapMarkers()
       }
-      updateSelectedPoiDetails()
       if (performance.now() - lastAsteroidSnapshotAt >= 3_000) {
         lastAsteroidSnapshotAt = performance.now()
         void refreshNearbyAsteroids()
@@ -2528,7 +2643,7 @@ renderSavedShipState()
 let isInSystemSpace = !savedShipState.docked_station_name
 let lastAsteroidSnapshotAt = 0
 // Initialize before constructing a scene: its callbacks can reference this socket.
-const realtimeUrl = `${apiBaseUrl.replace(/^http/, 'ws').replace('/api/v1', '')}/api/v1/realtime?token=${encodeURIComponent(pilotAccessToken)}`
+const realtimeUrl = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/api/v1/realtime?token=${encodeURIComponent(pilotAccessToken)}`
 let realtimeSocket: WebSocket | undefined
 let realtimeReconnectTimer: number | undefined
 let realtimeReconnectEnabled = true
@@ -2543,6 +2658,7 @@ async function loadActiveFitting() {
   const snapshot = await response.json() as FittingSnapshot
   if (!snapshot.statistics) return
   fittingSnapshot = snapshot
+  scene.setMaximumSublightSpeedMetersPerSecond?.(snapshot.statistics.maximum_speed ?? 300)
   updateTargetList()
 }
 
@@ -2567,8 +2683,11 @@ async function loadDiscoveryBootstrap() {
     headers: { authorization: `Bearer ${pilotAccessToken}` },
   })
   if (!response.ok) return
-  const payload = await response.json() as { discovered_fields: DiscoveredField[] }
+  const payload = await response.json() as { discovered_fields: DiscoveredField[]; resource_zones?: MapResourceZone[]; system?: { radius_meters: number } }
+  mapResourceZones = payload.resource_zones ?? []
+  if (payload.system) mapSystemRadiusMeters = payload.system.radius_meters
   revealDiscoveredFields(payload.discovered_fields)
+  updateSystemMapZoom()
 }
 
 async function refreshNearbyAsteroids() {
@@ -2625,7 +2744,9 @@ async function refreshNearbyJettisonedItems() {
 async function runSensorScan() {
   const sensorButton = document.querySelector<HTMLButtonElement>('[data-core-system="sensors"]')
   const mapScanButton = document.querySelector<HTMLButtonElement>('#system-map-scan')
-  if (sensorButton?.disabled || sensorButton?.getAttribute('aria-busy') === 'true' || !isInSystemSpace) return
+  if (sensorScanPending || sensorButton?.disabled || sensorButton?.getAttribute('aria-busy') === 'true' || !isInSystemSpace) return
+  sensorScanPending = true
+  renderTargetDetails()
   sensorButton?.setAttribute('aria-busy', 'true')
   mapScanButton?.setAttribute('aria-busy', 'true')
   const survey = { ...playerMapPosition, radius: currentSensorRange() }
@@ -2640,8 +2761,9 @@ async function runSensorScan() {
       showGameToast(response.status === 429 ? 'SENSORS RECHARGING' : body.detail?.toUpperCase() ?? `SENSOR SCAN FAILED (${response.status})`)
       return
     }
-    const payload = await response.json() as { newly_discovered_fields: DiscoveredField[]; power_megajoules: number; cooldown_seconds: number }
+    const payload = await response.json() as { newly_discovered_fields: DiscoveredField[]; resource_zones?: MapResourceZone[]; power_megajoules: number; cooldown_seconds: number }
     shipPowerMegajoules = payload.power_megajoules
+    scene.setPowerMegajoules?.(shipPowerMegajoules)
     renderSavedShipState()
     scene.emitSensorPing?.()
     systemMapSurveys.push(survey)
@@ -2651,6 +2773,8 @@ async function runSensorScan() {
     const surveyStatus = document.querySelector('#system-map-survey-status')
     if (surveyStatus) surveyStatus.textContent = `${systemMapSurveys.length} SESSION SCAN${systemMapSurveys.length === 1 ? '' : 'S'}`
     revealDiscoveredFields(payload.newly_discovered_fields)
+    mapResourceZones = payload.resource_zones ?? mapResourceZones
+    updateSystemMapZoom()
     showGameToast(payload.newly_discovered_fields.length > 0
       ? `SCAN COMPLETE: ${payload.newly_discovered_fields.length} FIELD${payload.newly_discovered_fields.length === 1 ? '' : 'S'} DISCOVERED`
       : 'SCAN COMPLETE: NO NEW SIGNALS')
@@ -2658,6 +2782,8 @@ async function runSensorScan() {
   } catch {
     showGameToast('SENSOR SCAN FAILED: CONNECTION UNAVAILABLE')
   } finally {
+    sensorScanPending = false
+    renderTargetDetails()
     sensorButton?.removeAttribute('aria-busy')
     mapScanButton?.removeAttribute('aria-busy')
   }
@@ -2786,7 +2912,7 @@ async function changeDockedState(docking: boolean) {
     if (button) { button.disabled = true; button.setAttribute('aria-busy', 'true') }
   }
   renderActiveInventory()
-  const position = docking ? { ...playerMapPosition } : { x: 3_000_000_000, y: 480, z: -49_990.5 }
+  const position = docking ? { ...playerMapPosition } : { x: -2_600_000_000, y: 480, z: -4_500_049_990.5 }
   try {
     await saveShipState(docking ? 'KEPLER STATION' : null, position)
   } catch (error) {
@@ -2867,8 +2993,22 @@ stationServiceBack?.addEventListener('click', () => {
 exitServicesAction?.addEventListener('click', closeStationServices)
 
 if (import.meta.hot) {
-  import.meta.hot.dispose(() => scene.dispose())
+  import.meta.hot.dispose(() => {
+    checkpointBeforeExit()
+    scene.dispose()
+  })
 }
 
-window.addEventListener('beforeunload', () => scene.dispose(), { once: true })
+let exitCheckpointStarted = false
+function checkpointBeforeExit() {
+  if (exitCheckpointStarted) return
+  exitCheckpointStarted = true
+  const dockedStationName = document.querySelector('.game-shell')?.classList.contains('is-docked') ? 'KEPLER STATION' : null
+  void saveShipState(dockedStationName).catch(() => undefined)
+}
+
+window.addEventListener('pagehide', () => {
+  checkpointBeforeExit()
+  scene.dispose()
+}, { once: true })
 }

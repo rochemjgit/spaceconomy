@@ -1,3 +1,5 @@
+import { resourceZoneAt, resourceZonePath, type ResourceZone } from './resource-zones'
+import { systemPois as systemPoiDefinitions } from './system-pois'
 import './admin.css'
 
 type InventorySummary = {
@@ -90,10 +92,24 @@ type SystemState = {
   players: PlayerMapPresence[]
   asteroid_fields: AsteroidFieldMapPresence[]
   system_radius_meters: number
+  resource_zones: ResourceZone[]
 }
+
+type ResourceCell = {
+  cell_x: number
+  cell_z: number
+  zone_class: number
+  overridden: boolean
+  min_x: number
+  max_x: number
+  min_z: number
+  max_z: number
+}
+
 
 type Panel = 'overview' | 'state' | 'inventory' | 'market' | 'refining' | 'navigation'
 type PopulationView = 'control' | 'map'
+type PopulationScope = 'npcs' | 'players'
 
 type SystemPoint = {
   name: string
@@ -102,7 +118,7 @@ type SystemPoint = {
   z: number
 }
 
-const apiBaseUrl = 'http://127.0.0.1:8000/api/v1/admin'
+const apiBaseUrl = '/api/v1/admin'
 const app = document.querySelector<HTMLDivElement>('#app')
 
 if (!app) throw new Error('Application root was not found.')
@@ -111,25 +127,28 @@ const appRoot = app
 let npcs: NpcState[] = []
 let players: PlayerMapPresence[] = []
 let asteroidFields: AsteroidFieldMapPresence[] = []
+let resourceZones: ResourceZone[] = []
 let selectedPilotId = new URLSearchParams(window.location.search).get('pilot_id')
 let populationView: PopulationView = new URLSearchParams(window.location.search).get('view') === 'map' ? 'map' : 'control'
+let populationScope: PopulationScope = new URLSearchParams(window.location.search).get('population') === 'players' ? 'players' : 'npcs'
 let activePanel: Panel = 'overview'
 let npcFilter = ''
 let mapZoom = 1
 let mapPan = { x: 0, y: 0 }
 let mapZoomTarget = 1
 let mapPanTarget = { x: 0, y: 0 }
-let mapDrag: { pointerId: number; startX: number; startY: number; panX: number; panY: number } | undefined
+let mapDrag: { pointerId: number; startX: number; startY: number; panX: number; panY: number; moved: boolean } | undefined
 let mapAnimation: number | undefined
 let mapRefreshTimer: number | undefined
+let mapRefreshInterval: number | undefined
+let selectedMapCell: { x: number; z: number } | undefined
+let selectedMapCellDetails: ResourceCell | undefined
 const systemMapHalfExtentMeters = 5_000_000_000
 const systemMapCellSizeMeters = 100_000_000
 const systemMapMaximumZoom = 100_000_000
-const systemPoints: SystemPoint[] = [
-  { name: 'PRIMARY STAR', kind: 'star', x: 0, z: 0 },
-  { name: 'STARTER WORLD', kind: 'world', x: 3_000_000_000, z: 0 },
-  { name: 'KEPLER STATION', kind: 'station', x: 3_000_000_000, z: -50_000 },
-]
+const systemPoints: SystemPoint[] = systemPoiDefinitions.map((poi) => ({
+  name: poi.name, kind: poi.mapKind, x: poi.position.x, z: poi.position.z,
+}))
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>'"]/g, (character) => ({
@@ -175,17 +194,113 @@ function setStatus(message: string, tone: 'success' | 'error' | 'neutral' = 'neu
   status.dataset.tone = tone
 }
 
-function systemMapMarkup(): string {
-  const poiCount = systemPoints.length + asteroidFields.length + npcs.length + players.length
-  return `<section id="admin-system-chart" class="admin-system-chart" aria-label="Kepler system chart showing all points of interest"><header class="admin-system-chart-heading"><div><p class="eyebrow">KEPLER / ADMINISTRATIVE NAVIGATION</p><h3 id="admin-system-map-title">KEPLER SYSTEM</h3></div><div class="map-controls"><button id="map-fullscreen" type="button" aria-label="Enter fullscreen map" title="Enter fullscreen map">&#x26F6;</button><button id="map-recenter" type="button" aria-label="Recenter map" title="Recenter map">&#8982;</button><button id="map-zoom-out" type="button" aria-label="Zoom out" title="Zoom out">−</button><button id="map-zoom-in" type="button" aria-label="Zoom in" title="Zoom in">+</button></div></header><div class="admin-system-map-viewport" aria-label="Kepler system grid with every point of interest"><div class="admin-system-map-scale" aria-hidden="true"><span id="admin-system-map-coordinate">ALL POIS: ${poiCount}</span><span>X / Z PLANE</span></div><div id="system-map-canvas" class="admin-system-map ${mapZoom >= 10 ? 'is-detail-scale' : ''}" role="list" style="--map-marker-scale:${1 / mapZoom};transform:translate(${mapPan.x}px,${mapPan.y}px) scale(${mapZoom})">${systemPoints.map((point) => {
+function systemMapMarkersMarkup(): string {
+  const zones = [...resourceZones].sort((left, right) => right.zone_class - left.zone_class)
+  const overlay = `<svg class="resource-zone-overlay" aria-label="Resource class boundaries" role="img">${zones.map((zone) => `<path data-zone-id="${escapeHtml(zone.zone_id)}" fill="${escapeHtml(zone.display_color)}" fill-opacity="0.16" stroke="${escapeHtml(zone.display_color)}" stroke-opacity="0.6"><title>Class ${zone.zone_class}</title></path>`).join('')}</svg><div class="resource-zone-legend" aria-label="Resource zone classes">${resourceZones.map((zone) => `<span style="--zone-color:${escapeHtml(zone.display_color)}">Class ${zone.zone_class}</span>`).join('')}</div>`
+  const selection = selectedMapCell ? `<div class="map-cell-selection" data-selected-cell-x="${selectedMapCell.x}" data-selected-cell-z="${selectedMapCell.z}" aria-label="Selected cell X ${selectedMapCell.x}, Z ${selectedMapCell.z}"></div>` : ''
+  return `${overlay}${selection}${systemPoints.map((point) => {
     return `<div class="map-point map-point-${point.kind}" data-map-x="${point.x}" data-map-z="${point.z}" title="${point.name}"><span></span><strong>${point.name}</strong></div>`
   }).join('')}${asteroidFields.map((field) => {
-    return `<div class="map-field" data-map-x="${field.position_x}" data-map-z="${field.position_z}" title="${escapeHtml(field.display_name)}"><span></span><strong>${escapeHtml(field.display_name)}</strong></div>`
+    const zone = resourceZoneAt(resourceZones, field.position_x, field.position_z)
+    const zoneLabel = zone ? ` / Class ${zone.zone_class}` : ''
+    return `<div class="map-field" data-map-x="${field.position_x}" data-map-z="${field.position_z}"${zone ? ` style="color:${escapeHtml(zone.display_color)}"` : ''} title="${escapeHtml(field.display_name)}${zoneLabel}"><span${zone ? ` style="background:${escapeHtml(zone.display_color)}"` : ''}></span><strong>${escapeHtml(field.display_name)}${zoneLabel}</strong></div>`
   }).join('')}${npcs.map((npc) => {
     return `<button class="map-npc state-${npc.lifecycle_state}" data-map-x="${npc.position_x}" data-map-z="${npc.position_z}" data-npc-id="${npc.pilot_id}" type="button" aria-label="Open ${escapeHtml(npc.display_name)} details"><span></span><strong>${escapeHtml(npc.display_name)}</strong><small>${escapeHtml(npc.behavior_state.replaceAll('_', ' '))}</small></button>`
-  }).join('')}${players.map((player) => {
-    return `<div class="map-player" data-map-x="${player.position_x}" data-map-z="${player.position_z}" title="${escapeHtml(player.display_name)} - ${player.location_kind}"><span></span><strong>${escapeHtml(player.display_name)}</strong><small>${player.location_kind === 'docked' ? 'docked' : 'in space'}</small></div>`
-  }).join('')}</div><div class="admin-system-map-ruler" aria-hidden="true"><span id="admin-system-map-ruler-label">1,000,000 km</span><i id="admin-system-map-ruler-line"></i></div><div class="admin-system-map-footer" aria-hidden="true"><span id="admin-system-map-grid-label">100 x 100 CELLS / ADMINISTRATIVE ALL-POI OVERLAY</span><span>${npcs.length} NPCS / ${players.length} PLAYERS / ${asteroidFields.length} FIELDS</span></div></div><div class="map-legend"><span><i class="map-point-star"></i> Star</span><span><i class="map-point-world"></i> World</span><span><i class="map-point-station"></i> Station</span><span><i class="map-field"></i> Active field</span><span><i class="state-active"></i> NPC</span><span><i class="map-player"></i> Player</span></div></section>`
+  }).join('')}${players.map((player, index) => {
+    return `<button class="map-player" data-map-x="${player.position_x}" data-map-z="${player.position_z}" data-map-stack-index="${index}" data-player-id="${player.pilot_id}" type="button" aria-label="Open ${escapeHtml(player.display_name)} details"><span></span><strong>${escapeHtml(player.display_name)}</strong><small>${player.location_kind === 'docked' ? 'docked' : 'in space'}</small></button>`
+  }).join('')}`
+}
+
+function systemMapMarkup(): string {
+  const poiCount = systemPoints.length + asteroidFields.length + npcs.length + players.length
+  return `<section id="admin-system-chart" class="admin-system-chart" aria-label="Kepler system chart showing all points of interest"><header class="admin-system-chart-heading"><div><p class="eyebrow">KEPLER / ADMINISTRATIVE NAVIGATION</p><h3 id="admin-system-map-title">KEPLER SYSTEM</h3></div><div class="map-controls"><button id="map-fullscreen" type="button" aria-label="Enter fullscreen map" title="Enter fullscreen map">&#x26F6;</button><button id="map-recenter" type="button" aria-label="Recenter map" title="Recenter map">&#8982;</button><button id="map-zoom-out" type="button" aria-label="Zoom out" title="Zoom out">−</button><button id="map-zoom-in" type="button" aria-label="Zoom in" title="Zoom in">+</button></div></header><div class="admin-system-map-viewport" aria-label="Kepler system grid with every point of interest"><div class="admin-system-map-scale" aria-hidden="true"><span id="admin-system-map-coordinate">ALL POIS: ${poiCount}</span><span>X / Z PLANE</span></div><div id="system-map-canvas" class="admin-system-map ${mapZoom >= 10 ? 'is-detail-scale' : ''}" role="list" style="--map-marker-scale:${1 / mapZoom};transform:translate(${mapPan.x}px,${mapPan.y}px) scale(${mapZoom})">${systemMapMarkersMarkup()}</div><div class="admin-system-map-ruler" aria-hidden="true"><span id="admin-system-map-ruler-label">1,000,000 km</span><i id="admin-system-map-ruler-line"></i></div><div class="admin-system-map-footer" aria-hidden="true"><span id="admin-system-map-grid-label">100 x 100 CELLS / ADMINISTRATIVE ALL-POI OVERLAY</span><span id="admin-system-map-counts">${npcs.length} NPCS / ${players.length} PLAYERS / ${asteroidFields.length} FIELDS</span></div></div><div id="map-cell-drawer-host">${selectedCellDrawerMarkup()}</div><div class="map-legend"><span><i class="map-point-star"></i> Star</span><span><i class="map-point-world"></i> World</span><span><i class="map-point-station"></i> Station</span><span><i class="map-field"></i> Active field</span><span><i class="state-active"></i> NPC</span><span><i class="map-player"></i> Player</span></div></section>`
+}
+
+function selectedCellDrawerMarkup(): string {
+  if (!selectedMapCell) return ''
+  const details = selectedMapCellDetails
+  if (!details) return `<aside id="map-cell-drawer" class="map-cell-drawer is-open"><p class="eyebrow">SELECTED CELL</p><h3>X ${selectedMapCell.x} / Z ${selectedMapCell.z}</h3><p>Loading cell properties...</p></aside>`
+  return `<aside id="map-cell-drawer" class="map-cell-drawer is-open"><header><div><p class="eyebrow">SELECTED CELL</p><h3>X ${details.cell_x} / Z ${details.cell_z}</h3></div><button id="close-map-cell-drawer" type="button" aria-label="Close cell editor" title="Close cell editor">&#x2715;</button></header><dl><dt>X bounds</dt><dd>${formatMapDistance(details.min_x)} to ${formatMapDistance(details.max_x)}</dd><dt>Z bounds</dt><dd>${formatMapDistance(details.min_z)} to ${formatMapDistance(details.max_z)}</dd><dt>Source</dt><dd>${details.overridden ? 'Administrator override' : 'Generated distribution'}</dd></dl><form id="map-cell-form"><label>RESOURCE CLASS <select name="zone_class">${Array.from({ length: 10 }, (_, index) => index + 1).map((zoneClass) => `<option value="${zoneClass}"${zoneClass === details.zone_class ? ' selected' : ''}>Class ${zoneClass}</option>`).join('')}</select></label><button type="submit">SAVE CLASS</button></form></aside>`
+}
+
+function updateSelectedCellDrawer() {
+  const host = document.querySelector<HTMLElement>('#map-cell-drawer-host')
+  if (!host) return
+  host.innerHTML = selectedCellDrawerMarkup()
+  document.querySelector<HTMLButtonElement>('#close-map-cell-drawer')?.addEventListener('click', () => {
+    selectedMapCell = undefined
+    selectedMapCellDetails = undefined
+    host.innerHTML = ''
+    const selection = document.querySelector<HTMLElement>('.map-cell-selection')
+    selection?.remove()
+    updateMapView()
+  })
+  document.querySelector<HTMLFormElement>('#map-cell-form')?.addEventListener('submit', (event) => {
+    event.preventDefault()
+    if (!selectedMapCell) return
+    const form = new FormData(event.currentTarget as HTMLFormElement)
+    void saveSelectedMapCellClass(Number(form.get('zone_class')))
+  })
+}
+
+async function loadSelectedMapCell() {
+  if (!selectedMapCell) return
+  const selected = { ...selectedMapCell }
+  try {
+    const details = await request<ResourceCell>(`/resource-cells/${selected.x}/${selected.z}`)
+    if (!selectedMapCell || selectedMapCell.x !== selected.x || selectedMapCell.z !== selected.z) return
+    selectedMapCellDetails = details
+    updateSelectedCellDrawer()
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : 'Unable to load cell properties.', 'error')
+  }
+}
+
+async function saveSelectedMapCellClass(zoneClass: number) {
+  if (!selectedMapCell) return
+  try {
+    selectedMapCellDetails = await request<ResourceCell>(
+      `/resource-cells/${selectedMapCell.x}/${selectedMapCell.z}`,
+      { method: 'PATCH', body: JSON.stringify({ zone_class: zoneClass }) },
+    )
+    const state = await request<SystemState>('/system/state')
+    resourceZones = state.resource_zones
+    refreshSystemMapData()
+    updateSelectedCellDrawer()
+    setStatus(`Cell X ${selectedMapCell.x} / Z ${selectedMapCell.z} set to class ${zoneClass}.`, 'success')
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : 'Unable to save cell class.', 'error')
+  }
+}
+
+function openPilot(button: HTMLButtonElement) {
+  selectedPilotId = button.dataset.npcId ?? button.dataset.playerId ?? null
+  populationView = 'control'
+  activePanel = 'overview'
+  window.history.pushState({}, '', `/npc.html?pilot_id=${selectedPilotId}`)
+  render()
+}
+
+function bindMapMarkerEvents() {
+  document.querySelectorAll<HTMLButtonElement>('#system-map-canvas [data-npc-id], #system-map-canvas [data-player-id]').forEach((button) => {
+    button.addEventListener('click', () => openPilot(button))
+  })
+}
+
+function refreshSystemMapData(): boolean {
+  const canvas = document.querySelector<HTMLElement>('#system-map-canvas')
+  if (!canvas) return false
+  canvas.innerHTML = systemMapMarkersMarkup()
+  const poiCount = systemPoints.length + asteroidFields.length + npcs.length + players.length
+  const mapPopulationCount = document.querySelector<HTMLElement>('#admin-map-population-count')
+  if (mapPopulationCount) mapPopulationCount.textContent = `${npcs.length} NPCS · ${players.length} PLAYERS`
+  const mapCounts = document.querySelector<HTMLElement>('#admin-system-map-counts')
+  if (mapCounts) mapCounts.textContent = `${npcs.length} NPCS / ${players.length} PLAYERS / ${asteroidFields.length} FIELDS`
+  const coordinate = document.querySelector<HTMLElement>('#admin-system-map-coordinate')
+  if (coordinate) coordinate.textContent = `ALL POIS: ${poiCount}`
+  bindMapMarkerEvents()
+  updateMapView()
+  return true
 }
 
 function formatMapDistance(meters: number): string {
@@ -290,14 +405,39 @@ function updateMapView() {
   canvas.style.backgroundSize = `${step * scale}px ${step * scale}px`
   const viewportWidth = viewport?.clientWidth || 800
   const viewportHeight = viewport?.clientHeight || 600
+  canvas.querySelectorAll<SVGPathElement>('[data-zone-id]').forEach((circle) => {
+    const zone = resourceZones.find((entry) => entry.zone_id === circle.dataset.zoneId)
+    if (!zone) return
+    circle.setAttribute('d', resourceZonePath(zone, (position) => ({
+      x: viewportWidth / 2 + position.x * scale + mapPan.x,
+      y: viewportHeight / 2 - position.z * scale + mapPan.y,
+    }), scale))
+  })
   canvas.querySelectorAll<HTMLElement>('[data-map-x][data-map-z]').forEach((marker) => {
     const x = Number(marker.dataset.mapX)
     const z = Number(marker.dataset.mapZ)
     marker.style.left = `${viewportWidth / 2 + (x + mapPan.x / scale) * scale}px`
     marker.style.top = `${viewportHeight / 2 - (z - mapPan.y / scale) * scale}px`
+    const stackIndex = Number(marker.dataset.mapStackIndex)
+    if (Number.isFinite(stackIndex)) {
+      const angle = stackIndex * (Math.PI * 2 / 6) - Math.PI / 2
+      marker.style.setProperty('--map-stack-x', `${Math.cos(angle) * 18}px`)
+      marker.style.setProperty('--map-stack-y', `${Math.sin(angle) * 18}px`)
+    }
   })
+  const selectedCell = canvas.querySelector<HTMLElement>('[data-selected-cell-x][data-selected-cell-z]')
+  if (selectedCell) {
+    const cellX = Number(selectedCell.dataset.selectedCellX)
+    const cellZ = Number(selectedCell.dataset.selectedCellZ)
+    selectedCell.style.left = `${viewportWidth / 2 + (cellX * systemMapCellSizeMeters + mapPan.x / scale) * scale}px`
+    selectedCell.style.top = `${viewportHeight / 2 - ((cellZ + 1) * systemMapCellSizeMeters - mapPan.y / scale) * scale}px`
+    selectedCell.style.width = `${systemMapCellSizeMeters * scale}px`
+    selectedCell.style.height = `${systemMapCellSizeMeters * scale}px`
+  }
   const coordinate = document.querySelector<HTMLElement>('#admin-system-map-coordinate')
-  if (coordinate) coordinate.textContent = `X ${formatMapDistance(-mapPan.x / scale)} / Z ${formatMapDistance(mapPan.y / scale)}`
+  if (coordinate) coordinate.textContent = selectedMapCell
+    ? `SELECTED CELL X ${selectedMapCell.x} / Z ${selectedMapCell.z}`
+    : `X ${formatMapDistance(-mapPan.x / scale)} / Z ${formatMapDistance(mapPan.y / scale)}`
   const title = document.querySelector<HTMLElement>('#admin-system-map-title')
   if (title) title.textContent = detail === 'local' ? 'LOCAL SPACE' : detail === 'sector' ? 'SECTOR CHART' : 'KEPLER SYSTEM'
   const gridLabel = document.querySelector<HTMLElement>('#admin-system-map-grid-label')
@@ -310,10 +450,30 @@ function updateMapView() {
   if (rulerLabel) rulerLabel.textContent = formatMapDistance(rulerDistance)
 }
 
+function selectMapCell(event: PointerEvent, viewport: HTMLElement) {
+  if ((event.target as HTMLElement).closest('[data-npc-id], [data-player-id], .map-controls')) return
+  const bounds = viewport.getBoundingClientRect()
+  const side = Math.min(viewport.clientWidth || 800, viewport.clientHeight || 600)
+  const scale = side * mapZoom / (systemMapHalfExtentMeters * 2)
+  const x = (event.clientX - bounds.left - viewport.clientWidth / 2 - mapPan.x) / scale
+  const z = (viewport.clientHeight / 2 - (event.clientY - bounds.top) + mapPan.y) / scale
+  selectedMapCell = {
+    x: Math.floor(x / systemMapCellSizeMeters),
+    z: Math.floor(z / systemMapCellSizeMeters),
+  }
+  selectedMapCellDetails = undefined
+  updateMapView()
+  updateSelectedCellDrawer()
+  void loadSelectedMapCell()
+}
+
 function npcDirectoryMarkup(): string {
   const visibleNpcs = filteredNpcs()
   const visiblePlayers = players.filter((player) => !npcFilter.trim() || [player.display_name, player.location_kind, player.station_name ?? ''].some((value) => value.toLowerCase().includes(npcFilter.trim().toLowerCase())))
-  return `<aside class="npc-directory"><label class="npc-filter">FILTER PILOTS <input id="npc-filter" type="search" value="${escapeHtml(npcFilter)}" placeholder="Name, role, state, location"></label><div class="directory-heading"><span>NPCs</span><span>${visibleNpcs.length} of ${npcs.length}</span></div>${visibleNpcs.map((npc) => `<button class="npc-row ${npc.pilot_id === selectedPilotId ? 'is-selected' : ''}" data-npc-id="${npc.pilot_id}" type="button"><span class="npc-name">${escapeHtml(npc.display_name)}</span><span class="state state-${npc.lifecycle_state}">${escapeHtml(npc.behavior_state.replaceAll('_', ' '))}</span><span class="npc-location">${escapeHtml(locationLabel(npc))}</span></button>`).join('') || '<p class="loading">No matching NPCs.</p>'}<div class="directory-heading"><span>Players</span><span>${visiblePlayers.length} of ${players.length}</span></div>${visiblePlayers.map((player) => `<button class="npc-row ${player.pilot_id === selectedPilotId ? 'is-selected' : ''}" data-player-id="${player.pilot_id}" type="button"><span class="npc-name">${escapeHtml(player.display_name)}</span><span class="state">player</span><span class="npc-location">${escapeHtml(player.location_kind === 'docked' ? player.station_name ?? 'Station' : 'Kepler system space')}</span></button>`).join('') || '<p class="loading">No matching players.</p>'}</aside>`
+  const entries = populationScope === 'npcs'
+    ? `<div class="directory-heading"><span>NPCs</span><span>${visibleNpcs.length} of ${npcs.length}</span></div>${visibleNpcs.map((npc) => `<button class="npc-row ${npc.pilot_id === selectedPilotId ? 'is-selected' : ''}" data-npc-id="${npc.pilot_id}" type="button"><span class="npc-name">${escapeHtml(npc.display_name)}</span><span class="state state-${npc.lifecycle_state}">${escapeHtml(npc.behavior_state.replaceAll('_', ' '))}</span><span class="npc-location">${escapeHtml(locationLabel(npc))}</span></button>`).join('') || '<p class="loading">No matching NPCs.</p>'}`
+    : `<div class="directory-heading"><span>Players</span><span>${visiblePlayers.length} of ${players.length}</span></div>${visiblePlayers.map((player) => `<button class="npc-row ${player.pilot_id === selectedPilotId ? 'is-selected' : ''}" data-player-id="${player.pilot_id}" type="button"><span class="npc-name">${escapeHtml(player.display_name)}</span><span class="state">player</span><span class="npc-location">${escapeHtml(player.location_kind === 'docked' ? player.station_name ?? 'Station' : 'Kepler system space')}</span></button>`).join('') || '<p class="loading">No matching players.</p>'}`
+  return `<aside class="npc-directory"><label class="npc-filter">FILTER ${populationScope === 'npcs' ? 'NPCS' : 'PLAYERS'} <input id="npc-filter" type="search" value="${escapeHtml(npcFilter)}" placeholder="Name, role, state, location"></label>${entries}</aside>`
 }
 
 function overviewMarkup(npc: NpcState): string {
@@ -393,7 +553,7 @@ function playerDetailMarkup(player: PlayerMapPresence): string {
 function render() {
   const detail = selectedNpc() ?? selectedPlayer()
   const viewMarkup = populationView === 'map'
-    ? `<button id="show-population-control" class="back-to-map" type="button">POPULATION CONTROL</button><section class="map-overview"><div class="section-heading"><div><p class="eyebrow">Kepler System</p><h2>Game State Overview</h2></div><span class="population-count">${npcs.length} NPCS · ${players.length} PLAYERS</span></div>${systemMapMarkup()}</section>`
+    ? `<button id="show-population-control" class="back-to-map" type="button">POPULATION CONTROL</button><section class="map-overview"><div class="section-heading"><div><p class="eyebrow">Kepler System</p><h2>Game State Overview</h2></div><span id="admin-map-population-count" class="population-count">${npcs.length} NPCS · ${players.length} PLAYERS</span></div>${systemMapMarkup()}</section>`
     : `<button id="show-system-map" class="back-to-map" type="button">SYSTEM MAP</button><section class="npc-population-layout npc-detail-layout">${npcDirectoryMarkup()}${detailMarkup()}</section>`
   appRoot.innerHTML = `<main class="npc-population-shell"><header class="npc-population-header"><div><a class="back-link" href="/admin.html">Administration</a><p class="eyebrow">Population Control</p><h1>${populationView === 'map' ? 'NPC System Map' : detail ? escapeHtml(detail.display_name) : 'Population Control'}</h1></div><div><p id="npc-status" data-tone="neutral">Loading population state...</p><button id="refresh-npcs" class="secondary" type="button">REFRESH</button></div></header>${viewMarkup}</main>`
   bindEvents()
@@ -402,14 +562,19 @@ function render() {
 }
 
 function syncMapAutoRefresh() {
-  const isMapVisible = populationView === 'control' && activePanel === 'navigation'
-  if (isMapVisible && mapRefreshTimer === undefined) {
-    mapRefreshTimer = window.setInterval(() => void refresh(), 1_000)
-    return
-  }
-  if (!isMapVisible && mapRefreshTimer !== undefined) {
+  const refreshInterval = populationView === 'map'
+    ? 5_000
+    : activePanel === 'navigation'
+      ? 1_000
+      : undefined
+  if (refreshInterval === mapRefreshInterval) return
+  if (mapRefreshTimer !== undefined) {
     window.clearInterval(mapRefreshTimer)
     mapRefreshTimer = undefined
+  }
+  mapRefreshInterval = refreshInterval
+  if (refreshInterval !== undefined) {
+    mapRefreshTimer = window.setInterval(() => void refresh(), refreshInterval)
   }
 }
 
@@ -419,14 +584,16 @@ async function refresh() {
     npcs = state.npcs
     players = state.players
     asteroidFields = state.asteroid_fields
-    selectedPilotId = [...npcs, ...players].some((pilot) => pilot.pilot_id === selectedPilotId) ? selectedPilotId : null
+    resourceZones = state.resource_zones ?? []
+    const visiblePilots = populationScope === 'npcs' ? npcs : players
+    selectedPilotId = visiblePilots.some((pilot) => pilot.pilot_id === selectedPilotId) ? selectedPilotId : null
     if (populationView === 'control' && selectedPilotId === null) {
-      selectedPilotId = npcs[0]?.pilot_id ?? players[0]?.pilot_id ?? null
+      selectedPilotId = visiblePilots[0]?.pilot_id ?? null
     }
-    render()
+    if (populationView !== 'map' || !refreshSystemMapData()) render()
     setStatus('Population state refreshed.', 'success')
   } catch (error) {
-    render()
+    if (populationView !== 'map' || !document.querySelector('#admin-system-chart')) render()
     setStatus(error instanceof Error ? error.message : 'Unable to load NPC population.', 'error')
   }
 }
@@ -461,7 +628,10 @@ async function deleteNpc() {
 
 function bindEvents() {
   document.querySelector<HTMLButtonElement>('#refresh-npcs')?.addEventListener('click', () => void refresh())
-  document.querySelectorAll<HTMLButtonElement>('[data-npc-id], [data-player-id]').forEach((button) => button.addEventListener('click', () => { selectedPilotId = button.dataset.npcId ?? button.dataset.playerId ?? null; populationView = 'control'; activePanel = 'overview'; window.history.pushState({}, '', `/npc.html?pilot_id=${selectedPilotId}`); render() }))
+  document.querySelectorAll<HTMLButtonElement>('[data-npc-id], [data-player-id]').forEach((button) => {
+    if (!button.closest('#system-map-canvas')) button.addEventListener('click', () => openPilot(button))
+  })
+  bindMapMarkerEvents()
   document.querySelector<HTMLButtonElement>('#show-system-map')?.addEventListener('click', () => { populationView = 'map'; window.history.pushState({}, '', '/npc.html?view=map'); render(); void refresh() })
   document.querySelector<HTMLButtonElement>('#show-population-control')?.addEventListener('click', () => { populationView = 'control'; window.history.pushState({}, '', `/npc.html?pilot_id=${selectedPilotId ?? ''}`); render() })
   document.querySelector<HTMLButtonElement>('#map-fullscreen')?.addEventListener('click', () => void toggleMapFullscreen())
@@ -478,12 +648,14 @@ function bindEvents() {
     })
   }, { passive: false })
   mapViewport?.addEventListener('pointerdown', (event) => {
-    if (mapZoom === 1 || event.button !== 0) return
-    mapDrag = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, panX: mapPan.x, panY: mapPan.y }
+    if (event.button !== 0 || (event.target as HTMLElement).closest('[data-npc-id], [data-player-id]')) return
+    mapDrag = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, panX: mapPan.x, panY: mapPan.y, moved: false }
     mapViewport.setPointerCapture(event.pointerId)
   })
   mapViewport?.addEventListener('pointermove', (event) => {
     if (!mapDrag || event.pointerId !== mapDrag.pointerId) return
+    if (Math.hypot(event.clientX - mapDrag.startX, event.clientY - mapDrag.startY) > 4) mapDrag.moved = true
+    if (mapZoom === 1) return
     mapPan = { x: mapDrag.panX + event.clientX - mapDrag.startX, y: mapDrag.panY + event.clientY - mapDrag.startY }
     mapPanTarget = { ...mapPan }
     updateMapView()
@@ -491,6 +663,7 @@ function bindEvents() {
   const stopMapPan = (event: PointerEvent) => {
     if (!mapDrag || event.pointerId !== mapDrag.pointerId) return
     if (mapViewport?.hasPointerCapture(event.pointerId)) mapViewport.releasePointerCapture(event.pointerId)
+    if (!mapDrag.moved && mapViewport) selectMapCell(event, mapViewport)
     mapDrag = undefined
   }
   mapViewport?.addEventListener('pointerup', stopMapPan)

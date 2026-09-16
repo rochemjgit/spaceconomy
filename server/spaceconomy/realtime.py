@@ -14,7 +14,7 @@ from redis.exceptions import RedisError
 
 from .config import settings
 from .db import session_factory
-from .models import Pilot
+from .models import Pilot, ShipState
 from .redis import client, event_channel, presence_key, publish_event
 
 router = APIRouter(tags=["realtime"])
@@ -35,6 +35,17 @@ def _pilot_id(token: str | None) -> UUID | None:
         return UUID(claims["pilot_id"])
     except (jwt.PyJWTError, KeyError, ValueError):
         return None
+
+
+async def _checkpoint_position(pilot_id: UUID, position: dict[str, float]) -> None:
+    """Persist the latest live in-space position for reconnect recovery."""
+    async with session_factory.begin() as session:
+        ship_state = await session.get(ShipState, pilot_id, with_for_update=True)
+        if ship_state is None or ship_state.docked_station_name:
+            return
+        ship_state.position_x = position["x"]
+        ship_state.position_y = position["y"]
+        ship_state.position_z = position["z"]
 
 
 async def _forward_events(websocket: WebSocket, pilot_id: str) -> None:
@@ -60,7 +71,8 @@ async def realtime(websocket: WebSocket) -> None:
         return
     async with session_factory() as session:
         pilot_record = await session.get(Pilot, pilot_id)
-    if pilot_record is None:
+        ship_state = await session.get(ShipState, pilot_id)
+    if pilot_record is None or ship_state is None:
         await websocket.close(code=1008)
         return
     await websocket.accept()
@@ -68,14 +80,21 @@ async def realtime(websocket: WebSocket) -> None:
     pilot_name = pilot_record.display_name
     presence_key = _presence_key()
     active_target_ids: set[str] = set()
-    is_in_space = True
+    is_in_space = ship_state.docked_station_name is None
+    last_checkpoint_at = 0.0
+    latest_position = {
+        "x": ship_state.position_x,
+        "y": ship_state.position_y,
+        "z": ship_state.position_z,
+    }
     try:
         raw_pilots = await client.hgetall(presence_key)
         pilots = [json.loads(value) for key, value in raw_pilots.items() if key.decode() != pilot_key]
         await websocket.send_json({"type": "snapshot", "payload": {"pilots": pilots}})
-        pilot = {"pilot_id": pilot_key, "display_name": pilot_name, "ship_type": "starter-corvette", "x": 3_000_000_000, "y": 480, "z": -50_000, "yaw": 0, "pitch": 0, "roll": 0}
-        await client.hset(presence_key, pilot_key, json.dumps(pilot, separators=(",", ":")))
-        await publish_event("system", SYSTEM_ID, "pilot_joined", pilot)
+        if is_in_space:
+            pilot = {"pilot_id": pilot_key, "display_name": pilot_name, "ship_type": "starter-corvette", **latest_position, "yaw": 0, "pitch": 0, "roll": 0}
+            await client.hset(presence_key, pilot_key, json.dumps(pilot, separators=(",", ":")))
+            await publish_event("system", SYSTEM_ID, "pilot_joined", pilot)
         event_task = asyncio.create_task(_forward_events(websocket, pilot_key))
         try:
             while True:
@@ -94,10 +113,19 @@ async def realtime(websocket: WebSocket) -> None:
                     continue
                 if message_type == "undocked":
                     if not is_in_space:
+                        async with session_factory() as session:
+                            ship_state = await session.get(ShipState, pilot_id)
+                        if ship_state is None:
+                            continue
                         raw_pilots = await client.hgetall(presence_key)
                         pilots = [json.loads(value) for key, value in raw_pilots.items() if key.decode() != pilot_key]
                         await websocket.send_json({"type": "snapshot", "payload": {"pilots": pilots}})
-                        pilot = {"pilot_id": pilot_key, "display_name": pilot_name, "ship_type": "starter-corvette", "x": 3_000_000_000, "y": 480, "z": -50_000, "yaw": 0, "pitch": 0, "roll": 0}
+                        latest_position = {
+                            "x": ship_state.position_x,
+                            "y": ship_state.position_y,
+                            "z": ship_state.position_z,
+                        }
+                        pilot = {"pilot_id": pilot_key, "display_name": pilot_name, "ship_type": "starter-corvette", **latest_position, "yaw": 0, "pitch": 0, "roll": 0}
                         await client.hset(presence_key, pilot_key, json.dumps(pilot, separators=(",", ":")))
                         await publish_event("system", SYSTEM_ID, "pilot_joined", pilot)
                         is_in_space = True
@@ -126,14 +154,23 @@ async def realtime(websocket: WebSocket) -> None:
                 if message_type != "movement":
                     continue
                 coordinates = [payload.get(axis) for axis in ("x", "y", "z")]
-                if not all(isinstance(value, (int, float)) and math.isfinite(value) and abs(value) <= 1_000_000 for value in coordinates):
+                if not (
+                    all(isinstance(value, (int, float)) and math.isfinite(value) for value in coordinates)
+                    and abs(coordinates[0]) <= settings.system_radius_meters
+                    and abs(coordinates[1]) <= 1_000_000
+                    and abs(coordinates[2]) <= settings.system_radius_meters
+                ):
                     continue
                 attitude = [payload.get(axis) for axis in ("yaw", "pitch", "roll")]
                 if not all(isinstance(value, (int, float)) and math.isfinite(value) and abs(value) <= math.tau for value in attitude):
                     continue
                 pilot = {"pilot_id": pilot_key, "display_name": pilot_name, "ship_type": "starter-corvette", "x": coordinates[0], "y": coordinates[1], "z": coordinates[2], "yaw": attitude[0], "pitch": attitude[1], "roll": attitude[2]}
+                latest_position = {"x": coordinates[0], "y": coordinates[1], "z": coordinates[2]}
                 await client.hset(presence_key, pilot_key, json.dumps(pilot, separators=(",", ":")))
                 await publish_event("system", SYSTEM_ID, "pilot_moved", pilot)
+                if asyncio.get_running_loop().time() - last_checkpoint_at >= 5:
+                    await _checkpoint_position(pilot_id, latest_position)
+                    last_checkpoint_at = asyncio.get_running_loop().time()
         finally:
             event_task.cancel()
             await asyncio.gather(event_task, return_exceptions=True)
@@ -141,6 +178,8 @@ async def realtime(websocket: WebSocket) -> None:
         pass
     finally:
         try:
+            if is_in_space:
+                await _checkpoint_position(pilot_id, latest_position)
             if is_in_space:
                 await client.hdel(presence_key, pilot_key)
                 await publish_event("system", SYSTEM_ID, "pilot_left", {"pilot_id": pilot_key})

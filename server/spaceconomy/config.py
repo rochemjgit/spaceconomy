@@ -37,10 +37,13 @@ class Settings(BaseSettings):
     system_radius_meters: float = 3_100_000_000
     system_crossing_seconds: float = 1_800
     object_render_radius_meters: float = 40_000
+    asteroid_spawning_enabled: bool = False
     asteroid_spawn_interval_seconds: int = 300
     asteroid_spawn_batch_size: int = 6
     asteroid_field_maximum_active_asteroids: int = 36
     asteroid_system_maximum_active_fields: int = 120
+    asteroid_field_cell_capacity: int = 20
+    asteroid_field_lifetime_seconds: int = 86_400
     world_spawn_tick_seconds: int = 30
     refinery_tick_seconds: float = 1
     manufacturing_recipe_catalog_path: str = "catalog/manufacturing_recipes.json"

@@ -42,6 +42,10 @@ def test_starter_mining_laser_effective_range_is_five_hundred_meters() -> None:
     assert MINING_LASER.effective_range_meters == 500
 
 
+def test_starter_sublight_drive_caps_speed_at_three_hundred_meters_per_second() -> None:
+    assert STARTER_MINER.base_statistics["maximum_speed"] == 300
+
+
 def test_fit_rejects_resource_overage_without_mutating_the_ship() -> None:
     service = FittingService("ship.1", "pilot.1", STARTER_MINER, "station.kepler")
     oversized_module = ModuleDefinition(

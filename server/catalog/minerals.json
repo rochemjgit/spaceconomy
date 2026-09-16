@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "minerals": [
+    {"definition_id":"iron","display_name":"Iron","industrial_role":"Hull structure and general-purpose alloys","visual_family":"metallic","display_color":"#88766a","starter_weight":240,"deep_weight":90},
+    {"definition_id":"nickel","display_name":"Nickel","industrial_role":"Heat-resistant alloys and batteries","visual_family":"metallic","display_color":"#a8ad9a","starter_weight":120,"deep_weight":85},
+    {"definition_id":"aluminum","display_name":"Aluminum","industrial_role":"Lightweight frames and propulsion assemblies","visual_family":"metallic","display_color":"#c1ccd1","starter_weight":130,"deep_weight":100},
+    {"definition_id":"titanium","display_name":"Titanium","industrial_role":"Armor and high-strength equipment","visual_family":"metallic","display_color":"#777f96","starter_weight":20,"deep_weight":100},
+    {"definition_id":"silicon","display_name":"Silicon","industrial_role":"Electronics, sensors and solar cells","visual_family":"crystalline","display_color":"#929cab","starter_weight":150,"deep_weight":100},
+    {"definition_id":"cobalt","display_name":"Cobalt","industrial_role":"Magnets, batteries and thermal equipment","visual_family":"metallic","display_color":"#637d9e","starter_weight":15,"deep_weight":85},
+    {"definition_id":"carbon","display_name":"Carbon","industrial_role":"Composites, heat shields and chemical feedstock","visual_family":"rocky","display_color":"#45494c","starter_weight":100,"deep_weight":80},
+    {"definition_id":"sulfur","display_name":"Sulfur","industrial_role":"Industrial chemistry and consumables","visual_family":"crystalline","display_color":"#c5b45e","starter_weight":55,"deep_weight":65},
+    {"definition_id":"water_ice","display_name":"Water Ice","industrial_role":"Propellant, coolant and life-support feedstock","visual_family":"icy","display_color":"#a3d7df","starter_weight":100,"deep_weight":85},
+    {"definition_id":"calcium","display_name":"Calcium","industrial_role":"Ceramics, shielding and industrial binders","visual_family":"rocky","display_color":"#d4cec0","starter_weight":60,"deep_weight":65},
+    {"definition_id":"platinum","display_name":"Platinum","industrial_role":"Catalysts and precision energy components","visual_family":"metallic","display_color":"#c3c4be","starter_weight":2,"deep_weight":45},
+    {"definition_id":"gold","display_name":"Gold","industrial_role":"Corrosion-resistant precision circuitry","visual_family":"metallic","display_color":"#c8a347","starter_weight":3,"deep_weight":45},
+    {"definition_id":"silver","display_name":"Silver","industrial_role":"High-conductivity electrical and sensor components","visual_family":"metallic","display_color":"#d5dee3","starter_weight":5,"deep_weight":55}
+  ],
+  "zone_classes": [
+    {"zone_class":1,"display_color":"#368bc1","component_weights":[75,22,2,1,0,0]},
+    {"zone_class":2,"display_color":"#319fc0","component_weights":[65,27,5,2,1,0]},
+    {"zone_class":3,"display_color":"#36b4ad","component_weights":[55,30,8,4,2,1]},
+    {"zone_class":4,"display_color":"#66bb8b","component_weights":[45,30,12,7,4,2]},
+    {"zone_class":5,"display_color":"#9ac272","component_weights":[35,30,15,10,6,4]},
+    {"zone_class":6,"display_color":"#c5c35d","component_weights":[25,30,17,13,9,6]},
+    {"zone_class":7,"display_color":"#dfb653","component_weights":[18,25,20,17,12,8]},
+    {"zone_class":8,"display_color":"#e4954f","component_weights":[12,20,20,20,16,12]},
+    {"zone_class":9,"display_color":"#dc7150","component_weights":[8,15,15,22,22,18]},
+    {"zone_class":10,"display_color":"#c64e56","component_weights":[5,10,10,20,25,30]}
+  ]
+}

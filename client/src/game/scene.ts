@@ -19,6 +19,7 @@ import {
 } from '@babylonjs/core'
 import type { ArcRotateCameraPointersInput } from '@babylonjs/core/Cameras/Inputs/arcRotateCameraPointersInput'
 import { isEditingText } from './input'
+import { planetPois, stationPois } from '../system-pois'
 
 export interface SceneController {
   dispose(): void
@@ -29,6 +30,8 @@ export interface SceneController {
   replaceJettisonedItems?(items: ServerJettisonedItem[]): void
   pickupJettisonedItem?(): Promise<boolean>
   setCargoCubicMeters?(cargoCubicMeters: number, maximumCargoCubicMeters?: number): void
+  setPowerMegajoules?(powerMegajoules: number): void
+  setMaximumSublightSpeedMetersPerSecond?(speed: number): void
   setModuleActive(moduleName: string, isActive: boolean): void
   toggleTargetLock(): void
   approachTarget?(): boolean
@@ -115,6 +118,7 @@ export interface SceneOptions {
   initialMaximumCargoCubicMeters?: number
   initialLaunchSpeed?: number
   initialFlightAssistEnabled?: boolean
+  maximumSublightSpeedMetersPerSecond?: number
   maximumTargetLocks?: number
   systemRadiusMeters?: number
   warpCruiseSpeedMetersPerSecond?: number
@@ -220,13 +224,11 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     })
     registerRenderableObject(mesh, 15_000)
   }
-  const planetWorldPosition = new Vector3(3_000_000_000, 0, 0)
-  const stationWorldPosition = planetWorldPosition.add(new Vector3(0, 480, -50_000))
+  const stationWorldPosition = new Vector3(-2_600_000_000, 480, -4_500_050_000)
   const launchWorldPosition = stationWorldPosition.add(new Vector3(0, 0, 709.5))
   const renderingOrigin = stationWorldPosition.clone()
   const toRenderPosition = (position: Vector3) => position.subtract(renderingOrigin)
   const toWorldPosition = (position: Vector3) => position.add(renderingOrigin)
-  const planetPosition = toRenderPosition(planetWorldPosition)
   const stationPosition = toRenderPosition(stationWorldPosition)
   const launchPosition = toRenderPosition(launchWorldPosition)
   const renderUnitsPerMeter = 3 / 10
@@ -269,16 +271,18 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   const starVisualScaleDistance = 60_000
   const minimumStarVisualScale = 0.18
 
-  const planet = MeshBuilder.CreateSphere('starter-world', { diameter: 20_000, segments: 32 }, scene)
-  planet.position = planetPosition
-  const planetMaterial = new StandardMaterial('starter-world-material', scene)
-  planetMaterial.diffuseColor = new Color3(0.12, 0.34, 0.58)
-  planetMaterial.specularColor = new Color3(0.08, 0.12, 0.2)
-  planet.material = planetMaterial
-  targetDescriptors.set(planet.uniqueId, { targetId: 'planet:starter-world', name: 'STARTER WORLD', kind: 'planet' })
-  targetableMeshes.set('planet:starter-world', planet)
-  registerRenderableObject(planet, 180_000)
-  registerCollisionTarget(planet, 'STARTER WORLD', 5.972e24, 10_000, true)
+  for (const poi of planetPois) {
+    const planet = MeshBuilder.CreateSphere(poi.id, { diameter: poi.planet!.diameter, segments: 32 }, scene)
+    planet.position = toRenderPosition(new Vector3(poi.position.x, poi.position.y, poi.position.z))
+    const planetMaterial = new StandardMaterial(`${poi.id}-material`, scene)
+    planetMaterial.diffuseColor = Color3.FromHexString(poi.planet!.color)
+    planetMaterial.specularColor = planetMaterial.diffuseColor.scale(0.35)
+    planet.material = planetMaterial
+    targetDescriptors.set(planet.uniqueId, { targetId: `planet:${poi.id}`, name: poi.name, kind: 'planet' })
+    targetableMeshes.set(`planet:${poi.id}`, planet)
+    registerRenderableObject(planet, 180_000)
+    registerCollisionTarget(planet, poi.name, poi.planet!.massKg, poi.planet!.diameter / 2, true)
+  }
 
   const asteroidMaterial = new StandardMaterial('server-asteroid-material', scene)
   asteroidMaterial.diffuseColor = new Color3(0.38, 0.28, 0.17)
@@ -382,6 +386,29 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     registerCollisionTarget(spoke, 'KEPLER STATION', 8_000_000_000, 75)
   }
 
+  const createStandardStation = (poi: typeof stationPois[number]) => {
+    const position = toRenderPosition(new Vector3(poi.position.x, poi.position.y, poi.position.z))
+    const marker = MeshBuilder.CreateTorus(`station-${poi.id}`, { diameter: 337.5, thickness: 24, tessellation: 32 }, scene)
+    marker.position = position
+    marker.material = stationMaterial
+    targetDescriptors.set(marker.uniqueId, { targetId: `station:${poi.id}`, name: poi.name, kind: 'station' })
+    targetableMeshes.set(`station:${poi.id}`, marker)
+    registerRenderableObject(marker, 60_000)
+    registerCollisionTarget(marker, poi.name, 8_000_000_000, 170)
+    const hub = MeshBuilder.CreateCylinder(`station-hub-${poi.id}`, { height: 36, diameter: 24, tessellation: 16 }, scene)
+    hub.position = position
+    hub.material = stationMaterial
+    registerRenderableObject(hub, 60_000)
+    for (const angle of [0, Math.PI / 2, Math.PI, Math.PI * 1.5]) {
+      const spoke = MeshBuilder.CreateBox(`station-spoke-${poi.id}`, { width: 10, height: 10, depth: 138.75 }, scene)
+      spoke.position = position.add(new Vector3(Math.sin(angle) * 81.375, 0, Math.cos(angle) * 81.375))
+      spoke.rotation.y = angle
+      spoke.material = stationMaterial
+      registerRenderableObject(spoke, 60_000)
+    }
+  }
+  stationPois.filter((poi) => poi.id !== 'kepler-station').forEach(createStandardStation)
+
   const ship = new TransformNode('starter-ship', scene)
   ship.position = options.initialPosition ? toRenderPosition(options.initialPosition) : launchPosition.clone()
   const shipMaterial = new StandardMaterial('starter-ship-material', scene)
@@ -425,7 +452,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   const hardpoint = attachShipPart(MeshBuilder.CreateCylinder('starter-ship-hardpoint-01', { height: 1.35, diameter: 0.3, tessellation: 8 }, scene), shipTrimMaterial, 1.18, -0.12, 1.1)
   hardpoint.rotation.z = Math.PI / 2
   attachShipPart(MeshBuilder.CreateCylinder('starter-ship-hardpoint-emitter', { height: 0.52, diameter: 0.36, tessellation: 8 }, scene), engineMaterial, 1.82, -0.12, 1.1).rotation.z = Math.PI / 2
-  const remotePilots = new Map<string, { ship: TransformNode; targetMesh: Mesh; destination: Vector3; snapshotPosition: Vector3; velocity: Vector3; lastSnapshotAt: number; yaw: number; pitch: number; roll: number; miningBeam?: Mesh; miningSource?: Vector3; miningTarget?: Vector3; activityMarker?: Mesh; docked?: boolean; inWarpTransit?: boolean }>()
+  const remotePilots = new Map<string, { ship: TransformNode; targetMesh: Mesh; contact: Mesh; nameplate: Mesh; destination: Vector3; snapshotPosition: Vector3; velocity: Vector3; lastSnapshotAt: number; yaw: number; pitch: number; roll: number; miningBeam?: Mesh; miningSource?: Vector3; miningTarget?: Vector3; activityMarker?: Mesh; docked?: boolean; inWarpTransit?: boolean }>()
   const updateRemotePilot = (pilot: RemotePilot) => {
     const snapshotAt = performance.now()
     const renderPosition = toRenderPosition(pilot.position)
@@ -442,6 +469,16 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       remoteHull.isPickable = true
       targetDescriptors.set(remoteHull.uniqueId, { targetId: `player:${pilot.pilotId}`, name: pilot.displayName, kind: 'pilot', pilotId: pilot.pilotId, shipType: pilot.shipType })
       targetableMeshes.set(`player:${pilot.pilotId}`, remoteHull)
+      const contactMaterial = new StandardMaterial(`remote-pilot-contact-material-${pilot.pilotId}`, scene)
+      contactMaterial.emissiveColor = new Color3(0.08, 0.9, 0.75)
+      contactMaterial.diffuseColor = new Color3(0.02, 0.2, 0.18)
+      const contact = MeshBuilder.CreateTorus(`remote-pilot-contact-${pilot.pilotId}`, { diameter: 9, thickness: 0.32, tessellation: 20 }, scene)
+      contact.material = contactMaterial
+      contact.parent = remoteShip
+      contact.position.y = 1.8
+      contact.billboardMode = Mesh.BILLBOARDMODE_ALL
+      contact.isPickable = false
+      glow.addIncludedOnlyMesh(contact)
       const remoteNose = MeshBuilder.CreateCylinder(`remote-pilot-nose-${pilot.pilotId}`, {
         height: 1.9,
         diameterTop: 0.08,
@@ -479,7 +516,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
         remoteThruster.rotation.z = side * Math.PI / 2
         remoteThruster.material = remoteEngineMaterial
       }
-      const nameplate = MeshBuilder.CreatePlane(`remote-pilot-nameplate-${pilot.pilotId}`, { width: 5, height: 0.75 }, scene)
+      const nameplate = MeshBuilder.CreatePlane(`remote-pilot-nameplate-${pilot.pilotId}`, { width: 8, height: 1.2 }, scene)
       const nameplateTexture = new DynamicTexture(`remote-pilot-nameplate-texture-${pilot.pilotId}`, { width: 512, height: 80 }, scene, true)
       nameplateTexture.hasAlpha = true
       nameplateTexture.drawText(pilot.displayName, null, 54, 'bold 44px sans-serif', '#d9f4ff', 'transparent', true)
@@ -490,15 +527,15 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
       nameplateMaterial.disableLighting = true
       nameplate.material = nameplateMaterial
       nameplate.parent = remoteShip
-      nameplate.position.y = 3
+      nameplate.position.y = 5.4
       nameplate.billboardMode = Mesh.BILLBOARDMODE_ALL
       nameplate.isPickable = false
       remoteShip.rotation.set(-pilot.pitch, pilot.yaw, pilot.roll)
-      remote = { ship: remoteShip, targetMesh: remoteHull, destination: renderPosition.clone(), snapshotPosition: renderPosition.clone(), velocity: Vector3.Zero(), lastSnapshotAt: snapshotAt, yaw: pilot.yaw, pitch: pilot.pitch, roll: pilot.roll }
+      remote = { ship: remoteShip, targetMesh: remoteHull, contact, nameplate, destination: renderPosition.clone(), snapshotPosition: renderPosition.clone(), velocity: Vector3.Zero(), lastSnapshotAt: snapshotAt, yaw: pilot.yaw, pitch: pilot.pitch, roll: pilot.roll }
       remotePilots.set(pilot.pilotId, remote)
     }
     const elapsedSeconds = Math.max(0.1, (snapshotAt - remote.lastSnapshotAt) / 1_000)
-    remote.velocity = pilot.position.subtract(remote.snapshotPosition).scale(1 / elapsedSeconds)
+    remote.velocity = renderPosition.subtract(remote.snapshotPosition).scale(1 / elapsedSeconds)
     remote.snapshotPosition.copyFrom(renderPosition)
     remote.destination.copyFrom(renderPosition)
     remote.lastSnapshotAt = snapshotAt
@@ -564,7 +601,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     remote.miningBeam.setEnabled(true)
     remote.miningSource = toRenderPosition(source)
     remote.miningTarget = toRenderPosition(target)
-    remote.miningBeam = MeshBuilder.CreateTube(remote.miningBeam.name, { path: [source, target], radius: 0.2, tessellation: 8, instance: remote.miningBeam }, scene)
+    remote.miningBeam = MeshBuilder.CreateTube(remote.miningBeam.name, { path: [remote.miningSource, remote.miningTarget], radius: 0.2, tessellation: 8, instance: remote.miningBeam }, scene)
   }
   const shipMassKg = 25_000
   const shipCollisionRadius = 3
@@ -723,7 +760,11 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   const approachDistanceMeters = 250
   const engineThrustNewtons = 550_000
   const brakingThrustNewtons = 200_000
-  const maximumSpeed = 2_500
+  const maximumSublightSpeedCapMetersPerSecond = 2_500
+  let maximumSpeed = Math.min(
+    options.maximumSublightSpeedMetersPerSecond ?? maximumSublightSpeedCapMetersPerSecond,
+    maximumSublightSpeedCapMetersPerSecond,
+  )
   let shipYaw = 0
   let shipPitch = 0
   let shipRoll = 0
@@ -1557,10 +1598,14 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     for (const [pilotId, remote] of remotePilots) {
       remote.destination.addInPlace(remote.velocity.scale(deltaSeconds))
       remote.ship.position = Vector3.Lerp(remote.ship.position, remote.destination, Math.min(1, deltaSeconds * 8))
+      const distanceToRemote = Vector3.Distance(ship.position, remote.ship.position)
       remote.ship.setEnabled(
         !remote.docked
-        && Vector3.Distance(ship.position, remote.ship.position) <= remotePilotVisibilityRangeMeters,
+        && distanceToRemote <= remotePilotVisibilityRangeMeters,
       )
+      const contactScale = Math.max(1, Math.min(1_000, distanceToRemote / 250))
+      remote.contact.scaling.setAll(contactScale)
+      remote.nameplate.scaling.setAll(contactScale)
       remote.ship.rotation.x += (-remote.pitch - remote.ship.rotation.x) * Math.min(1, deltaSeconds * 8)
       remote.ship.rotation.y += Math.atan2(Math.sin(remote.yaw - remote.ship.rotation.y), Math.cos(remote.yaw - remote.ship.rotation.y)) * Math.min(1, deltaSeconds * 8)
       remote.ship.rotation.z += (remote.roll - remote.ship.rotation.z) * Math.min(1, deltaSeconds * 8)
@@ -1612,6 +1657,15 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     replaceJettisonedItems,
     pickupJettisonedItem,
     setCargoCubicMeters,
+    setPowerMegajoules(nextPowerMegajoules: number) {
+      if (!Number.isFinite(nextPowerMegajoules)) return
+      powerMegajoules = Math.max(0, Math.min(maximumPowerMegajoules, nextPowerMegajoules))
+      updateShipStatus()
+    },
+    setMaximumSublightSpeedMetersPerSecond(speed: number) {
+      maximumSpeed = Math.max(0, Math.min(speed, maximumSublightSpeedCapMetersPerSecond))
+      if (velocity.length() > maximumSpeed) velocity.normalize().scaleInPlace(maximumSpeed)
+    },
     setModuleActive,
     toggleTargetLock,
     clearTargetSelection,

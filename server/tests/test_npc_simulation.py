@@ -25,6 +25,7 @@ from spaceconomy.models import (
 )
 from spaceconomy.npc import (
     _advance_warp,
+    _directional_warp_destination,
     _npc_listing_price,
     _select_mining_asteroid,
     ensure_miner_equipment,
@@ -211,6 +212,13 @@ def test_npc_warp_advances_through_player_like_entry_and_exit_phases() -> None:
     assert runtime.warp_capacity == 88
 
 
+def test_npc_directional_warp_stops_at_player_like_maximum_range() -> None:
+    destination = _directional_warp_destination(
+        (0.0, 0.0, 0.0), (900_000.0, 0.0, 0.0)
+    )
+    assert destination == (450_000.0, 0.0, 0.0)
+
+
 def test_npc_mining_target_selection_avoids_claimed_local_asteroids() -> None:
     field_id = uuid4()
     asteroid_one = Asteroid(
@@ -231,6 +239,27 @@ def test_npc_mining_target_selection_avoids_claimed_local_asteroids() -> None:
         (0, 0, 0), uuid4(), [asteroid_one, asteroid_two], {chosen.id}
     )
     assert replacement is not None and replacement.id != chosen.id
+
+
+def test_npc_mining_target_selection_prefers_less_contested_belts() -> None:
+    crowded_field_id, open_field_id = uuid4(), uuid4()
+    crowded_asteroids = [
+        Asteroid(
+            id=uuid4(), field_id=crowded_field_id, spawn_seed=index, position_x=index * 100,
+            position_y=0, position_z=0, radius_meters=10, composition="Ore", mineral_assay="[]",
+            initial_volume_cubic_meters=10, remaining_volume_cubic_meters=10,
+        )
+        for index in (1, 2)
+    ]
+    open_asteroid = Asteroid(
+        id=uuid4(), field_id=open_field_id, spawn_seed=3, position_x=500, position_y=0, position_z=0,
+        radius_meters=10, composition="Ore", mineral_assay="[]",
+        initial_volume_cubic_meters=10, remaining_volume_cubic_meters=10,
+    )
+    chosen = _select_mining_asteroid(
+        (0, 0, 0), uuid4(), [*crowded_asteroids, open_asteroid], {asteroid.id for asteroid in crowded_asteroids}
+    )
+    assert chosen is not None and chosen.field_id == open_field_id
 
 
 @pytest.mark.asyncio

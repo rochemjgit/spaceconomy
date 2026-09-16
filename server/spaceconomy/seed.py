@@ -6,6 +6,7 @@ import asyncio
 import json
 from pathlib import Path
 from typing import Any
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,9 +31,8 @@ from .fitting import (
 from .fitting import (
     ModuleDefinition as DomainModuleDefinition,
 )
+from .minerals import MineralContent, load_mineral_catalog
 from .models import (
-    Asteroid,
-    AsteroidField,
     HullDefinition,
     ManufacturingRecipe,
     ManufacturingRecipeInput,
@@ -42,10 +42,26 @@ from .models import (
     ModuleEffect,
     RefineryService,
     SolarSystem,
+    StationService,
 )
-from .world import mineral_assay_for_profile
 
 KEPLER_STATION_ID = "4e32a9a9-5551-4e3f-9b9b-b6b6e22a4f04"
+KEPLER_STATION_UUID = UUID(KEPLER_STATION_ID)
+STATION_DEFINITIONS = (
+    ("kepler-station", "KEPLER STATION", KEPLER_STATION_UUID),
+    ("cinder-station", "CINDER GATE", uuid5(NAMESPACE_URL, "spaceconomy:station:cinder-station")),
+    ("meridian-station", "MERIDIAN EXCHANGE", uuid5(NAMESPACE_URL, "spaceconomy:station:meridian-station")),
+    ("verdance-station", "VERDANCE HAVEN", uuid5(NAMESPACE_URL, "spaceconomy:station:verdance-station")),
+    ("pelagos-station", "PELAGOS ANCHORAGE", uuid5(NAMESPACE_URL, "spaceconomy:station:pelagos-station")),
+    ("emberfall-station", "EMBERFALL FORGE", uuid5(NAMESPACE_URL, "spaceconomy:station:emberfall-station")),
+    ("nacre-station", "NACRE RELAY", uuid5(NAMESPACE_URL, "spaceconomy:station:nacre-station")),
+    ("helios-station", "HELIOS CROWN", uuid5(NAMESPACE_URL, "spaceconomy:station:helios-station")),
+    ("umbra-station", "UMBRA WATCH", uuid5(NAMESPACE_URL, "spaceconomy:station:umbra-station")),
+    ("aurora-station", "AURORA SPIRE", uuid5(NAMESPACE_URL, "spaceconomy:station:aurora-station")),
+    ("farpoint-depot", "FARPOINT DEPOT", uuid5(NAMESPACE_URL, "spaceconomy:station:farpoint-depot")),
+    ("solace-array", "SOLACE ARRAY", uuid5(NAMESPACE_URL, "spaceconomy:station:solace-array")),
+    ("northwind-relay", "NORTHWIND RELAY", uuid5(NAMESPACE_URL, "spaceconomy:station:northwind-relay")),
+)
 STARTER_MODULE_DEFINITION_IDS = frozenset(
     {
         "module.mining_laser.m1",
@@ -57,47 +73,18 @@ STARTER_MODULE_DEFINITION_IDS = frozenset(
     }
 )
 
-MINERAL_DEFINITIONS = (
-    ("iron", "Iron", "scientific", "abundant"),
-    ("nickel", "Nickel", "scientific", "abundant"),
-    ("cobalt", "Cobalt", "scientific", "uncommon"),
-    ("silicon", "Silicon", "scientific", "abundant"),
-    ("magnesium", "Magnesium", "scientific", "abundant"),
-    ("aluminum", "Aluminum", "scientific", "uncommon"),
-    ("calcium", "Calcium", "scientific", "uncommon"),
-    ("titanium", "Titanium", "scientific", "uncommon"),
-    ("carbon", "Carbon", "scientific", "abundant"),
-    ("sulfur", "Sulfur", "scientific", "uncommon"),
-    ("water_ice", "Water Ice", "scientific", "abundant"),
-    ("chromium", "Chromium", "scientific", "rare"),
-    ("manganese", "Manganese", "scientific", "rare"),
-    ("platinum_group", "Platinum Group Metals", "scientific", "rare"),
-    ("aetherium", "Aetherium", "fictional", "exotic"),
-    ("gravimetric_crystal", "Gravimetric Crystal", "fictional", "exotic"),
-    ("nullite", "Nullite", "fictional", "exotic"),
-)
-
-FIELD_PROFILES = {
-    "ferrous": {
-        "variants": [{"weight": 1, "minerals": (("iron", 55, 75), ("nickel", 15, 30), ("cobalt", 2, 10), ("chromium", 0.5, 4), ("platinum_group", 0.1, 1.5))}],
-    },
-    "silicate": {
-        "variants": [{"weight": 1, "minerals": (("silicon", 28, 45), ("magnesium", 15, 30), ("aluminum", 8, 20), ("calcium", 4, 14), ("titanium", 1, 8), ("iron", 3, 12), ("nickel", 1, 6))}],
-    },
-    "rare": {
-        "variants": [
-            {"weight": 97, "minerals": (("carbon", 25, 42), ("water_ice", 18, 35), ("sulfur", 8, 20), ("iron", 8, 22), ("nickel", 3, 12), ("manganese", 0.5, 5), ("platinum_group", 0.1, 2))},
-            {"weight": 3, "minerals": (("carbon", 20, 35), ("water_ice", 12, 25), ("iron", 8, 20), ("aetherium", 0.05, 0.5), ("gravimetric_crystal", 0.05, 0.5), ("nullite", 0.05, 0.5), ("platinum_group", 1, 6))},
-        ],
-    },
-}
+async def seed_mineral_catalog() -> None:
+    """Initialize mineral defaults without modifying other catalogs or world data."""
+    async with session_factory.begin() as session:
+        for mineral in load_mineral_catalog().minerals:
+            await _upsert_mineral(session, mineral)
 
 
 async def seed_catalog() -> None:
     """Upsert the immutable catalog versions currently used by the fitting domain."""
     async with session_factory.begin() as session:
-        for definition_id, display_name, classification, rarity_tier in MINERAL_DEFINITIONS:
-            await _upsert_mineral(session, definition_id, display_name, classification, rarity_tier)
+        for mineral in load_mineral_catalog().minerals:
+            await _upsert_mineral(session, mineral)
         for hull_definition in (STARTER_MINER, COMBAT_FRIGATE, GENERALIST_HAULER):
             await _upsert_hull(session, hull_definition)
         for module_definition in (
@@ -112,11 +99,8 @@ async def seed_catalog() -> None:
             await _upsert_module(session, module_definition)
         await _upsert_starter_refinery(session)
         await _upsert_manufacturing_catalog(session)
+        await _upsert_station_services(session)
         await _upsert_system(session)
-        rows = await session.execute(select(Asteroid, AsteroidField).join(AsteroidField, Asteroid.field_id == AsteroidField.id))
-        for asteroid, field in rows:
-            if asteroid.mineral_assay == "[]":
-                asteroid.mineral_assay = mineral_assay_for_profile(json.loads(field.spawn_profile), asteroid.spawn_seed)
 
 
 async def _upsert_system(session: AsyncSession) -> SolarSystem:
@@ -132,105 +116,87 @@ async def _upsert_system(session: AsyncSession) -> SolarSystem:
     return system
 
 
-async def _upsert_asteroid_field(
-    session: AsyncSession,
-    system: SolarSystem,
-    field_key: str,
-    display_name: str,
-    position_x: float,
-    position_y: float,
-    position_z: float,
-    discovery_signature: float,
-    composition: str,
-) -> None:
-    result = await session.execute(
-        select(AsteroidField).where(
-            AsteroidField.system_id == system.id,
-            AsteroidField.field_key == field_key,
-        )
-    )
-    field = result.scalar_one_or_none()
-    values = {
-        "display_name": display_name,
-        "position_x": position_x,
-        "position_y": position_y,
-        "position_z": position_z,
-        "discovery_signature": discovery_signature,
-        "spawn_profile": json.dumps(
-            {
-                "composition": composition,
-                "variants": FIELD_PROFILES[composition]["variants"],
-                "batch_size": 4 if field_key == "kepler_test" else settings.asteroid_spawn_batch_size,
-                "maximum_active": 8 if field_key == "kepler_test" else settings.asteroid_field_maximum_active_asteroids,
-                "spawn_radius_minimum_meters": 300 if field_key == "kepler_test" else 800,
-                "spawn_radius_maximum_meters": 600 if field_key == "kepler_test" else 6_000,
-            },
-            sort_keys=True,
-        ),
-        "active": True,
-    }
-    if field is None:
-        session.add(AsteroidField(system_id=system.id, field_key=field_key, **values))
-    else:
-        for name, value in values.items():
-            setattr(field, name, value)
-
-
 async def _upsert_mineral(
     session: AsyncSession,
-    definition_id: str,
-    display_name: str,
-    classification: str,
-    rarity_tier: str,
+    mineral: MineralContent,
 ) -> None:
     row = await session.scalar(
         select(MineralDefinition).where(
-            MineralDefinition.definition_id == definition_id,
+            MineralDefinition.definition_id == mineral.definition_id,
             MineralDefinition.version == 1,
         )
     )
     values = {
-        "display_name": display_name,
-        "classification": classification,
-        "rarity_tier": rarity_tier,
+        "display_name": mineral.display_name,
+        "classification": "scientific",
+        "rarity_tier": "unrestricted",
+        "industrial_role": mineral.industrial_role,
+        "visual_family": mineral.visual_family,
+        "display_color": mineral.display_color,
         "active": True,
     }
     if row is None:
-        session.add(MineralDefinition(definition_id=definition_id, version=1, **values))
-    else:
-        for name, value in values.items():
-            setattr(row, name, value)
+        session.add(MineralDefinition(definition_id=mineral.definition_id, version=1, **values))
+    elif not row.industrial_role:
+        row.industrial_role = mineral.industrial_role
+        row.visual_family = mineral.visual_family
+        row.display_color = mineral.display_color
 
 
 async def _upsert_starter_refinery(session: AsyncSession) -> None:
-    row = await session.scalar(
-        select(RefineryService).where(
-            RefineryService.station_id == KEPLER_STATION_ID,
-            RefineryService.service_key == "starter_refinery",
-        )
-    )
-    values = {
-        "display_name": "Kepler Starter Refinery",
-        "first_pass_seconds_per_cubic_meter": 1.0,
-        "second_pass_seconds_per_cubic_meter": 1.0,
-        "first_pass_efficiency": 0.5,
-        "second_pass_efficiency": 0.5,
-        "fee_credits": 0,
-        "active_job_capacity": 1,
-        "queue_capacity": 5,
-        "active": True,
-    }
-    if row is None:
-        session.add(
-            RefineryService(
-                station_id=KEPLER_STATION_ID,
-                service_key="starter_refinery",
-                **values,
+    for _, station_name, station_id in STATION_DEFINITIONS:
+        row = await session.scalar(
+            select(RefineryService).where(
+                RefineryService.station_id == station_id,
+                RefineryService.service_key == "starter_refinery",
             )
         )
-    else:
-        for name, value in values.items():
-            setattr(row, name, value)
+        values = {
+            "display_name": f"{station_name} Refinery",
+            "first_pass_seconds_per_cubic_meter": 1.0,
+            "second_pass_seconds_per_cubic_meter": 1.0,
+            "first_pass_efficiency": 0.5,
+            "second_pass_efficiency": 0.5,
+            "fee_credits": 0,
+            "active_job_capacity": 1,
+            "queue_capacity": 5,
+            "active": True,
+        }
+        if row is None:
+            session.add(
+                RefineryService(station_id=station_id, service_key="starter_refinery", **values)
+            )
+        else:
+            for name, value in values.items():
+                setattr(row, name, value)
+
+
+async def _upsert_station_services(session: AsyncSession) -> None:
+    for service_key, display_name in (
+        ("market", "Market"),
+        ("maintenance", "Maintenance"),
+        ("fitting", "Fitting"),
+        ("refining", "Refining"),
+        ("crafting", "Crafting"),
+        ("inventory", "Inventory"),
+        ("hangar", "Hangar"),
+    ):
+        for _, _, station_id in STATION_DEFINITIONS:
+            service = await session.scalar(
+                select(StationService).where(
+                    StationService.station_id == station_id,
+                    StationService.service_key == service_key,
+                )
+            )
+            if service is None:
+                session.add(
+                    StationService(
+                        station_id=station_id,
+                        service_key=service_key,
+                        display_name=display_name,
+                        available=True,
+                    )
+                )
 
 
 def _manufacturing_catalog() -> dict[str, Any]:
