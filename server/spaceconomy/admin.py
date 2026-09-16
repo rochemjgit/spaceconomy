@@ -67,7 +67,7 @@ from .models import (
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 SessionDependency = Annotated[AsyncSession, Depends(get_session)]
-KEPLER_STATION_POSITION = (-2_600_000_000, 480, -4_500_050_000)
+KEPLER_STATION_POSITION = (-2_600_000_000, 480, -4_510_180_000)
 SYSTEM_ID = "kepler"
 
 

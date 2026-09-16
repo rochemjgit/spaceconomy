@@ -269,7 +269,7 @@ describe('checkpoint-gated location transitions', () => {
     await vi.advanceTimersByTimeAsync(0)
     expect(element('#ship-cargo').textContent).toBe('1.00 / 24.00 M3')
     expect(scenes.flight).toHaveBeenCalledTimes(2)
-    expect(scenes.options[1]!.initialPosition).toMatchObject({ x: -2_600_000_000, y: 480, z: -4_500_049_990.5 })
+    expect(scenes.options[1]!.initialPosition).toMatchObject({ x: -2_600_000_000, y: 480, z: -4_510_179_990.5 })
   })
 })
 

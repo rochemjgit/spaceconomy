@@ -19,7 +19,7 @@ import {
 } from '@babylonjs/core'
 import type { ArcRotateCameraPointersInput } from '@babylonjs/core/Cameras/Inputs/arcRotateCameraPointersInput'
 import { isEditingText } from './input'
-import { planetPois, stationPois } from '../system-pois'
+import { planetPois, primaryStarPoi, stationPois } from '../system-pois'
 
 export interface SceneController {
   dispose(): void
@@ -224,7 +224,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     })
     registerRenderableObject(mesh, 15_000)
   }
-  const stationWorldPosition = new Vector3(-2_600_000_000, 480, -4_500_050_000)
+  const stationWorldPosition = new Vector3(-2_600_000_000, 480, -4_510_180_000)
   const launchWorldPosition = stationWorldPosition.add(new Vector3(0, 0, 709.5))
   const renderingOrigin = stationWorldPosition.clone()
   const toRenderPosition = (position: Vector3) => position.subtract(renderingOrigin)
@@ -233,7 +233,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   const launchPosition = toRenderPosition(launchWorldPosition)
   const renderUnitsPerMeter = 3 / 10
   const astronomicalVisualCompression = 300_000
-  const physicalStarDiameterUnits = 1_393_000_000 * renderUnitsPerMeter
+  const physicalStarDiameterUnits = primaryStarPoi.star!.diameterKilometers * 1_000 * renderUnitsPerMeter
   const starVisualDiameter = physicalStarDiameterUnits / astronomicalVisualCompression
 
   const camera = new ArcRotateCamera(
@@ -262,7 +262,7 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
 
   const star = MeshBuilder.CreateSphere('primary-star', { diameter: starVisualDiameter, segments: 24 }, scene)
   const starMaterial = new StandardMaterial('primary-star-material', scene)
-  starMaterial.emissiveColor = new Color3(1, 0.45, 0.08)
+  starMaterial.emissiveColor = Color3.FromHexString(primaryStarPoi.star!.color)
   starMaterial.diffuseColor = new Color3(0.7, 0.16, 0.02)
   star.material = starMaterial
   targetDescriptors.set(star.uniqueId, { targetId: 'warpable:primary-star', name: 'PRIMARY STAR', kind: 'warpable' })
@@ -272,7 +272,8 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
   const minimumStarVisualScale = 0.18
 
   for (const poi of planetPois) {
-    const planet = MeshBuilder.CreateSphere(poi.id, { diameter: poi.planet!.diameter, segments: 32 }, scene)
+    const planetDiameterMeters = poi.planet!.diameterKilometers * 1_000
+    const planet = MeshBuilder.CreateSphere(poi.id, { diameter: planetDiameterMeters, segments: 32 }, scene)
     planet.position = toRenderPosition(new Vector3(poi.position.x, poi.position.y, poi.position.z))
     const planetMaterial = new StandardMaterial(`${poi.id}-material`, scene)
     planetMaterial.diffuseColor = Color3.FromHexString(poi.planet!.color)
@@ -280,8 +281,8 @@ export function createSystemScene(canvas: HTMLCanvasElement, options: SceneOptio
     planet.material = planetMaterial
     targetDescriptors.set(planet.uniqueId, { targetId: `planet:${poi.id}`, name: poi.name, kind: 'planet' })
     targetableMeshes.set(`planet:${poi.id}`, planet)
-    registerRenderableObject(planet, 180_000)
-    registerCollisionTarget(planet, poi.name, poi.planet!.massKg, poi.planet!.diameter / 2, true)
+    registerRenderableObject(planet, planetDiameterMeters / 2 + 500_000)
+    registerCollisionTarget(planet, poi.name, poi.planet!.massKg, planetDiameterMeters / 2, true)
   }
 
   const asteroidMaterial = new StandardMaterial('server-asteroid-material', scene)

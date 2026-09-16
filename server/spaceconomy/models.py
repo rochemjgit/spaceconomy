@@ -219,7 +219,7 @@ class ShipState(TimestampedModel, Base):
     pilot_id: Mapped[UUID] = mapped_column(ForeignKey("pilots.id"), primary_key=True)
     position_x: Mapped[float] = mapped_column(Float, nullable=False, default=-2_600_000_000)
     position_y: Mapped[float] = mapped_column(Float, nullable=False, default=480)
-    position_z: Mapped[float] = mapped_column(Float, nullable=False, default=-4_500_050_000)
+    position_z: Mapped[float] = mapped_column(Float, nullable=False, default=-4_510_180_000)
     docked_station_name: Mapped[str | None] = mapped_column(String(128))
     power_megajoules: Mapped[float] = mapped_column(Float, nullable=False, default=100)
     shields: Mapped[float] = mapped_column(Float, nullable=False, default=100)

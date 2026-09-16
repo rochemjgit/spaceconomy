@@ -738,7 +738,7 @@ function showGameToast(message: string) {
 }
 const shipDestroyedOverlay = document.querySelector<HTMLElement>('#ship-destroyed-overlay')
 const destructionCause = document.querySelector<HTMLElement>('#destruction-cause')
-let playerMapPosition = { x: -2_600_000_000, y: 480, z: -4_500_050_000 }
+let playerMapPosition = { x: -2_600_000_000, y: 480, z: -4_510_180_000 }
 let playerMapYaw = 0
 let selectedTarget: { id?: string; name: string; kind: 'asteroid' | 'pilot' | 'cargo' | 'warpable' | 'station' | 'planet'; shipType?: string; jettisonedItemId?: string; position: Vector3; oreRemainingCubicMeters: number; initialOreCubicMeters: number; locked: boolean; locking: boolean; lockProgress: number } | undefined
 let lockedTarget: typeof selectedTarget
@@ -1065,10 +1065,17 @@ function positionSystemMapMarker(marker: HTMLElement | null, position: { x: numb
 
 function updateSystemMapMarkers() {
   if (systemMapModal?.hidden !== false) return
+  const scale = systemMapPixelsPerMeter()
   systemPois.forEach((poi) => {
     const name = poi.dataset.poi as PoiName
     poi.setAttribute('aria-label', poiDetails[name].name)
     positionSystemMapMarker(poi, poiDetails[name].position)
+    const definition = systemPoiDefinitions.find((definition) => definition.id === name)
+    const celestialBody = definition?.planet ?? definition?.star
+    if (celestialBody) {
+      poi.style.setProperty('--world-diameter', `${Math.max(10, celestialBody.diameterKilometers * 1_000 * scale)}px`)
+      poi.style.setProperty('--world-color', celestialBody.color)
+    }
     poi.hidden = !isInVisibleSystemMapRange(poiDetails[name].position)
   })
   if (systemMapDiscoveries) {
@@ -1100,7 +1107,6 @@ function updateSystemMapMarkers() {
     systemMapPlayer.hidden = !isInVisibleSystemMapRange(playerMapPosition)
     systemMapPlayer.style.setProperty('--heading-degrees', `${playerMapYaw * 180 / Math.PI}deg`)
   }
-  const scale = systemMapPixelsPerMeter()
   const sensorRange = document.querySelector<HTMLElement>('#system-map-sensor-range')
   if (sensorRange) {
     positionSystemMapMarker(sensorRange, playerMapPosition)
@@ -2912,7 +2918,7 @@ async function changeDockedState(docking: boolean) {
     if (button) { button.disabled = true; button.setAttribute('aria-busy', 'true') }
   }
   renderActiveInventory()
-  const position = docking ? { ...playerMapPosition } : { x: -2_600_000_000, y: 480, z: -4_500_049_990.5 }
+  const position = docking ? { ...playerMapPosition } : { x: -2_600_000_000, y: 480, z: -4_510_179_990.5 }
   try {
     await saveShipState(docking ? 'KEPLER STATION' : null, position)
   } catch (error) {
